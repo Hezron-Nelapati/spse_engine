@@ -1,0 +1,493 @@
+version: "1.0"
+schema_version: 1
+
+layer_2_unit_builder:
+  min_frequency_threshold: 2
+  initial_utility_score: 0.5
+  edit_distance_cluster_threshold: 1
+  rolling_hash_window_sizes: [2, 3, 4, 5, 6, 7, 8]
+  max_activated_units: 96
+  punctuation_ratio_limit: 0.55
+  hash_base: 257
+  min_fragment_length: 4
+  utf8_recovery_min_bytes: 2
+  utility_compression_gain_cap: 1.2
+  utility_span_weight: 0.45
+  utility_frequency_weight: 0.30
+  utility_density_weight: 0.22
+  utility_base_scale: 0.16
+  utility_full_boundary_bonus: 0.18
+  utility_edge_boundary_bonus: 0.05
+  utility_no_boundary_penalty: -0.12
+  salience_base: 0.18
+  salience_digit_weight: 0.35
+  salience_upper_weight: 0.20
+  salience_reuse_divisor: 6.0
+  confidence_base: 0.22
+  confidence_reuse_divisor: 2.0
+  confidence_reuse_cap: 0.45
+  confidence_length_weight: 0.30
+  confidence_full_boundary_bonus: 0.10
+  confidence_edge_boundary_bonus: 0.03
+  confidence_no_boundary_penalty: -0.08
+  global_corroboration_frequency_threshold: 6
+  global_corroboration_utility_threshold: 0.45
+  global_corroboration_confidence_threshold: 0.45
+  phrase_entity_promotion_frequency: 4
+  phrase_entity_promotion_salience: 0.70
+  phrase_entity_promotion_confidence: 0.55
+
+layer_5_semantic_map:
+  preferred_spacing_k: 1.0
+  max_displacement_per_iteration: 1.75
+  convergence_tolerance: 0.001
+  max_layout_iterations: 24
+  energy_rollback_threshold: 3
+  attractive_force_coefficient: 1.0
+  repulsive_force_coefficient: 1.0
+  layout_boundary: 128.0
+  max_layout_units: 256
+  spatial_cell_size: 4.0
+  neighbor_radius: 6.0
+
+layer_9_retrieval_gating:
+  entropy_threshold: 0.72
+  recency_threshold_hours: 24
+  freshness_threshold: 0.65
+  disagreement_threshold: 0.35
+  cost_penalty: 0.15
+  w_entropy: 1.0
+  w_recency: 1.0
+  w_disagreement: 1.0
+  w_cost: 0.65
+  retrieve_threshold: 1.10
+
+layer_13_evidence_merge:
+  trust_weight: 0.50
+  recency_weight: 0.30
+  agreement_weight: 0.20
+  ambiguity_margin: 0.05
+
+layer_14_candidate_scoring:
+  w_spatial: 0.10
+  w_context: 0.18
+  w_sequence: 0.16
+  w_transition: 0.12
+  w_utility: 0.14
+  w_confidence: 0.18
+  w_evidence: 0.28
+
+layer_19_trust_heuristics:
+  min_source_trust: 0.35
+  corroboration_bonus: 0.08
+  max_results: 5
+  max_query_terms: 10
+  default_source_trust: 0.50
+  https_bonus: 0.10
+  allowlist_bonus: 0.10
+  parser_warning_penalty: 0.20
+  min_corroborating_sources: 2
+  require_https: false
+  allowlist_domains:
+    - "wikimedia.org"
+    - "wikipedia.org"
+    - "wikidata.org"
+    - "archive.org"
+    - "ncbi.nlm.nih.gov"
+    - "pmc.ncbi.nlm.nih.gov"
+    - "nominatim.openstreetmap.org"
+    - "openstreetmap.org"
+    - "dbpedia.org"
+    - "gutenberg.org"
+  format_trust_adjustments:
+    html_raw: -0.30
+    qa_json_schema_keys: -0.40
+    structured_entity: 0.20
+    code_syntax: -0.10
+  content_quality_thresholds:
+    min_readability_score: 0.60
+    max_boilerplate_ratio: 0.40
+    min_unique_words_ratio: 0.30
+  promotion_rules:
+    block_patterns:
+      - '^\\s*(question|answer|context|id|metadata)\\s*:'
+      - '^\\s*[\\[\\]{}"]+\\s*$'
+      - '^\\s*[{}:,]+\\s*$'
+    allow_patterns:
+      - '[a-zA-Z\\s\\.\\,\\?\\!]{20,}'
+
+intent:
+  intent_floor_threshold: 0.40
+  intent_ambiguity_margin: 0.15
+  context_reference_bonus: 0.20
+  briefness_keyword_weight: 0.35
+  social_intent_shortcircuit: true
+  min_lexical_tokens: 3
+  temporal_cue_weight: 0.16
+  domain_hint_weight: 0.14
+  preference_signal_weight: 0.14
+  certainty_softener_weight: 0.10
+
+adaptive_behavior:
+  intent_profiles:
+    factual:
+      scoring:
+        w_spatial: 0.10
+        w_context: 0.10
+        w_sequence: 0.05
+        w_transition: 0.04
+        w_utility: 0.13
+        w_confidence: 0.40
+        w_evidence: 0.30
+      escape:
+        stochastic_jump_prob: 0.05
+        beam_width: 3
+      resolver:
+        selection_temperature: 0.10
+        min_confidence_floor: 0.30
+        mode: "deterministic"
+    explanatory:
+      scoring:
+        w_spatial: 0.08
+        w_context: 0.30
+        w_sequence: 0.25
+        w_transition: 0.12
+        w_utility: 0.10
+        w_confidence: 0.20
+        w_evidence: 0.15
+      escape:
+        stochastic_jump_prob: 0.10
+        beam_width: 5
+      resolver:
+        selection_temperature: 0.30
+        min_confidence_floor: 0.24
+        mode: "balanced"
+    procedural:
+      scoring:
+        w_spatial: 0.08
+        w_context: 0.18
+        w_sequence: 0.30
+        w_transition: 0.17
+        w_utility: 0.12
+        w_confidence: 0.10
+        w_evidence: 0.05
+      escape:
+        stochastic_jump_prob: 0.08
+        beam_width: 4
+      resolver:
+        selection_temperature: 0.22
+        min_confidence_floor: 0.28
+        mode: "balanced"
+    creative:
+      scoring:
+        w_spatial: 0.08
+        w_context: 0.24
+        w_sequence: 0.18
+        w_transition: 0.08
+        w_utility: 0.18
+        w_confidence: 0.08
+        w_evidence: 0.06
+      escape:
+        stochastic_jump_prob: 0.22
+        beam_width: 6
+      resolver:
+        selection_temperature: 0.75
+        min_confidence_floor: 0.18
+        mode: "exploratory"
+    advisory:
+      scoring:
+        w_spatial: 0.10
+        w_context: 0.24
+        w_sequence: 0.14
+        w_transition: 0.08
+        w_utility: 0.10
+        w_confidence: 0.18
+        w_evidence: 0.16
+      escape:
+        stochastic_jump_prob: 0.09
+        beam_width: 4
+      resolver:
+        selection_temperature: 0.26
+        min_confidence_floor: 0.26
+        mode: "balanced"
+    casual:
+      scoring:
+        w_spatial: 0.10
+        w_context: 0.25
+        w_sequence: 0.15
+        w_transition: 0.05
+        w_utility: 0.35
+        w_confidence: 0.15
+        w_evidence: 0.10
+      escape:
+        stochastic_jump_prob: 0.20
+        beam_width: 7
+      resolver:
+        selection_temperature: 0.70
+        min_confidence_floor: 0.20
+        mode: "exploratory"
+  trust_profiles:
+    default:
+      default_source_trust: 0.50
+      min_corroborating_sources: 2
+      require_https: false
+    high_stakes:
+      default_source_trust: 0.30
+      min_corroborating_sources: 4
+      require_https: true
+  load_cost:
+    inference_queue_weight: 0.10
+    interactive_training_weight: 0.08
+    silent_batch_weight: 0.06
+    maintenance_weight: 0.04
+    queue_saturation_depth: 4.0
+    max_additive_penalty: 0.60
+
+layer_21_memory_governance:
+  maintenance_interval_secs: 30
+  anchor_reuse_threshold: 3
+  core_promotion_threshold: 6
+  promotion_min_corroborations: 3
+  prune_utility_threshold: 0.12
+  cold_start_prune_utility_threshold: 0.08
+  stable_prune_utility_threshold: 0.18
+  anchor_salience_threshold: 0.70
+  episodic_decay_days: 30
+  max_candidate_pool: 48
+  train_memory_ceiling_kb: 512
+  daily_growth_limit_mb: 1.0
+  bootstrap_seed_frequency: 100
+  bootstrap_seed_utility_floor: 0.30
+  cold_start_unit_threshold: 1000
+  stable_unit_threshold: 10000
+  cold_start_discovery_frequency: 1
+  growth_discovery_frequency: 2
+  stable_discovery_frequency: 3
+  cold_start_discovery_utility_threshold: 0.18
+  growth_discovery_utility_threshold: 0.28
+  stable_discovery_utility_threshold: 0.42
+  cold_start_candidate_observation_threshold: 2
+  growth_candidate_observation_threshold: 3
+  stable_candidate_observation_threshold: 4
+  candidate_activation_utility_threshold: 0.55
+  candidate_batch_size: 128
+  bloom_expected_items: 1000000
+  lfu_decay_factor: 0.95
+  recency_decay_rate: 0.01
+  anchor_protection_grace_days: 14
+  cold_archive_threshold_mb: 100.0
+  pollution_detection_enabled: true
+  pollution_min_length: 4
+  pollution_edge_trim_limit: 3
+  pollution_overlap_threshold: 0.70
+  pollution_quality_margin: 0.08
+  pollution_audit_limit: 64
+
+memory_budgets:
+  cold_start:
+    episodic_limit_mb: 50.0
+    core_limit_mb: 10.0
+    candidate_pool_mb: 20.0
+    daily_growth_limit_mb: 10.0
+  growth_phase:
+    episodic_limit_mb: 100.0
+    core_limit_mb: 50.0
+    candidate_pool_mb: 30.0
+    daily_growth_limit_mb: 5.0
+  stable_phase:
+    episodic_limit_mb: 50.0
+    core_limit_mb: 100.0
+    candidate_pool_mb: 10.0
+    daily_growth_limit_mb: 1.0
+
+document:
+  max_file_size_mb: 10.0
+  max_pdf_pages: 32
+  max_docx_xml_chars: 5000000
+
+layer_10_query_builder:
+  max_query_expansion_terms: 5
+  pii_stripping_aggressiveness: "standard"
+
+layer_11_retrieval:
+  retrieval_timeout_ms: 2000
+  max_retrieval_results: 10
+  cache_ttl_seconds: 3600
+  enable_retrieval: true
+  max_retries: 2
+
+layer_16_fine_resolver:
+  selection_temperature: 0.60
+  min_confidence_floor: 0.22
+  evidence_answer_confidence_threshold: 0.22
+
+layer_20_telemetry:
+  log_score_breakdowns: true
+  telemetry_sample_rate: 1.0
+  warning_threshold_utility_drop: 0.30
+  observation_log_path:
+
+training_phases:
+  bootstrap:
+    max_memory_delta_mb: 5.0
+    daily_growth_limit_mb: 50.0
+    merge_to_core: false
+    min_unit_discovery_efficiency:
+    min_semantic_routing_accuracy:
+  validation:
+    max_memory_delta_mb: 2.0
+    daily_growth_limit_mb: 10.0
+    merge_to_core: false
+    min_unit_discovery_efficiency:
+    min_semantic_routing_accuracy:
+  expansion:
+    max_memory_delta_mb: 0.5
+    daily_growth_limit_mb: 1.0
+    merge_to_core: false
+    min_unit_discovery_efficiency: 0.90
+    min_semantic_routing_accuracy: 0.85
+  dry_run:
+    max_memory_delta_mb: 5.0
+    daily_growth_limit_mb: 50.0
+    merge_to_core: false
+    min_unit_discovery_efficiency:
+    min_semantic_routing_accuracy:
+  huggingface:
+    max_memory_delta_mb: 2.0
+    daily_growth_limit_mb: 10.0
+    merge_to_core: false
+    min_unit_discovery_efficiency:
+    min_semantic_routing_accuracy:
+
+source_policies:
+  html:
+    extraction_mode: "readability"
+    strip_elements: ["nav", "footer", "script", "style", "aside", "ads"]
+    keep_only: ["article", "main", "section", "p", "h1", "h2", "h3", "li"]
+    merge_to_core: false
+    trust_bonus: 0.0
+    memory_type: episodic
+    decay_days: 7
+  qa_json:
+    extraction_mode: "field_select"
+    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation"]
+    fields_to_skip: ["answer", "answers", "wellFormedAnswers", "output", "completion", "target", "label", "id", "metadata", "options", "choices", "candidates"]
+    flatten_structure: true
+    merge_to_core: false
+    trust_bonus: 0.10
+    memory_type: episodic
+    decay_days: 14
+    usage_tag: "intent_training"
+  structured_json:
+    extraction_mode: "entity_extract"
+    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "label", "description", "aliases", "claims", "summary", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation", "steps", "instructions", "procedure", "actions", "workflow", "plan", "output", "response", "completion", "target"]
+    fields_to_skip: ["id", "metadata", "timestamp"]
+    skip_internal_ids: true
+    merge_to_core: true
+    trust_bonus: 0.20
+    memory_type: core
+    min_corroborations: 1
+  plain_text:
+    extraction_mode: "passthrough"
+    normalize_whitespace: true
+    trim_lines: true
+    merge_to_core: false
+    trust_bonus: 0.10
+    memory_type: episodic
+    decay_days: 30
+  code:
+    extraction_mode: "code_strip"
+    extract: ["docstrings", "comments", "readme", "docs"]
+    skip: ["syntax", "indentation", "punctuation", "keywords"]
+    languages: ["python", "rust", "javascript", "typescript"]
+    merge_to_core: false
+    trust_bonus: 0.0
+    memory_type: episodic
+    decay_days: 14
+    usage_tag: "explanation_patterns"
+  wikipedia_xml:
+    extraction_mode: "article_text"
+    fields_to_extract: ["title", "text"]
+    fields_to_skip: ["revision", "contributor", "timestamp"]
+    merge_to_core: false
+    trust_bonus: 0.10
+    memory_type: episodic
+    decay_days: 30
+    usage_tag: "core_knowledge"
+  wikidata_truthy:
+    extraction_mode: "entity_extract"
+    fields_to_extract: ["label", "description", "claims"]
+    skip_internal_ids: true
+    merge_to_core: true
+    trust_bonus: 0.20
+    memory_type: core
+    min_corroborations: 1
+  openapi_spec:
+    extraction_mode: "entity_extract"
+    fields_to_extract: ["operationId", "summary", "description", "parameters", "requestBody", "responses"]
+    fields_to_skip: ["id", "timestamp"]
+    merge_to_core: false
+    trust_bonus: 0.20
+    memory_type: core
+    usage_tag: "procedure_knowledge"
+  common_crawl_wet:
+    extraction_mode: "readability"
+    normalize_whitespace: true
+    trim_lines: true
+    merge_to_core: false
+    trust_bonus: 0.0
+    memory_type: episodic
+    decay_days: 7
+
+silent_training:
+  max_memory_delta_mb: 0.5
+  progress_interval_sec: 10
+  batch_size_sources: 50
+  merge_to_core: false
+  parallel:
+    enabled: true
+    worker_count: 0
+    queue_capacity: 64
+    queue_capacity_per_worker: 4
+    commit_batch_size: 8
+    commit_flush_interval_ms: 250
+    total_memory_limit_mb: 2560.0
+    non_worker_memory_reserve_mb: 1280.0
+    local_shard_soft_limit_mb: 96.0
+    local_shard_hard_limit_mb: 128.0
+  format_ingestion_rules:
+    qa_json:
+      ingest_fields: ["question", "context", "instruction", "reasoning"]
+      skip_fields: ["answer", "id", "metadata", "label"]
+      use_as: "intent_training"
+    wikipedia_xml:
+      extract_sections: ["title", "text"]
+      skip_metadata: ["revision", "contributor"]
+      use_as: "core_knowledge"
+    code:
+      extract: ["docstrings", "comments"]
+      skip: ["syntax_tokens"]
+      use_as: "explanation_patterns"
+  memory_placement:
+    html:
+      memory_type: episodic
+      decay_days: 7
+    qa_json:
+      memory_type: episodic
+      decay_days: 14
+    wikidata_truthy:
+      memory_type: core
+      min_corroborations: 1
+
+huggingface_streaming:
+  initial_rows_per_pull: 100
+  min_rows_per_pull: 100
+  max_rows_per_pull: 300
+  fast_pull_threshold_ms: 1200
+  slow_pull_threshold_ms: 3500
+  increase_factor: 1.25
+  decrease_factor: 0.5
+  request_delay_ms: 200
+  max_retries: 6
+  retry_base_delay_ms: 1000
+  retry_max_delay_ms: 15000

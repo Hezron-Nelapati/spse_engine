@@ -1,0 +1,17 @@
+layer_9_retrieval_gating:
+  entropy_threshold: 0.85
+  recency_threshold_hours: 72
+  w_cost: 1.0
+
+layer_14_candidate_scoring:
+  w_evidence: 0.14
+  w_confidence: 0.14
+  w_spatial: 0.12
+
+layer_21_memory_governance:
+  daily_growth_limit_mb: 1.0
+  episodic_decay_days: 30
+
+layer_16_fine_resolver:
+  selection_temperature: 0.7
+  min_confidence_floor: 0.30

@@ -1,0 +1,42 @@
+[package]
+name = "spse_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rmp-serde = "1"
+ndarray = "0.15"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.29", features = ["bundled"] }
+scraper = "0.17" # Required for Layer 12
+base64 = "0.21"
+lopdf = "0.32"
+quick-xml = "0.31"
+zip = "0.6"
+bzip2 = "0.4"
+futures-util = "0.3"
+parquet = "53"
+regex = "1"
+flate2 = "1"
+arc-swap = "1"
+prost = "0.13"
+petgraph = "0.6"
+crossbeam-channel = "0.5"
+nalgebra = "0.33"
+simdutf8 = "0.1"
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tower = "0.5"
