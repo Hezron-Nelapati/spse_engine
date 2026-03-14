@@ -361,7 +361,7 @@ fn score_candidates_cpu(
     merged: &MergedState,
     weights: &ScoringWeights,
 ) -> Vec<ScoredCandidate> {
-    crate::layers::search::CandidateScorer::score(candidates, context, sequence, merged, weights)
+    crate::layers::search::CandidateScorer::score(candidates, context, sequence, merged, weights, None, None)
 }
 
 /// Prepare candidate data for GPU

@@ -276,8 +276,22 @@ impl IntentDetector {
                 primary = IntentKind::Question;
                 fallback_mode = IntentFallbackMode::DocumentScope;
             } else if lexical_token_count < config.min_lexical_tokens {
-                primary = IntentKind::Help;
-                fallback_mode = IntentFallbackMode::ClarifyHelp;
+                // Check if input contains proper nouns (capitalized words)
+                // Proper nouns like "Donald Trump" are valid entity mentions
+                let has_proper_noun = raw_input.split_whitespace().any(|token| {
+                    token.chars().next().map(|ch| ch.is_uppercase()).unwrap_or(false)
+                        && token.len() > 1
+                        && !matches!(token.to_lowercase().as_str(), "the" | "a" | "an" | "i" | "hi" | "hey" | "hello")
+                });
+                
+                if has_proper_noun {
+                    // Proper noun mentions should trigger retrieval, not clarification
+                    primary = IntentKind::Question;
+                    fallback_mode = IntentFallbackMode::RetrieveUnknown;
+                } else {
+                    primary = IntentKind::Help;
+                    fallback_mode = IntentFallbackMode::ClarifyHelp;
+                }
             } else {
                 primary = IntentKind::Unknown;
                 fallback_mode = IntentFallbackMode::RetrieveUnknown;
@@ -1195,7 +1209,7 @@ fn score_question(
     if references_document_context {
         score += 0.1;
     }
-    if normalized.contains("what does it say") || normalized.contains("what is") {
+    if normalized.contains("what does it say") || normalized.contains("what is") || normalized.contains("who is") {
         score += 0.18;
     }
     if !context.summary.is_empty() {
@@ -1497,6 +1511,19 @@ fn should_force_external_retrieval(
 
     if !is_open_world_intent(intent.primary) {
         return false;
+    }
+
+    // For factual questions (Question, Verify, Explain, etc.), force retrieval if:
+    // 1. The top candidate score is below a reasonable threshold (0.65)
+    // 2. The candidate doesn't appear to directly answer the question
+    // This prevents settling for vaguely related but unhelpful candidates
+    let factual_intent = matches!(
+        intent.primary,
+        IntentKind::Question | IntentKind::Verify | IntentKind::Explain | IntentKind::Extract
+    );
+    
+    if factual_intent && top.score < 0.65 {
+        return true;
     }
 
     let normalized_prompt = normalize(raw_input);

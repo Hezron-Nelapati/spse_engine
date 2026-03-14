@@ -275,8 +275,8 @@ async fn process_chat_completion(
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
-        intent: Some(format!("{:?}", IntentKind::Question)),
-        confidence: Some(0.85),
+        intent: Some(format!("{:?}", result.trace.intent_profile.primary)),
+        confidence: Some(result.confidence),
         tone: Some("NeutralProfessional".to_string()),
     }
 }

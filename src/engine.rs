@@ -875,6 +875,8 @@ impl Engine {
             &sequence_state,
             &merged,
             &adaptive.scoring,
+            Some(intent_profile.primary),
+            Some(&packet.original_text),
         );
         let confidence_stats = CandidateScorer::confidence_stats(&initial_scored);
         let layer_9_start = Instant::now();
@@ -1011,6 +1013,8 @@ impl Engine {
             &sequence_state,
             &merged,
             &adaptive.scoring,
+            Some(intent_profile.primary),
+            Some(&packet.original_text),
         );
         let layer_14_scoring_time_ms = layer_14_start.elapsed().as_millis() as u64;
 
@@ -5091,6 +5095,26 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
     for doc in documents {
         let title_terms = normalized_terms(&doc.title);
         let title_overlap = token_overlap(&prompt_terms, &title_terms);
+        
+        // Exact match bonus: prioritize documents whose title exactly matches query
+        let title_lower = doc.title.to_lowercase();
+        let prompt_lower = prompt.to_lowercase();
+        let exact_title_match = title_lower.trim() == prompt_lower.trim()
+            || title_lower.starts_with(&format!("{} ", prompt_lower)) == false 
+                && title_lower.contains(&prompt_lower) == false;
+        
+        // Penalize titles that are supersets (e.g., "Donald Trump (song)" when querying "Donald Trump")
+        let is_superset_title = title_lower.contains(&prompt_lower) 
+            && title_lower != prompt_lower
+            && !title_lower.starts_with(&prompt_lower);
+        let exact_match_bonus = if title_lower.trim() == prompt_lower.trim() {
+            0.35 // Strong bonus for exact match
+        } else if is_superset_title {
+            -0.20 // Penalize superset titles (disambiguation pages, etc.)
+        } else {
+            0.0
+        };
+        
         let doc_body_terms = normalized_terms(&doc.normalized_content)
             .into_iter()
             .take(180)
@@ -5099,7 +5123,7 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
         let ambiguity_penalty =
             evidence_ambiguity_penalty(&raw_prompt, &doc.title, &doc.raw_content);
         let doc_score = ((0.42 * title_overlap) + (0.33 * doc_overlap) + (0.20 * doc.trust_score)
-            - (0.18 * ambiguity_penalty))
+            - (0.18 * ambiguity_penalty) + exact_match_bonus)
             .clamp(0.0, 1.0);
 
         for sentence in simple_sentences(&doc.raw_content) {

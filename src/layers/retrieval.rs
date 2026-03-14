@@ -347,6 +347,14 @@ impl RetrievalPipeline {
                     if url.contains("/c/") {
                         continue;
                     }
+                    
+                    // Filter out disambiguation-style URLs (e.g., "Donald_Trump_(song)")
+                    // These are secondary pages, not the main entity
+                    let is_disambiguation = url.contains("_(") && url.contains(")");
+                    if is_disambiguation {
+                        continue;
+                    }
+                    
                     let normalized = input::normalize_text(text);
                     if !normalized.is_empty() {
                         docs.push(RetrievedDocument {
@@ -377,6 +385,13 @@ impl RetrievalPipeline {
                             if url.contains("/c/") {
                                 continue;
                             }
+                            
+                            // Filter out disambiguation-style URLs
+                            let is_disambiguation = url.contains("_(") && url.contains(")");
+                            if is_disambiguation {
+                                continue;
+                            }
+                            
                             let normalized = input::normalize_text(text);
                             if !normalized.is_empty() {
                                 docs.push(RetrievedDocument {

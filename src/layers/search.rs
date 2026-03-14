@@ -1,6 +1,6 @@
 use crate::config::ScoringWeights;
 use crate::types::{
-    ContextMatrix, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit, UnitLevel,
+    ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit, UnitLevel,
 };
 use nalgebra::SVector;
 use std::collections::HashSet;
@@ -15,6 +15,8 @@ impl CandidateScorer {
         sequence: &SequenceState,
         merged: &MergedState,
         weights: &ScoringWeights,
+        intent: Option<IntentKind>,
+        original_query: Option<&str>,
     ) -> Vec<ScoredCandidate> {
         let mut scored = Vec::new();
         let weight_vector = scoring_weight_vector(weights);
@@ -29,6 +31,20 @@ impl CandidateScorer {
             .iter()
             .map(|entity| entity.to_lowercase())
             .collect::<Vec<_>>();
+        
+        // Extract query terms from context summary first (trained/dynamic intent resolution)
+        // Fallback to original query for untrained cases
+        let query_terms: Vec<String> = if !context.summary.is_empty() {
+            context.summary
+                .split_whitespace()
+                .take(10)
+                .map(|s| s.to_lowercase())
+                .collect()
+        } else {
+            original_query
+                .map(|q| q.split_whitespace().take(10).map(|s| s.to_lowercase()).collect())
+                .unwrap_or_default()
+        };
 
         for unit in candidates {
             let lowered = unit.content.to_lowercase();
@@ -51,6 +67,10 @@ impl CandidateScorer {
             let utility_fit = unit.utility_score.clamp(0.0, 1.0) * level_multiplier;
             let confidence_fit = ((unit.confidence + unit.trust_score) / 2.0).clamp(0.0, 1.0);
             let evidence_support = evidence_match(&lowered, merged) * level_multiplier;
+            
+            // Exact match bonus: prioritize candidates that exactly match query terms
+            // This helps disambiguate "Donald Trump" from "Donald Trump Jr."
+            let exact_match_bonus = exact_match_score(&lowered, &query_terms, intent) * level_multiplier;
 
             let breakdown = ScoreBreakdown {
                 spatial_fit,
@@ -71,7 +91,7 @@ impl CandidateScorer {
                 confidence_fit,
                 evidence_support,
             ]);
-            let score = weight_vector.dot(&feature_vector) + merged.freshness_boost;
+            let score = weight_vector.dot(&feature_vector) + merged.freshness_boost + exact_match_bonus;
 
             scored.push(ScoredCandidate {
                 unit_id: unit.id,
@@ -171,4 +191,59 @@ pub fn top_unit_ids(scored: &[ScoredCandidate], limit: usize) -> Vec<Uuid> {
         .take(limit)
         .map(|candidate| candidate.unit_id)
         .collect()
+}
+
+/// Calculate exact match bonus for entity disambiguation.
+/// Prioritizes candidates that exactly match or closely match query terms.
+/// This helps distinguish "Donald Trump" from "Donald Trump Jr." when querying for "Donald Trump".
+fn exact_match_score(candidate: &str, query_terms: &[String], intent: Option<IntentKind>) -> f32 {
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+    
+    // Only apply for factual/question intents where exact matching matters
+    let is_factual = matches!(
+        intent,
+        Some(IntentKind::Question) | Some(IntentKind::Verify) | Some(IntentKind::Extract)
+    );
+    
+    if !is_factual {
+        return 0.0;
+    }
+    
+    let candidate_terms: Vec<&str> = candidate.split_whitespace().collect();
+    let candidate_set: std::collections::BTreeSet<&str> = candidate_terms.iter().copied().collect();
+    let query_set: std::collections::BTreeSet<&str> = query_terms.iter().map(|s| s.as_str()).collect();
+    
+    // Check for exact match (candidate equals query)
+    if candidate_terms.len() == query_terms.len() {
+        let all_match = candidate_terms.iter().zip(query_terms.iter())
+            .all(|(c, q)| c.to_lowercase() == q.to_lowercase());
+        if all_match {
+            return 0.85; // Strong bonus for exact match
+        }
+    }
+    
+    // Check if candidate is a superset (e.g., "Donald Trump Jr." contains "Donald Trump")
+    // Penalize such candidates when we want exact entity match
+    let query_in_candidate = query_terms.iter().all(|q| candidate.contains(&q.to_lowercase()));
+    let candidate_has_extra = candidate_terms.len() > query_terms.len();
+    
+    if query_in_candidate && candidate_has_extra {
+        // Candidate is a longer form that contains the query - penalize
+        // e.g., "Donald Trump Jr." when querying "Donald Trump"
+        return -0.25;
+    }
+    
+    // Partial overlap bonus
+    let overlap = query_set.intersection(&candidate_set).count();
+    let overlap_ratio = overlap as f32 / query_terms.len().max(1) as f32;
+    
+    if overlap_ratio >= 0.8 {
+        overlap_ratio * 0.3
+    } else if overlap_ratio >= 0.5 {
+        overlap_ratio * 0.15
+    } else {
+        0.0
+    }
 }
