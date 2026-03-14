@@ -84,6 +84,8 @@ pub struct MemoryStore {
     pollution_overlap_threshold: f32,
     pollution_quality_margin: f32,
     pollution_audit_limit: usize,
+    /// Whether to block Intent-channel units from Core memory promotion
+    intent_channel_core_promotion_blocked: bool,
     semantic_map: SemanticMapConfig,
     bloom_filter: UnitBloomFilter,
     pruned_units_total: u64,
@@ -353,6 +355,7 @@ impl MemoryStore {
             pollution_overlap_threshold: governance.pollution_overlap_threshold,
             pollution_quality_margin: governance.pollution_quality_margin,
             pollution_audit_limit: governance.pollution_audit_limit,
+            intent_channel_core_promotion_blocked: governance.intent_channel_core_promotion_blocked,
             semantic_map: semantic_map.clone(),
             bloom_filter,
             pruned_units_total: 0,
@@ -403,6 +406,7 @@ impl MemoryStore {
         self.pollution_overlap_threshold = governance.pollution_overlap_threshold;
         self.pollution_quality_margin = governance.pollution_quality_margin;
         self.pollution_audit_limit = governance.pollution_audit_limit;
+        self.intent_channel_core_promotion_blocked = governance.intent_channel_core_promotion_blocked;
     }
 
     pub fn apply_semantic_map_config(&mut self, semantic_map: &SemanticMapConfig) {
@@ -781,7 +785,10 @@ impl MemoryStore {
         default_memory_type: MemoryType,
         memory_channels: &[MemoryChannel],
     ) -> ActivationOutcome {
-        let promote_to_core = default_memory_type == MemoryType::Core;
+        // Intent channel gate: block Intent-channel units from Core memory promotion
+        let is_intent_channel = memory_channels.contains(&MemoryChannel::Intent);
+        let promote_to_core = default_memory_type == MemoryType::Core
+            && !(self.intent_channel_core_promotion_blocked && is_intent_channel);
         let bloom_maybe = self.bloom_filter.contains(activation.normalized.as_str());
         if let Some(id) = self
             .content_index
@@ -840,13 +847,16 @@ impl MemoryStore {
         );
         unit.salience_score = activation.salience;
         unit.trust_score = 0.45 + trust_delta;
-        unit.memory_type = default_memory_type;
+        // Use promote_to_core result to determine actual memory type
+        // Intent-channel units should stay Episodic when blocked
+        unit.memory_type = if promote_to_core {
+            MemoryType::Core
+        } else {
+            MemoryType::Episodic
+        };
         unit.memory_channels = normalized_channels(memory_channels);
         if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl) {
             unit.corroboration_count = 1;
-        }
-        if promote_to_core {
-            unit.memory_type = MemoryType::Core;
         }
         Self::record_context(&mut unit, context_summary);
         Self::apply_anchor_heuristics(

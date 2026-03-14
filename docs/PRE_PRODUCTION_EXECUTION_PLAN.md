@@ -1,17 +1,27 @@
 # SPSE Engine Pre-Production Execution Plan
 
-**Document Version:** 1.0  
+**Document Version:** 1.2  
 **Created:** March 14, 2026  
+**Last Updated:** March 15, 2026
 **Priority Order:** Creative > Drill Related > Core Logic/Tests > Web UI
 
 ---
 
-## Phase 1: Creative Mode & Hybrid Intent Profiles
+## Phase 1: Creative Mode & Hybrid Intent Profiles ✅ COMPLETE
 
 **Estimated Duration:** 2-3 weeks  
+**Actual Duration:** Completed
 **Dependencies:** None (foundational for other phases)
 
-### 1.1 Intent-Specific Config Profiles for Layers 14-17
+### 1.1 Intent-Specific Config Profiles for Layers 14-17 ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `IntentShapingConfig` struct added to `src/config/mod.rs` (lines 565-571)
+- `AdaptiveBehaviorConfig.intent_profiles` includes `creative`, `brainstorm`, `plan`, `act`, `critique` profiles
+- `FineResolver::select_with_shaping()` implements intent shaping in `src/layers/resolver.rs` (lines 81-165)
+- `config/config.yaml` contains full profile definitions (lines 131-334)
 
 **What to Implement:**
 - Extend existing `adaptive_behavior.intent_profiles` in config to support creative mode with stochastic jumps and lower confidence floors
@@ -74,7 +84,15 @@ cargo run --bin test_harness -- --profile creative --intent brainstorm
 
 ---
 
-### 1.2 Hybrid Intent Score Validation
+### 1.2 Hybrid Intent Score Validation ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `IntentDetector::hybrid_blend()` method added to `src/layers/intent.rs` (lines 1292-1358)
+- `IntentBlendReport` struct defined in `src/types.rs` (lines 332-358)
+- `OutputDecoder::detect_drift()` and `detect_corruption()` methods in `src/layers/output.rs` (lines 39-135)
+- `DriftReport` and `CorruptionReport` structs for validation output
 
 **What to Implement:**
 - Validate runtime intent blending from heuristic classification + Intent-channel memory lookup
@@ -125,7 +143,17 @@ cargo test --lib output::tests::drift_detection
 
 ---
 
-### 1.3 MemoryChannel::Intent Gate Validation
+### 1.3 MemoryChannel::Intent Gate Validation ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `intent_channel_core_promotion_blocked` config field added to `GovernanceConfig` in `src/config/mod.rs` (line 723)
+- `validate_channel_isolation()` method implemented in `src/memory/store.rs` (lines 544-619)
+- `ChannelIsolationReport`, `ChannelIsolationViolation`, `IsolationViolationType` types in `src/types.rs` (lines 362-396)
+- Intent channel gate logic blocks Core promotion for Intent-channel units in `ingest_activation()` (lines 784-787)
+- Integration test `intent_channel_isolation_prevents_core_pollution()` added to `tests/integration.rs` (lines 1766-1817)
+- Config field added to `config/config.yaml` (line 374)
 
 **What to Implement:**
 - Verify `tag_intent=true` flag correctly gates promotion to durable intent memory
@@ -163,12 +191,21 @@ cargo test --lib output::tests::drift_detection
 
 ---
 
-## Phase 2: Drill Suite & Pollution Integration
+## Phase 2: Drill Suite & Pollution Integration ✅ COMPLETE
 
 **Estimated Duration:** 3-4 weeks  
+**Actual Duration:** Completed
 **Dependencies:** Phase 1 complete
 
-### 2.1 Layer-Specific Drill Suite (100MB Corpus)
+### 2.1 Layer-Specific Drill Suite (100MB Corpus) ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `drill_harness.rs` binary created with 20 drill modes across all layers (`src/bin/drill_harness.rs`)
+- `drill_lib.rs` library module with `DrillMode`, `DrillCategory`, `DrillResult`, `DrillReport` structs (`src/drill_lib.rs`)
+- `drill_corpus_generator.py` script generates JSON corpora for all drill modes (`scripts/drill_corpus_generator.py`)
+- Drill modes implemented: Garbage, UnitActivation, Collisions, RoutingEscape, AnchorLoss, ContextMatrix, IntentClassify, IntentBlend, RetrievalGate, IntentMemoryGate, Poison, TrustHeuristics, Maintenance, Promotion, ChannelIsolation, OutputDecode, CreativeDrift, IntentShaping, PollutionCeiling, PollutionPurge
 
 **What to Implement:**
 - Create targeted corpus subsets to trigger specific failure modes
@@ -509,7 +546,17 @@ cargo test --lib -- drill_
 
 ---
 
-### 2.2 Unified Stress Drill (Heterogeneous Ingestion)
+### 2.2 Unified Stress Drill (Heterogeneous Ingestion) ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `stress_drill.rs` binary created with configurable corpus size, latency thresholds, pollution ceiling (`src/bin/stress_drill.rs`)
+- `stress_drill_lib.rs` library module with `StressDrillConfig`, `StressDrillResult`, `LatencyReport` structs (`src/stress_drill_lib.rs`)
+- Heterogeneous corpus generator supports HTML, QA JSON, Wikidata, OpenAPI, Common Crawl WET formats
+- Distribution: 30% HTML, 20% QA JSON, 15% Wikidata, 15% OpenAPI, 20% Common Crawl WET
+- Latency tracking with avg/max/p99 metrics and spike detection
+- Pollution ceiling validation (<1% default)
 
 **What to Implement:**
 - End-to-end 100MB ingestion with interleaved queries and forced maintenance cycles
@@ -555,7 +602,16 @@ cargo test --lib -- drill_
 
 ---
 
-### 2.3 Snapshot Atomicity & Recovery Drill
+### 2.3 Snapshot Atomicity & Recovery Drill ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `crash_drill.rs` binary created with crash simulation at multiple points (`src/bin/crash_drill.rs`)
+- `crash_drill_lib.rs` library module with `CrashPoint`, `CrashDrillConfig`, `CrashDrillResult` structs (`src/crash_drill_lib.rs`)
+- Crash points: ForceDirectedMidIteration, SpatialGridRebuild, LfuPruning, CandidatePromotion
+- Recovery verification via memory counts comparison before/after crash
+- Consistency error detection for partial writes
 
 **What to Implement:**
 - Simulate crashes during Layer 5 map updates or Layer 21 compaction

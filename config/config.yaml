@@ -371,6 +371,7 @@ layer_21_memory_governance:
   pollution_overlap_threshold: 0.70
   pollution_quality_margin: 0.08
   pollution_audit_limit: 64
+  intent_channel_core_promotion_blocked: true
 
 memory_budgets:
   cold_start:

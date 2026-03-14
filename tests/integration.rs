@@ -1762,3 +1762,56 @@ fn isolated_units_for_channel_returns_correct_units() {
     // Should return units in Intent but not in Reasoning (all of them since Reasoning is empty)
     assert!(!isolated.is_empty() || store.validate_channel_isolation().intent_count == 0);
 }
+
+#[test]
+fn intent_channel_isolation_prevents_core_pollution() {
+    use spse_engine::layers::builder::UnitBuilder;
+    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::config::UnitBuilderConfig;
+    use spse_engine::types::InputPacket;
+    
+    let db_path = temp_db_path("intent_channel_isolation");
+    let mut governance = GovernanceConfig::default();
+    governance.intent_channel_core_promotion_blocked = true;
+    let mut store = MemoryStore::new_with_governance(&db_path, &governance);
+    
+    // Create units using UnitBuilder
+    let config = UnitBuilderConfig::default();
+    let input_packet = InputPacket {
+        original_text: "intent signal for brainstorming".to_string(),
+        normalized_text: "intent signal for brainstorming".to_lowercase(),
+        bytes: Vec::new(),
+        timestamp: Utc::now(),
+        training_mode: false,
+    };
+    let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
+    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
+    
+    // Ingest with Intent channel, requesting Core memory
+    store.ingest_hierarchy_with_channels(
+        &hierarchy,
+        spse_engine::types::SourceKind::TrainingDocument,
+        "intent context",
+        MemoryType::Core, // Request Core, but Intent channel should block promotion
+        &[MemoryChannel::Main, MemoryChannel::Intent],
+    );
+    
+    // Verify channel isolation
+    let isolation_report = store.validate_channel_isolation();
+    assert!(isolation_report.is_valid);
+    assert!(isolation_report.intent_count > 0);
+    
+    // Verify Intent-channel units are NOT promoted to Core
+    let intent_units = store.units_in_channel(MemoryChannel::Intent);
+    for unit in &intent_units {
+        // Intent-channel units should remain Episodic, not Core
+        assert_eq!(
+            unit.memory_type, MemoryType::Episodic,
+            "Intent-channel unit '{}' was incorrectly promoted to Core memory",
+            unit.content
+        );
+    }
+    
+    // Verify Main channel has the units
+    assert!(isolation_report.main_count > 0);
+}

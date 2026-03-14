@@ -718,6 +718,9 @@ pub struct GovernanceConfig {
     pub pollution_overlap_threshold: f32,
     pub pollution_quality_margin: f32,
     pub pollution_audit_limit: usize,
+    /// Whether to block Intent-channel units from being promoted to Core memory.
+    /// Prevents noisy intent signals from polluting long-term core memory.
+    pub intent_channel_core_promotion_blocked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1513,6 +1516,7 @@ impl Default for GovernanceConfig {
             pollution_overlap_threshold: 0.70,
             pollution_quality_margin: 0.08,
             pollution_audit_limit: 64,
+            intent_channel_core_promotion_blocked: true,
         }
     }
 }
