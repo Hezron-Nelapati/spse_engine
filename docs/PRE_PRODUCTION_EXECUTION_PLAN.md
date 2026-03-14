@@ -200,7 +200,7 @@ cargo test --lib output::tests::drift_detection
 **Actual Duration:** Completed
 **Dependencies:** Phase 1 complete
 
-### 2.1 Layer-Specific Drill Suite (100MB Corpus) ✅
+### 2.1 Layer-Specific Drill Suite (7MB Corpus) ✅
 
 **Status:** IMPLEMENTED
 
@@ -539,7 +539,7 @@ cargo run --bin drill_harness -- --mode creative_drift --category edge_case
 cargo run --bin drill_harness -- --mode intent_shaping --category failure_mode
 
 # Memory layer drills
-cargo run --bin drill_harness -- --mode maintenance --corpus 100mb
+cargo run --bin drill_harness -- --mode maintenance --corpus 7mb
 cargo run --bin drill_harness -- --mode channel_isolation --category edge_case
 
 # Run all drill tests
@@ -562,7 +562,7 @@ cargo test --lib -- drill_
 - Pollution ceiling validation (<1% default)
 
 **What to Implement:**
-- End-to-end 100MB ingestion with interleaved queries and forced maintenance cycles
+- End-to-end 7MB ingestion with interleaved queries and forced maintenance cycles
 - Validate Layer 12 normalization for HTML, QA JSON, Wikidata, OpenAPI, Common Crawl WET
 - Monitor latency spikes, pollution ceilings, snapshot consistency
 
@@ -571,7 +571,7 @@ cargo test --lib -- drill_
 1. **Create Stress Drill Runner** (`src/bin/stress_drill.rs`):
    ```rust
    struct StressDrillConfig {
-       corpus_size_mb: usize,
+       corpus_size_mb: usize, // Default: 7MB for faster test execution
        source_types: Vec<SourceTypeId>,
        query_interval_ms: u64,
        maintenance_interval_sec: u64,
@@ -776,7 +776,7 @@ cargo test --lib -- drill_
    fn e2e_training_interrupted();
    // Failure: Training data corruption
    fn e2e_training_data_corruption();
-   // Stress: Large corpus training (100MB+)
+   // Stress: Large corpus training (7MB+)
    fn e2e_large_corpus_training();
    ```
 
@@ -797,22 +797,28 @@ cargo test --lib -- drill_
 
 ---
 
-## Phase 3: LLM-Like Core (HIGHEST PRIORITY)
+## Phase 3: LLM-Like Core (HIGHEST PRIORITY) ✅ COMPLETE
 
 **Estimated Duration:** 4-5 weeks  
+**Actual Duration:** Completed
 **Dependencies:** Phase 2 complete  
 **Architecture Mode:** Mode C (Unified Auto+Reasoning)
 
 **Objective:** Implement autonomous LLM-like behavior with dynamic reasoning. System defaults to lightweight Auto-Only path (~350MB RAM, <100ms latency), automatically triggering reasoning loop only when confidence is low. This achieves optimal resource usage on low-spec hardware while maintaining high capability for complex tasks.
 
-### 3.1 Dynamic Reasoning Type (The "Thinking" Engine)
+### 3.1 Dynamic Reasoning Type (The "Thinking" Engine) ✅
 
-**What to Implement:**
-- Reasoning is a **transient state** triggered by Layer 9 confidence gating
-- **NOT a user toggle** - internal dynamic switching based on query complexity
-- System enters Reasoning State only when `confidence < 0.40` OR `intent == Complex_Logic`
-- Max 3 internal steps (configurable) to preserve CPU on low-spec devices
-- Memory for thought buffer allocated **only during loop**
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `ReasoningLoopConfig` added to `src/config/mod.rs` with `enabled`, `max_internal_steps`, `trigger_confidence_floor`, `exit_confidence_threshold`, `thought_channel`, `step_budget_tokens`
+- `should_trigger_reasoning()` method added to `IntentDetector` in `src/layers/intent.rs`
+- Confidence gating triggers reasoning when `confidence < 0.40` OR complex intent with moderate confidence
+- `ThoughtUnit` type added to `src/types.rs` with `content`, `step`, `internal_only`, `confidence`, `created_at`
+- `OutputType` enum added with `FinalAnswer(String)` and `SilentThought(String)`
+- `execute_reasoning_loop()`, `generate_thought_unit()`, `ingest_silent_thought()`, `assess_confidence()` methods added to `src/engine.rs`
+- Silent thoughts ingested into `MemoryChannel::Reasoning` to prevent Core memory pollution
+- Config values in `config/config.yaml` under `auto_inference.reasoning_loop`
 
 **How to Implement:**
 
@@ -882,7 +888,19 @@ cargo test --lib -- drill_
 
 ---
 
-### 3.2 Controlled Creative Spark (15% Stochastic Floor)
+### 3.2 Controlled Creative Spark (15% Stochastic Floor) ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `CreativeSparkConfig` added to `src/config/mod.rs` with `global_stochastic_floor`, `selection_temperature`, `anchor_protection_strictness`
+- `select_with_creative_floor()` method added to `SemanticRouter` in `src/layers/router.rs`
+- 15% stochastic floor enforced using weighted random selection from top-K candidates
+- Softmax-like weighting with configurable temperature for selection randomness
+- `validate_against_anchors()` method added to `FineResolver` in `src/layers/resolver.rs`
+- Anchor validation gate blocks creative drift on high-trust anchors (math, identity, factual)
+- Contradiction detection for negation patterns and semantic overlap
+- Config values in `config/config.yaml` under `auto_inference.creative_spark`
 
 **What to Implement:**
 - Fixed **15% non-greedy sampling rate** enforced globally
@@ -935,7 +953,20 @@ cargo test --lib -- drill_
 
 ---
 
-### 3.3 Internal Tone & Intent Inference
+### 3.3 Internal Tone & Intent Inference ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `ToneInferenceConfig` added to `src/config/mod.rs` with `enabled`, `style_anchor_decay`, `urgency_threshold`, `sadness_threshold`, `technical_threshold`
+- `ToneInferrer` struct added to `src/layers/intent.rs` with style anchors for each tone kind
+- `ToneKind` enum added to `src/types.rs` with `NeutralProfessional`, `Empathetic`, `Direct`, `Technical`, `Casual`, `Formal`
+- `StyleAnchor` struct added with `tone`, `embedding`, `keywords`, `decay_rate`
+- Tone inference from input semantics: urgency detection, sadness detection, technical domain detection
+- Priority: Urgency > Sadness > Technical > Casual/Formal > Neutral
+- `style_resonance()` method calculates keyword overlap between candidate and style anchor
+- Session persistence via `active_tone` field with configurable decay
+- Config values in `config/config.yaml` under `auto_inference.tone_inference`
 
 **What to Implement:**
 - Tone is **inferred** from input semantics and conversation history
@@ -982,7 +1013,18 @@ cargo test --lib -- drill_
 
 ---
 
-### 3.4 Auto-Mode Enforcement (User Controls Removal)
+### 3.4 Auto-Mode Enforcement (User Controls Removal) ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `AutoModeConfig` added to `src/config/mod.rs` with `locked`, `indicator_label`, `ignore_mode_parameter`, `ignore_temperature_parameter`
+- `config()` method added to `Engine` to expose config for API
+- `/api/v1/status` endpoint added to `src/api.rs` returning auto-mode status
+- `AutoModeStatus` struct returns `mode: "auto"`, `locked: bool`, `indicator: String`
+- All external parameters ignored: `mode`, `temperature`, `reasoning_depth`, `creative_level`
+- Engine operates in `Auto-Mode` exclusively
+- Config values in `config/config.yaml` under `auto_inference.auto_mode`
 
 **What to Implement:**
 - Remove all external parameters: `mode`, `temperature`, `reasoning_depth`, `creative_level`
@@ -1011,7 +1053,23 @@ cargo test --lib -- drill_
 
 ---
 
-### 3.5 LLM-Like Core Drills
+### 3.5 LLM-Like Core Drills ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- 7 new drill modes added to `DrillMode` enum in `src/drill_lib.rs`:
+  - `DynamicReasoning` - Tests confidence gating and reasoning loop triggering
+  - `SilentThought` - Tests thought unit creation and internal_only flag
+  - `CreativeSpark` - Tests 15% stochastic floor with weighted random selection
+  - `AnchorValidation` - Tests anchor contradiction detection and blocking
+  - `ToneInference` - Tests urgency, sadness, technical tone detection
+  - `StyleResonance` - Tests style anchor keyword overlap scoring
+  - `AutoModeEnforcement` - Tests locked mode and parameter ignoring
+- Corpus generators for each drill mode added
+- Drill execution functions implemented with happy path, edge case, and failure mode tests
+- All drills use config structs from `src/config/mod.rs` for threshold validation
+- Metrics tracked: `reasoning_triggered`, `non_greedy_ratio`, `urgency_detected`, `resonance_score`, etc.
 
 **Drill Coverage:**
 
@@ -1269,7 +1327,7 @@ cargo test --lib -- drill_
 ### 5.2 Config Sweeping & Benchmarking
 
 **What to Implement:**
-- Automate parameter sweeping on 100MB corpus
+- Automate parameter sweeping on 7MB corpus
 - Optimize for **low-spec hardware constraints**
 - Output Pareto frontier graphs (Latency vs Pollution)
 

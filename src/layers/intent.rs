@@ -1,8 +1,10 @@
-use crate::config::{IntentConfig, RetrievalThresholds};
+use crate::config::{IntentConfig, ReasoningLoopConfig, RetrievalThresholds, ToneInferenceConfig};
 use crate::types::{
     ConfidenceStats, ContextMatrix, IntentBlendReport, IntentFallbackMode, IntentKind,
-    IntentProfile, IntentScore, ScoredCandidate, SearchDecision, SequenceState,
+    IntentProfile, IntentScore, ScoredCandidate, SearchDecision, SequenceState, StyleAnchor,
+    ToneKind, Unit,
 };
+use std::collections::HashMap;
 
 pub struct IntentDetector;
 
@@ -390,6 +392,296 @@ impl IntentDetector {
             cost_penalty,
             reasons,
         }
+    }
+
+    /// Phase 3.1: Confidence gating for dynamic reasoning.
+    /// Returns true if reasoning loop should be triggered based on low confidence or complex intent.
+    pub fn should_trigger_reasoning(
+        intent: &IntentProfile,
+        config: &ReasoningLoopConfig,
+    ) -> bool {
+        if !config.enabled {
+            return false;
+        }
+
+        // Trigger if confidence is below floor
+        if intent.confidence < config.trigger_confidence_floor {
+            return true;
+        }
+
+        // Trigger for complex intents that benefit from reasoning
+        let complex_intent = matches!(
+            intent.primary,
+            IntentKind::Analyze
+                | IntentKind::Plan
+                | IntentKind::Critique
+                | IntentKind::Debug
+                | IntentKind::Brainstorm
+                | IntentKind::Compare
+                | IntentKind::Explain
+        );
+
+        // Complex intents with moderate confidence also trigger reasoning
+        complex_intent && intent.confidence < config.exit_confidence_threshold
+    }
+}
+
+// ============================================================================
+// Phase 3.3: Internal Tone Inference
+// ============================================================================
+
+/// Tone inferrer for internal tone detection from input semantics.
+/// Tone is inferred from input, NOT a user setting.
+pub struct ToneInferrer {
+    /// Style anchors for each tone kind
+    style_anchors: HashMap<ToneKind, StyleAnchor>,
+    /// Decay rate for session persistence
+    decay_rate: f32,
+    /// Current active tone for session
+    active_tone: Option<ToneKind>,
+}
+
+impl ToneInferrer {
+    /// Create a new tone inferrer with default style anchors
+    pub fn new(config: &ToneInferenceConfig) -> Self {
+        let mut style_anchors = HashMap::new();
+
+        // Default style anchors with semantic positions and keywords
+        style_anchors.insert(
+            ToneKind::NeutralProfessional,
+            StyleAnchor {
+                tone: ToneKind::NeutralProfessional,
+                embedding: [0.5, 0.5, 0.5],
+                keywords: vec![
+                    "please".to_string(), "thank you".to_string(), "regarding".to_string(),
+                    "sincerely".to_string(), "respectfully".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        style_anchors.insert(
+            ToneKind::Empathetic,
+            StyleAnchor {
+                tone: ToneKind::Empathetic,
+                embedding: [0.3, 0.7, 0.4],
+                keywords: vec![
+                    "sorry".to_string(), "understand".to_string(), "feel".to_string(),
+                    "difficult".to_string(), "help".to_string(), "sad".to_string(),
+                    "upset".to_string(), "worried".to_string(), "anxious".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        style_anchors.insert(
+            ToneKind::Direct,
+            StyleAnchor {
+                tone: ToneKind::Direct,
+                embedding: [0.8, 0.2, 0.3],
+                keywords: vec![
+                    "urgent".to_string(), "immediately".to_string(), "asap".to_string(),
+                    "now".to_string(), "quickly".to_string(), "emergency".to_string(),
+                    "critical".to_string(), "important".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        style_anchors.insert(
+            ToneKind::Technical,
+            StyleAnchor {
+                tone: ToneKind::Technical,
+                embedding: [0.6, 0.3, 0.7],
+                keywords: vec![
+                    "code".to_string(), "function".to_string(), "api".to_string(),
+                    "implementation".to_string(), "algorithm".to_string(), "debug".to_string(),
+                    "error".to_string(), "variable".to_string(), "method".to_string(),
+                    "class".to_string(), "system".to_string(), "architecture".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        style_anchors.insert(
+            ToneKind::Casual,
+            StyleAnchor {
+                tone: ToneKind::Casual,
+                embedding: [0.4, 0.6, 0.3],
+                keywords: vec![
+                    "hey".to_string(), "hi".to_string(), "cool".to_string(),
+                    "awesome".to_string(), "thanks".to_string(), "lol".to_string(),
+                    "yeah".to_string(), "ok".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        style_anchors.insert(
+            ToneKind::Formal,
+            StyleAnchor {
+                tone: ToneKind::Formal,
+                embedding: [0.7, 0.4, 0.6],
+                keywords: vec![
+                    "dear".to_string(), "sincerely".to_string(), "respectfully".to_string(),
+                    "kindly".to_string(), "request".to_string(), "permit".to_string(),
+                    "acknowledge".to_string(), "gratitude".to_string(),
+                ],
+                decay_rate: config.style_anchor_decay,
+            },
+        );
+
+        Self {
+            style_anchors,
+            decay_rate: config.style_anchor_decay,
+            active_tone: None,
+        }
+    }
+
+    /// Infer tone from input text and conversation history.
+    pub fn infer_tone(&mut self, input: &str, _history: &[Unit], config: &ToneInferenceConfig) -> ToneKind {
+        if !config.enabled {
+            return ToneKind::NeutralProfessional;
+        }
+
+        let input_lower = input.to_lowercase();
+
+        // Detect emotional markers
+        let urgency = self.detect_urgency(&input_lower, config);
+        let sadness = self.detect_sadness(&input_lower, config);
+        let technical = self.detect_technical_domain(&input_lower, config);
+
+        // Priority: Urgency > Sadness > Technical > Default
+        if urgency > config.urgency_threshold {
+            self.active_tone = Some(ToneKind::Direct);
+            return ToneKind::Direct;
+        }
+
+        if sadness > config.sadness_threshold {
+            self.active_tone = Some(ToneKind::Empathetic);
+            return ToneKind::Empathetic;
+        }
+
+        if technical > config.technical_threshold {
+            self.active_tone = Some(ToneKind::Technical);
+            return ToneKind::Technical;
+        }
+
+        // Check for casual/formal markers
+        let casual_score = self.score_against_anchor(&input_lower, ToneKind::Casual);
+        let formal_score = self.score_against_anchor(&input_lower, ToneKind::Formal);
+
+        if casual_score > 0.3 && casual_score > formal_score {
+            self.active_tone = Some(ToneKind::Casual);
+            return ToneKind::Casual;
+        }
+
+        if formal_score > 0.3 {
+            self.active_tone = Some(ToneKind::Formal);
+            return ToneKind::Formal;
+        }
+
+        // Persist active tone for session if decay is 0
+        if self.decay_rate == 0.0 {
+            if let Some(active) = self.active_tone {
+                return active;
+            }
+        }
+
+        // Fallback to neutral
+        ToneKind::NeutralProfessional
+    }
+
+    /// Detect urgency markers in input
+    fn detect_urgency(&self, input_lower: &str, config: &ToneInferenceConfig) -> f32 {
+        let urgency_keywords = [
+            "urgent", "emergency", "asap", "immediately", "now", "critical",
+            "important", "quickly", "hurry", "fast", "right now",
+        ];
+
+        let mut score = 0.0;
+        for keyword in &urgency_keywords {
+            if input_lower.contains(keyword) {
+                score += 0.15;
+            }
+        }
+
+        // Check for exclamation marks
+        let exclamation_count = input_lower.matches('!').count();
+        score += exclamation_count as f32 * 0.1;
+
+        score.min(1.0)
+    }
+
+    /// Detect sadness/empathy markers in input
+    fn detect_sadness(&self, input_lower: &str, _config: &ToneInferenceConfig) -> f32 {
+        let sadness_keywords = [
+            "sad", "upset", "worried", "anxious", "depressed", "lonely",
+            "hurt", "pain", "suffering", "struggling", "difficult", "hard",
+            "lost", "grief", "cry", "tears", "hopeless",
+        ];
+
+        let mut score: f32 = 0.0;
+        for keyword in &sadness_keywords {
+            if input_lower.contains(keyword) {
+                score += 0.12;
+            }
+        }
+
+        score.min(1.0)
+    }
+
+    /// Detect technical domain markers in input
+    fn detect_technical_domain(&self, input_lower: &str, _config: &ToneInferenceConfig) -> f32 {
+        let technical_keywords = [
+            "code", "function", "api", "algorithm", "debug", "error",
+            "variable", "method", "class", "system", "architecture",
+            "implementation", "database", "server", "client", "protocol",
+            "interface", "module", "component", "service", "endpoint",
+        ];
+
+        let mut score: f32 = 0.0;
+        for keyword in &technical_keywords {
+            if input_lower.contains(keyword) {
+                score += 0.08;
+            }
+        }
+
+        score.min(1.0)
+    }
+
+    /// Score input against a style anchor
+    fn score_against_anchor(&self, input_lower: &str, tone: ToneKind) -> f32 {
+        if let Some(anchor) = self.style_anchors.get(&tone) {
+            let mut score: f32 = 0.0;
+            for keyword in &anchor.keywords {
+                if input_lower.contains(keyword) {
+                    score += 0.1;
+                }
+            }
+            return score.min(1.0);
+        }
+        0.0
+    }
+
+    /// Get current active tone
+    pub fn active_tone(&self) -> Option<ToneKind> {
+        self.active_tone
+    }
+
+    /// Calculate style resonance between candidate and active style anchor
+    pub fn style_resonance(&self, candidate: &Unit, anchor: &StyleAnchor) -> f32 {
+        // Simple semantic similarity based on keyword overlap
+        let candidate_lower = candidate.content.to_lowercase();
+        let mut resonance: f32 = 0.0;
+
+        for keyword in &anchor.keywords {
+            if candidate_lower.contains(keyword) {
+                resonance += 0.1;
+            }
+        }
+
+        resonance.min(1.0)
     }
 }
 

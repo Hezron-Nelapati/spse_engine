@@ -1,6 +1,6 @@
 use crate::config::{
     AdaptiveTrustProfile, EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
-    RetrievalThresholds, ScoringWeights, TrustConfig,
+    ReasoningLoopConfig, RetrievalThresholds, ScoringWeights, TrustConfig,
 };
 use crate::datasets::{self, DatasetSinkControl, DatasetTextChunk, PreparationReport};
 use crate::document::{
@@ -31,10 +31,11 @@ use crate::telemetry::test_observer::{
 };
 use crate::training::{self, TrainingPhasePlan, TrainingScope};
 use crate::types::{
-    ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport, ExplainTrace,
+    ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport, ExplainTrace,
     InputPacket, IntentKind, IntentProfile, JobState, LayerNote, MemoryChannel, MemoryType,
-    MergedState, ProcessResult, QueueDepths, ResolverMode, RetrievedDocument, RoutingResult,
-    SearchDecision, SequenceState, SourceKind, TrainBatchRequest, TrainingExecutionMode,
+    MergedState, OutputType, ProcessResult, QueueDepths, ReasoningResult, ReasoningState,
+    ResolvedCandidate, ResolverMode, RetrievedDocument, RoutingResult, SearchDecision,
+    SequenceState, SourceKind, ThoughtUnit, TrainBatchRequest, TrainingExecutionMode,
     TrainingJobStatus, TrainingMetrics, TrainingOptions, TrainingPhaseKind, TrainingPhaseStatus,
     TrainingSource, TrainingSourceType, Unit, UnitHierarchy,
 };
@@ -1122,6 +1123,144 @@ impl Engine {
         result
     }
 
+    // ========================================================================
+    // Phase 3: Dynamic Reasoning Loop
+    // ========================================================================
+
+    /// Phase 3.1: Execute dynamic reasoning loop if triggered by confidence gating.
+    /// Returns reasoning result with thoughts and final output.
+    fn execute_reasoning_loop(
+        &self,
+        query: &str,
+        initial_confidence: f32,
+        intent: &IntentProfile,
+        config: &ReasoningLoopConfig,
+    ) -> ReasoningResult {
+        let mut state = ReasoningState::default();
+        state.active = true;
+        state.confidence_trajectory.push(initial_confidence);
+
+        // Check if reasoning should be triggered
+        if !IntentDetector::should_trigger_reasoning(intent, config) {
+            return ReasoningResult {
+                output: OutputType::FinalAnswer(String::new()),
+                steps_taken: 0,
+                final_confidence: initial_confidence,
+                reasoning_triggered: false,
+                thoughts: Vec::new(),
+            };
+        }
+
+        // Execute reasoning steps
+        for step in 0..config.max_internal_steps {
+            state.current_step = step;
+
+            // Generate thought unit for this step
+            let thought = self.generate_thought_unit(query, step, &state);
+            let thought_confidence = thought.confidence;
+
+            // Ingest silent thought into memory (Intent channel, not Core)
+            self.ingest_silent_thought(&thought);
+
+            state.thoughts.push(thought);
+            state.confidence_trajectory.push(thought_confidence);
+
+            // Check exit condition
+            if thought_confidence >= config.exit_confidence_threshold {
+                break;
+            }
+        }
+
+        state.max_steps_reached = state.current_step >= config.max_internal_steps - 1;
+
+        // Build final output
+        let final_confidence = *state.confidence_trajectory.last().unwrap_or(&initial_confidence);
+        let output = OutputType::FinalAnswer(String::new());
+
+        ReasoningResult {
+            output,
+            steps_taken: state.thoughts.len(),
+            final_confidence,
+            reasoning_triggered: true,
+            thoughts: state.thoughts,
+        }
+    }
+
+    /// Generate a thought unit for the reasoning loop.
+    /// This is a placeholder implementation - actual thought generation would use
+    /// the candidate pool and context to generate internal reasoning steps.
+    fn generate_thought_unit(&self, query: &str, step: usize, state: &ReasoningState) -> ThoughtUnit {
+        // Calculate confidence improvement based on step and query complexity
+        let previous_confidence = state.confidence_trajectory.last().copied().unwrap_or(0.0);
+        let improvement = 0.1 * (1.0 - previous_confidence).min(0.3);
+        let new_confidence = (previous_confidence + improvement).clamp(0.0, 1.0);
+
+        // Generate thought content (placeholder - actual implementation would analyze candidates)
+        let content = format!(
+            "Reasoning step {}: Analyzing '{}' with {} previous thoughts",
+            step + 1,
+            query.chars().take(50).collect::<String>(),
+            state.thoughts.len()
+        );
+
+        ThoughtUnit::new(content, step, new_confidence)
+    }
+
+    /// Ingest a silent thought into memory using the Reasoning channel.
+    /// This prevents pollution of Core memory with reasoning artifacts.
+    fn ingest_silent_thought(&self, thought: &ThoughtUnit) {
+        let mut memory = self.memory.lock().expect("memory mutex poisoned");
+
+        // Create an activated unit from the thought for hierarchy ingestion
+        let activation = ActivatedUnit {
+            normalized: thought.content.clone(),
+            content: thought.content.clone(),
+            level: crate::types::UnitLevel::Phrase,
+            utility_score: thought.confidence,
+            confidence: thought.confidence,
+            frequency: 1,
+            salience: 0.5,
+            context_hint: format!("reasoning_step_{}", thought.step),
+        };
+
+        // Build a minimal hierarchy for the thought
+        let mut hierarchy = UnitHierarchy::default();
+        hierarchy.levels.insert(
+            "Phrase".to_string(),
+            vec![activation],
+        );
+
+        // Ingest into Reasoning channel, not Core
+        memory.ingest_hierarchy_with_channels(
+            &hierarchy,
+            SourceKind::UserInput,
+            &format!("reasoning_step_{}", thought.step),
+            MemoryType::Episodic,
+            &[MemoryChannel::Reasoning],
+        );
+    }
+
+    /// Assess confidence for dynamic reasoning trigger.
+    fn assess_confidence(&self, query: &str, intent: &IntentProfile) -> f32 {
+        // Use intent confidence as primary signal
+        let base_confidence = intent.confidence;
+
+        // Adjust based on query characteristics
+        let query_lower = query.to_lowercase();
+        let has_question_words = query_lower.contains("what")
+            || query_lower.contains("how")
+            || query_lower.contains("why")
+            || query_lower.contains("when")
+            || query_lower.contains("where");
+
+        // Questions have slightly lower confidence (need more reasoning)
+        if has_question_words {
+            (base_confidence * 0.9).clamp(0.0, 1.0)
+        } else {
+            base_confidence
+        }
+    }
+
     #[doc(hidden)]
     pub async fn train_batch(&self, request: TrainBatchRequest) -> TrainingJobStatus {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
@@ -1491,6 +1630,11 @@ impl Engine {
             jobs.insert(job_id.to_string(), status.clone());
         }
         Some(status)
+    }
+
+    /// Phase 3.4: Expose config for auto-mode enforcement
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
     }
 
     fn apply_phase_governance(

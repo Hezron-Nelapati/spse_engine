@@ -941,3 +941,100 @@ pub struct DryRunReport {
     pub query_result: String,
     pub memory_summary: String,
 }
+
+// ============================================================================
+// Phase 3: LLM-Like Core Types
+// ============================================================================
+
+/// Output type for dynamic reasoning - distinguishes between final answers and internal thoughts
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputType {
+    /// Final answer to be shown to user
+    FinalAnswer(String),
+    /// Internal reasoning step - hidden from user
+    SilentThought(String),
+}
+
+/// Thought unit for dynamic reasoning loop
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ThoughtUnit {
+    /// The thought content
+    pub content: String,
+    /// Step number in reasoning loop (0-indexed)
+    pub step: usize,
+    /// Whether this thought is internal-only (not shown to user)
+    pub internal_only: bool,
+    /// Confidence after this thought step
+    pub confidence: f32,
+    /// Timestamp when thought was generated
+    pub created_at: DateTime<Utc>,
+}
+
+impl ThoughtUnit {
+    pub fn new(content: String, step: usize, confidence: f32) -> Self {
+        Self {
+            content,
+            step,
+            internal_only: true,
+            confidence,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// Tone kinds for internal tone inference
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneKind {
+    #[default]
+    NeutralProfessional,
+    Empathetic,
+    Direct,
+    Technical,
+    Casual,
+    Formal,
+}
+
+/// Style anchor for tone inference - represents a reference style unit
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StyleAnchor {
+    /// Tone kind this anchor represents
+    pub tone: ToneKind,
+    /// Semantic position in embedding space
+    pub embedding: [f32; 3],
+    /// Keywords associated with this style
+    pub keywords: Vec<String>,
+    /// Decay rate for session persistence (0.0 = persist for session)
+    pub decay_rate: f32,
+}
+
+/// Reasoning state for dynamic reasoning loop
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ReasoningState {
+    /// Whether reasoning loop is currently active
+    pub active: bool,
+    /// Current step in reasoning loop
+    pub current_step: usize,
+    /// Thoughts generated so far
+    pub thoughts: Vec<ThoughtUnit>,
+    /// Confidence trajectory (one entry per step)
+    pub confidence_trajectory: Vec<f32>,
+    /// Whether max steps reached
+    pub max_steps_reached: bool,
+}
+
+/// Result of dynamic reasoning execution
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReasoningResult {
+    /// Final output type
+    pub output: OutputType,
+    /// Number of reasoning steps taken
+    pub steps_taken: usize,
+    /// Final confidence score
+    pub final_confidence: f32,
+    /// Whether reasoning was triggered
+    pub reasoning_triggered: bool,
+    /// All thoughts generated (for telemetry)
+    pub thoughts: Vec<ThoughtUnit>,
+}

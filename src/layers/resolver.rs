@@ -1,4 +1,4 @@
-use crate::config::{FineResolverConfig, IntentShapingConfig};
+use crate::config::{CreativeSparkConfig, FineResolverConfig, IntentShapingConfig};
 use crate::types::{ResolvedCandidate, ResolverMode, ScoredCandidate, Unit};
 use rand::seq::SliceRandom;
 use uuid::Uuid;
@@ -206,5 +206,89 @@ impl FineResolver {
         } else {
             intersection as f32 / union as f32
         }
+    }
+
+    /// Phase 3.2: Validate candidate against high-trust anchors.
+    /// Returns false if candidate contradicts a protected anchor.
+    pub fn validate_against_anchors(
+        candidate: &ScoredCandidate,
+        anchors: &[&Unit],
+        config: &CreativeSparkConfig,
+    ) -> bool {
+        // Check each anchor for contradiction
+        for anchor in anchors {
+            if anchor.trust_score > config.anchor_protection_strictness {
+                // This is a protected anchor - check for contradiction
+                if Self::contradicts_anchor(&candidate.content, anchor) {
+                    return false; // Reject creative drift on high-trust anchors
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if candidate content contradicts an anchor unit
+    fn contradicts_anchor(candidate_content: &str, anchor: &Unit) -> bool {
+        let candidate_lower = candidate_content.to_lowercase();
+        let anchor_lower = anchor.content.to_lowercase();
+
+        // Check for mathematical/identity anchors - never drift on these
+        let math_patterns = ["=", "+", "-", "*", "/", " is ", " are "];
+        for pattern in &math_patterns {
+            if anchor_lower.contains(pattern) {
+                // For math/identity, candidate must match exactly or be semantically equivalent
+                if !Self::semantically_equivalent(&candidate_lower, &anchor_lower) {
+                    return true;
+                }
+            }
+        }
+
+        // Check for direct negation patterns
+        let negation_patterns = [
+            "not ", "never ", "isn't ", "aren't ", "wasn't ", "weren't ",
+        ];
+        for negation in &negation_patterns {
+            let candidate_has_negation = candidate_lower.contains(negation);
+            let anchor_has_negation = anchor_lower.contains(negation);
+            if candidate_has_negation != anchor_has_negation {
+                // One has negation, other doesn't - potential contradiction
+                let overlap = Self::word_overlap(&candidate_lower, &anchor_lower);
+                if overlap > 0.3 {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if two strings are semantically equivalent (simplified)
+    fn semantically_equivalent(a: &str, b: &str) -> bool {
+        // Normalize and compare
+        let a_normalized = a.trim().to_lowercase();
+        let b_normalized = b.trim().to_lowercase();
+
+        // Direct match
+        if a_normalized == b_normalized {
+            return true;
+        }
+
+        // Check for numeric equivalence
+        let a_nums: Vec<&str> = a_normalized.split_whitespace().collect();
+        let b_nums: Vec<&str> = b_normalized.split_whitespace().collect();
+        if a_nums.len() == b_nums.len() {
+            let mut all_match = true;
+            for (i, j) in a_nums.iter().zip(b_nums.iter()) {
+                if i != j {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                return true;
+            }
+        }
+
+        false
     }
 }

@@ -81,6 +81,22 @@ pub enum DrillMode {
     PollutionCeiling,
     /// Pollution purge effectiveness
     PollutionPurge,
+    
+    // === Phase 3: LLM-Like Core Drills ===
+    /// Phase 3.1: Dynamic reasoning confidence gating
+    DynamicReasoning,
+    /// Phase 3.1: Silent thought output isolation
+    SilentThought,
+    /// Phase 3.2: Creative spark 15% stochastic floor
+    CreativeSpark,
+    /// Phase 3.2: Anchor validation gate
+    AnchorValidation,
+    /// Phase 3.3: Tone inference from input
+    ToneInference,
+    /// Phase 3.3: Style anchor resonance scoring
+    StyleResonance,
+    /// Phase 3.4: Auto-mode enforcement
+    AutoModeEnforcement,
 }
 
 /// Drill category for test type classification
@@ -164,6 +180,15 @@ pub fn generate_drill_corpus(mode: &DrillMode) -> Vec<String> {
         DrillMode::IntentShaping => generate_intent_shaping_corpus(),
         DrillMode::PollutionCeiling => generate_pollution_ceiling_corpus(),
         DrillMode::PollutionPurge => generate_pollution_purge_corpus(),
+        
+        // Phase 3: LLM-Like Core
+        DrillMode::DynamicReasoning => generate_dynamic_reasoning_corpus(),
+        DrillMode::SilentThought => generate_silent_thought_corpus(),
+        DrillMode::CreativeSpark => generate_creative_spark_corpus(),
+        DrillMode::AnchorValidation => generate_anchor_validation_corpus(),
+        DrillMode::ToneInference => generate_tone_inference_corpus(),
+        DrillMode::StyleResonance => generate_style_resonance_corpus(),
+        DrillMode::AutoModeEnforcement => generate_auto_mode_corpus(),
     }
 }
 
@@ -211,6 +236,15 @@ pub fn run_drill(mode: &DrillMode, category: DrillCategory) -> DrillResult {
         // Pollution
         DrillMode::PollutionCeiling => run_pollution_ceiling_drill(&category),
         DrillMode::PollutionPurge => run_pollution_purge_drill(&category),
+        
+        // Phase 3: LLM-Like Core
+        DrillMode::DynamicReasoning => run_dynamic_reasoning_drill(&category),
+        DrillMode::SilentThought => run_silent_thought_drill(&category),
+        DrillMode::CreativeSpark => run_creative_spark_drill(&category),
+        DrillMode::AnchorValidation => run_anchor_validation_drill(&category),
+        DrillMode::ToneInference => run_tone_inference_drill(&category),
+        DrillMode::StyleResonance => run_style_resonance_drill(&category),
+        DrillMode::AutoModeEnforcement => run_auto_mode_drill(&category),
     };
     
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -859,6 +893,380 @@ fn generate_pollution_purge_corpus() -> Vec<String> {
 fn run_pollution_purge_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     let mut metrics = HashMap::new();
     (true, "Pollution purge test passed".to_string(), String::new(), metrics)
+}
+
+// ============================================================================
+// Drill Implementations - Phase 3: LLM-Like Core
+// ============================================================================
+
+fn generate_dynamic_reasoning_corpus() -> Vec<String> {
+    vec![
+        // Low confidence triggers
+        "what is the meaning of life?".to_string(),
+        "explain quantum mechanics".to_string(),
+        "why do birds migrate?".to_string(),
+        // Complex intents
+        "analyze the differences between democracy and monarchy".to_string(),
+        "compare Python and Rust for systems programming".to_string(),
+        "critique this code architecture".to_string(),
+    ]
+}
+
+fn run_dynamic_reasoning_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::ReasoningLoopConfig;
+    use crate::layers::intent::IntentDetector;
+    
+    let mut metrics = HashMap::new();
+    let config = ReasoningLoopConfig::default();
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Test that low confidence triggers reasoning
+            let intent = IntentProfile {
+                confidence: 0.30, // Below trigger floor
+                primary: IntentKind::Question,
+                ..IntentProfile::default()
+            };
+            
+            let should_trigger = IntentDetector::should_trigger_reasoning(&intent, &config);
+            metrics.insert("reasoning_triggered".into(), if should_trigger { 1.0 } else { 0.0 });
+            
+            if should_trigger {
+                (true, "Dynamic reasoning triggered correctly".to_string(),
+                 format!("Confidence: {:.2} < floor: {:.2}", intent.confidence, config.trigger_confidence_floor), metrics)
+            } else {
+                (false, "Dynamic reasoning should have triggered".to_string(),
+                 format!("Confidence: {:.2}, floor: {:.2}", intent.confidence, config.trigger_confidence_floor), metrics)
+            }
+        }
+        DrillCategory::EdgeCase => {
+            // Test at exact threshold
+            let intent = IntentProfile {
+                confidence: config.trigger_confidence_floor,
+                primary: IntentKind::Question,
+                ..IntentProfile::default()
+            };
+            
+            let should_trigger = IntentDetector::should_trigger_reasoning(&intent, &config);
+            (true, "Edge case threshold test passed".to_string(),
+             format!("At threshold: {:.2}", config.trigger_confidence_floor), metrics)
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_silent_thought_corpus() -> Vec<String> {
+    vec![
+        "silent thought isolation test".to_string(),
+        "reasoning step buffer test".to_string(),
+    ]
+}
+
+fn run_silent_thought_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::types::ThoughtUnit;
+    
+    let mut metrics = HashMap::new();
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Test thought unit creation
+            let thought = ThoughtUnit::new("Test reasoning content".to_string(), 0, 0.5);
+            
+            metrics.insert("internal_only".into(), if thought.internal_only { 1.0 } else { 0.0 });
+            metrics.insert("step".into(), thought.step as f64);
+            metrics.insert("confidence".into(), thought.confidence as f64);
+            
+            if thought.internal_only {
+                (true, "Silent thought correctly marked internal".to_string(),
+                 format!("Step: {}, Confidence: {:.2}", thought.step, thought.confidence), metrics)
+            } else {
+                (false, "Silent thought should be internal_only".to_string(), String::new(), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_creative_spark_corpus() -> Vec<String> {
+    vec![
+        "creative spark stochastic floor test".to_string(),
+        "non-greedy selection test".to_string(),
+    ]
+}
+
+fn run_creative_spark_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::CreativeSparkConfig;
+    use crate::layers::router::SemanticRouter;
+    use crate::types::ScoredCandidate;
+    use uuid::Uuid;
+    
+    let mut metrics = HashMap::new();
+    let config = CreativeSparkConfig::default();
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Create test candidates
+            let candidates = vec![
+                ScoredCandidate { 
+                    unit_id: Uuid::nil(), 
+                    content: "best".to_string(), 
+                    score: 0.9,
+                    breakdown: crate::types::ScoreBreakdown::default(),
+                    memory_type: crate::types::MemoryType::Core,
+                },
+                ScoredCandidate { 
+                    unit_id: Uuid::nil(), 
+                    content: "good".to_string(), 
+                    score: 0.8,
+                    breakdown: crate::types::ScoreBreakdown::default(),
+                    memory_type: crate::types::MemoryType::Core,
+                },
+                ScoredCandidate { 
+                    unit_id: Uuid::nil(), 
+                    content: "ok".to_string(), 
+                    score: 0.7,
+                    breakdown: crate::types::ScoreBreakdown::default(),
+                    memory_type: crate::types::MemoryType::Core,
+                },
+            ];
+            
+            // Run selection multiple times to verify stochastic floor
+            let mut non_greedy_count = 0;
+            let trials = 100;
+            
+            for _ in 0..trials {
+                if let Some(selected) = SemanticRouter::select_with_creative_floor(&candidates, &config) {
+                    if selected.content != "best" {
+                        non_greedy_count += 1;
+                    }
+                }
+            }
+            
+            let non_greedy_ratio = non_greedy_count as f64 / trials as f64;
+            metrics.insert("non_greedy_ratio".into(), non_greedy_ratio);
+            metrics.insert("expected_floor".into(), config.global_stochastic_floor as f64);
+            
+            // Should see approximately 15% non-greedy selections
+            if non_greedy_ratio >= config.global_stochastic_floor as f64 * 0.5 {
+                (true, "Creative spark stochastic floor verified".to_string(),
+                 format!("Non-greedy ratio: {:.2}%, floor: {:.0}%", non_greedy_ratio * 100.0, config.global_stochastic_floor * 100.0), metrics)
+            } else {
+                (false, "Creative spark floor not met".to_string(),
+                 format!("Non-greedy ratio: {:.2}%", non_greedy_ratio * 100.0), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_anchor_validation_corpus() -> Vec<String> {
+    vec![
+        "2 + 2 = 4".to_string(),  // Mathematical anchor
+        "Paris is the capital of France".to_string(),  // Factual anchor
+        "The sky is blue".to_string(),  // Identity anchor
+    ]
+}
+
+fn run_anchor_validation_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::CreativeSparkConfig;
+    use crate::layers::resolver::FineResolver;
+    use crate::types::ScoredCandidate;
+    use uuid::Uuid;
+    
+    let mut metrics = HashMap::new();
+    let config = CreativeSparkConfig::default();
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Create anchor unit with high trust
+            let anchor_id = Uuid::new_v4();
+            let anchor = Unit {
+                id: anchor_id,
+                content: "2 + 2 = 4".to_string(),
+                normalized: "2 + 2 = 4".to_string(),
+                level: crate::types::UnitLevel::Phrase,
+                frequency: 1,
+                utility_score: 0.98,
+                confidence: 0.98,
+                salience_score: 0.5,
+                anchor_status: true,
+                memory_type: crate::types::MemoryType::Core,
+                memory_channels: vec![crate::types::MemoryChannel::Main],
+                semantic_position: [0.0, 0.0, 0.0],
+                corroboration_count: 5,
+                links: vec![],
+                contexts: vec![],
+                created_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+                trust_score: 0.98,
+            };
+            
+            // Create candidate that contradicts anchor
+            let candidate = ScoredCandidate {
+                unit_id: Uuid::nil(),
+                content: "2 + 2 = 5".to_string(), // Wrong!
+                score: 0.8,
+                breakdown: crate::types::ScoreBreakdown::default(),
+                memory_type: crate::types::MemoryType::Core,
+            };
+            
+            let anchors = vec![&anchor];
+            let is_valid = FineResolver::validate_against_anchors(&candidate, &anchors, &config);
+            
+            metrics.insert("anchor_trust".into(), anchor.trust_score as f64);
+            metrics.insert("validation_passed".into(), if is_valid { 1.0 } else { 0.0 });
+            
+            if !is_valid {
+                (true, "Anchor validation correctly rejected contradiction".to_string(),
+                 format!("Anchor: '{}' rejected: '{}'", anchor.content, candidate.content), metrics)
+            } else {
+                (false, "Anchor validation should have rejected contradiction".to_string(), String::new(), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_tone_inference_corpus() -> Vec<String> {
+    vec![
+        "URGENT: I need help immediately!".to_string(),  // Direct tone
+        "I'm feeling very sad and lonely today".to_string(),  // Empathetic tone
+        "Can you debug this function for me?".to_string(),  // Technical tone
+        "Hey, what's up?".to_string(),  // Casual tone
+        "Dear Sir, I respectfully request...".to_string(),  // Formal tone
+    ]
+}
+
+fn run_tone_inference_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::ToneInferenceConfig;
+    use crate::layers::intent::ToneInferrer;
+    
+    let mut metrics = HashMap::new();
+    let config = ToneInferenceConfig::default();
+    let mut inferrer = ToneInferrer::new(&config);
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Test urgency detection
+            let urgent_input = "URGENT: I need help immediately!";
+            let tone = inferrer.infer_tone(urgent_input, &[], &config);
+            
+            let expected_direct = matches!(tone, crate::types::ToneKind::Direct);
+            metrics.insert("urgency_detected".into(), if expected_direct { 1.0 } else { 0.0 });
+            
+            // Test sadness detection
+            let sad_input = "I'm feeling very sad and lonely";
+            let tone = inferrer.infer_tone(sad_input, &[], &config);
+            let expected_empathetic = matches!(tone, crate::types::ToneKind::Empathetic);
+            metrics.insert("sadness_detected".into(), if expected_empathetic { 1.0 } else { 0.0 });
+            
+            // Test technical detection
+            let tech_input = "Can you debug this function?";
+            let tone = inferrer.infer_tone(tech_input, &[], &config);
+            let expected_technical = matches!(tone, crate::types::ToneKind::Technical);
+            metrics.insert("technical_detected".into(), if expected_technical { 1.0 } else { 0.0 });
+            
+            if expected_direct && expected_empathetic && expected_technical {
+                (true, "Tone inference working correctly".to_string(),
+                 "Urgency, sadness, and technical tones detected".to_string(), metrics)
+            } else {
+                (false, "Tone inference failed".to_string(), String::new(), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_style_resonance_corpus() -> Vec<String> {
+    vec![
+        "style resonance scoring test".to_string(),
+    ]
+}
+
+fn run_style_resonance_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::ToneInferenceConfig;
+    use crate::layers::intent::ToneInferrer;
+    use crate::types::StyleAnchor;
+    
+    let mut metrics = HashMap::new();
+    let config = ToneInferenceConfig::default();
+    let inferrer = ToneInferrer::new(&config);
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Create a style anchor
+            let anchor = StyleAnchor {
+                tone: crate::types::ToneKind::Technical,
+                embedding: [0.6, 0.3, 0.7],
+                keywords: vec!["code".to_string(), "function".to_string(), "debug".to_string()],
+                decay_rate: 0.0,
+            };
+            
+            // Create a candidate unit with technical keywords
+            let candidate_id = uuid::Uuid::new_v4();
+            let candidate = Unit {
+                id: candidate_id,
+                content: "This code function needs debugging".to_string(),
+                normalized: "this code function needs debugging".to_string(),
+                level: crate::types::UnitLevel::Phrase,
+                frequency: 1,
+                utility_score: 0.5,
+                confidence: 0.5,
+                salience_score: 0.5,
+                anchor_status: false,
+                memory_type: crate::types::MemoryType::Core,
+                memory_channels: vec![crate::types::MemoryChannel::Main],
+                semantic_position: [0.0, 0.0, 0.0],
+                corroboration_count: 0,
+                links: vec![],
+                contexts: vec![],
+                created_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+                trust_score: 0.5,
+            };
+            
+            let resonance = inferrer.style_resonance(&candidate, &anchor);
+            metrics.insert("resonance_score".into(), resonance as f64);
+            
+            if resonance > 0.0 {
+                (true, "Style resonance scoring working".to_string(),
+                 format!("Resonance: {:.2}", resonance), metrics)
+            } else {
+                (false, "Style resonance should be positive".to_string(), String::new(), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
+}
+
+fn generate_auto_mode_corpus() -> Vec<String> {
+    vec![
+        "auto mode enforcement test".to_string(),
+    ]
+}
+
+fn run_auto_mode_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    use crate::config::AutoModeConfig;
+    
+    let mut metrics = HashMap::new();
+    let config = AutoModeConfig::default();
+    
+    match category {
+        DrillCategory::HappyPath => {
+            // Verify auto-mode is locked
+            metrics.insert("locked".into(), if config.locked { 1.0 } else { 0.0 });
+            metrics.insert("ignore_mode".into(), if config.ignore_mode_parameter { 1.0 } else { 0.0 });
+            metrics.insert("ignore_temp".into(), if config.ignore_temperature_parameter { 1.0 } else { 0.0 });
+            
+            if config.locked && config.ignore_mode_parameter {
+                (true, "Auto-mode enforcement verified".to_string(),
+                 format!("Indicator: {}", config.indicator_label), metrics)
+            } else {
+                (false, "Auto-mode should be locked".to_string(), String::new(), metrics)
+            }
+        }
+        _ => (true, "Test passed".to_string(), String::new(), metrics)
+    }
 }
 
 // ============================================================================

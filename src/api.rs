@@ -1,3 +1,4 @@
+use crate::config::AutoModeConfig;
 use crate::engine::Engine;
 use crate::proto::api as proto_api;
 use crate::types::{
@@ -16,6 +17,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 struct ApiState {
     engine: Arc<Engine>,
+    auto_mode_config: AutoModeConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,10 +33,12 @@ struct ApiError {
 const PROTOBUF_MIME: &str = "application/x-protobuf";
 
 pub fn router(engine: Arc<Engine>) -> Router {
-    let state = ApiState { engine };
+    let auto_mode_config = engine.config().auto_inference.auto_mode.clone();
+    let state = ApiState { engine, auto_mode_config };
     Router::new()
         .route("/api/v1/train/batch", post(train_batch))
         .route("/api/v1/train/status/:job_id", get(training_status))
+        .route("/api/v1/status", get(auto_mode_status))
         .with_state(state)
 }
 
@@ -97,6 +101,33 @@ async fn training_status(
                 ),
             )
         })
+}
+
+/// Phase 3.4: Auto-Mode Status Endpoint
+/// Returns the auto-mode indicator label to confirm engine is locked to auto mode.
+async fn auto_mode_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    #[derive(Debug, Serialize)]
+    struct AutoModeStatus {
+        mode: String,
+        locked: bool,
+        indicator: String,
+    }
+
+    let status = AutoModeStatus {
+        mode: "auto".to_string(),
+        locked: state.auto_mode_config.locked,
+        indicator: state.auto_mode_config.indicator_label.clone(),
+    };
+
+    if wants_protobuf(&headers, ACCEPT) {
+        // For protobuf, return JSON since we don't have a proto definition for this
+        Json(status).into_response()
+    } else {
+        Json(status).into_response()
+    }
 }
 
 fn decode_train_request(headers: &HeaderMap, body: &[u8]) -> Result<TrainRequest, String> {

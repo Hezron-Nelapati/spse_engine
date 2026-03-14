@@ -583,3 +583,52 @@ huggingface_streaming:
   max_retries: 6
   retry_base_delay_ms: 1000
   retry_max_delay_ms: 15000
+
+# ============================================================================
+# Phase 3: LLM-Like Core Configuration (Auto-Inference Features)
+# ============================================================================
+
+auto_inference:
+  # Dynamic Reasoning Loop (3.1)
+  # Reasoning is a transient state triggered by confidence gating, NOT a user toggle.
+  reasoning_loop:
+    enabled: true
+    trigger_confidence_floor: 0.40      # Below this, system starts "thinking"
+    max_internal_steps: 3               # Cap loops to save CPU on low-spec devices
+    exit_confidence_threshold: 0.60     # Exit early if confidence reaches this level
+    enable_thought_buffer_on_demand: true
+
+  # Controlled Creative Spark (3.2)
+  # Fixed 15% non-greedy sampling rate enforced globally, subject to anchor validation.
+  creative_spark:
+    global_stochastic_floor: 0.15       # Enforce 15% drift
+    selection_temperature: 0.7          # Temperature for weighted random selection
+    anchor_protection_strictness: 0.95  # Never drift on high-trust anchors
+    disable_drift_for_math: true        # Disable drift for mathematical/identity queries
+
+  # Internal Tone Inference (3.3)
+  # Tone is inferred from input semantics, NOT a user setting.
+  tone_inference:
+    enabled: true
+    style_anchor_decay: 0.0             # Persist tone for session (0.0 = no decay)
+    urgency_threshold: 0.7              # Threshold for urgency detection
+    sadness_threshold: 0.5              # Threshold for sadness/empathy detection
+    technical_threshold: 0.6            # Threshold for technical domain detection
+    style_resonance_weight: 0.08        # Weight for style resonance scoring
+
+  # Auto-Mode Enforcement (3.4)
+  # Engine operates in Auto-Mode exclusively, no user toggles.
+  auto_mode:
+    locked: true
+    indicator_label: "Auto-Intelligence Active"
+    ignore_mode_parameter: true
+    ignore_temperature_parameter: true
+    ignore_reasoning_depth_parameter: true
+    ignore_creative_level_parameter: true
+
+  # Dynamic Memory Allocation (Mode C efficiency)
+  dynamic_memory:
+    enabled: true
+    base_memory_limit_mb: 350           # Idle memory limit
+    max_memory_limit_mb: 550            # Peak during reasoning
+    thought_buffer_size_kb: 64          # Per-step buffer size

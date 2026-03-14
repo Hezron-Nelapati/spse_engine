@@ -581,6 +581,182 @@ impl Default for IntentShapingConfig {
     }
 }
 
+// ============================================================================
+// Phase 3: LLM-Like Core Configuration
+// ============================================================================
+
+/// Configuration for dynamic reasoning loop (3.1)
+/// Reasoning is a transient state triggered by confidence gating, NOT a user toggle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReasoningLoopConfig {
+    /// Enable dynamic reasoning loop
+    pub enabled: bool,
+    /// Confidence floor below which reasoning is triggered
+    pub trigger_confidence_floor: f32,
+    /// Maximum internal reasoning steps (cap to preserve CPU on low-spec devices)
+    pub max_internal_steps: usize,
+    /// Confidence threshold to exit reasoning loop early
+    pub exit_confidence_threshold: f32,
+    /// Enable thought buffer allocation on demand
+    pub enable_thought_buffer_on_demand: bool,
+}
+
+impl Default for ReasoningLoopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trigger_confidence_floor: 0.40,
+            max_internal_steps: 3,
+            exit_confidence_threshold: 0.60,
+            enable_thought_buffer_on_demand: true,
+        }
+    }
+}
+
+/// Configuration for controlled creative spark (3.2)
+/// Fixed 15% non-greedy sampling rate enforced globally, subject to anchor validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CreativeSparkConfig {
+    /// Global stochastic floor for non-greedy selection (0.15 = 15%)
+    pub global_stochastic_floor: f32,
+    /// Temperature for weighted random selection when stochastic floor triggers
+    pub selection_temperature: f32,
+    /// Trust threshold above which anchors are protected from drift
+    pub anchor_protection_strictness: f32,
+    /// Whether to disable drift entirely for mathematical/identity queries
+    pub disable_drift_for_math: bool,
+}
+
+impl Default for CreativeSparkConfig {
+    fn default() -> Self {
+        Self {
+            global_stochastic_floor: 0.15,
+            selection_temperature: 0.7,
+            anchor_protection_strictness: 0.95,
+            disable_drift_for_math: true,
+        }
+    }
+}
+
+/// Configuration for internal tone inference (3.3)
+/// Tone is inferred from input semantics, NOT a user setting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToneInferenceConfig {
+    /// Enable tone inference
+    pub enabled: bool,
+    /// Decay rate for style anchor persistence (0.0 = persist for session)
+    pub style_anchor_decay: f32,
+    /// Threshold for urgency detection
+    pub urgency_threshold: f32,
+    /// Threshold for sadness/empathy detection
+    pub sadness_threshold: f32,
+    /// Threshold for technical domain detection
+    pub technical_threshold: f32,
+    /// Weight for style resonance scoring in candidate selection
+    pub style_resonance_weight: f32,
+}
+
+impl Default for ToneInferenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            style_anchor_decay: 0.0,
+            urgency_threshold: 0.7,
+            sadness_threshold: 0.5,
+            technical_threshold: 0.6,
+            style_resonance_weight: 0.08,
+        }
+    }
+}
+
+/// Configuration for auto-mode enforcement (3.4)
+/// Engine operates in Auto-Mode exclusively, no user toggles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoModeConfig {
+    /// Lock engine to auto mode (always true in production)
+    pub locked: bool,
+    /// Display name for auto mode indicator
+    pub indicator_label: String,
+    /// Ignore mode parameter if provided in API
+    pub ignore_mode_parameter: bool,
+    /// Ignore temperature parameter if provided in API
+    pub ignore_temperature_parameter: bool,
+    /// Ignore reasoning_depth parameter if provided in API
+    pub ignore_reasoning_depth_parameter: bool,
+    /// Ignore creative_level parameter if provided in API
+    pub ignore_creative_level_parameter: bool,
+}
+
+impl Default for AutoModeConfig {
+    fn default() -> Self {
+        Self {
+            locked: true,
+            indicator_label: "Auto-Intelligence Active".to_string(),
+            ignore_mode_parameter: true,
+            ignore_temperature_parameter: true,
+            ignore_reasoning_depth_parameter: true,
+            ignore_creative_level_parameter: true,
+        }
+    }
+}
+
+/// Configuration for dynamic memory allocation (Mode C efficiency)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DynamicMemoryConfig {
+    /// Enable dynamic memory allocation for reasoning
+    pub enabled: bool,
+    /// Base memory limit when idle (MB)
+    pub base_memory_limit_mb: usize,
+    /// Maximum memory limit during reasoning (MB)
+    pub max_memory_limit_mb: usize,
+    /// Thought buffer size per reasoning step (KB)
+    pub thought_buffer_size_kb: usize,
+}
+
+impl Default for DynamicMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_memory_limit_mb: 350,
+            max_memory_limit_mb: 550,
+            thought_buffer_size_kb: 64,
+        }
+    }
+}
+
+/// Wrapper for all auto-inference features (Phase 3)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoInferenceConfig {
+    /// Dynamic reasoning loop configuration
+    pub reasoning_loop: ReasoningLoopConfig,
+    /// Controlled creative spark configuration
+    pub creative_spark: CreativeSparkConfig,
+    /// Tone inference configuration
+    pub tone_inference: ToneInferenceConfig,
+    /// Auto-mode enforcement configuration
+    pub auto_mode: AutoModeConfig,
+    /// Dynamic memory allocation configuration
+    pub dynamic_memory: DynamicMemoryConfig,
+}
+
+impl Default for AutoInferenceConfig {
+    fn default() -> Self {
+        Self {
+            reasoning_loop: ReasoningLoopConfig::default(),
+            creative_spark: CreativeSparkConfig::default(),
+            tone_inference: ToneInferenceConfig::default(),
+            auto_mode: AutoModeConfig::default(),
+            dynamic_memory: DynamicMemoryConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IntentAdaptiveProfile {
@@ -1605,6 +1781,9 @@ pub struct EngineConfig {
     pub silent_training: SilentTrainingConfig,
     #[serde(default)]
     pub huggingface_streaming: HuggingFaceStreamingConfig,
+    /// Phase 3: LLM-Like Core configuration (auto-inference features)
+    #[serde(default)]
+    pub auto_inference: AutoInferenceConfig,
 }
 
 impl Default for EngineConfig {
@@ -1631,6 +1810,7 @@ impl Default for EngineConfig {
             source_policies: SourcePoliciesConfig::default(),
             silent_training: default_silent_training_config(),
             huggingface_streaming: HuggingFaceStreamingConfig::default(),
+            auto_inference: AutoInferenceConfig::default(),
         }
     }
 }
@@ -2061,6 +2241,75 @@ impl EngineConfig {
             0.0,
             1.0,
         )?;
+        // Phase 3: Auto-inference config validation
+        validate_range(
+            "auto_inference.reasoning_loop.trigger_confidence_floor",
+            self.auto_inference.reasoning_loop.trigger_confidence_floor,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.reasoning_loop.exit_confidence_threshold",
+            self.auto_inference.reasoning_loop.exit_confidence_threshold,
+            0.0,
+            1.0,
+        )?;
+        if self.auto_inference.reasoning_loop.max_internal_steps == 0 {
+            return Err("auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string());
+        }
+        validate_range(
+            "auto_inference.creative_spark.global_stochastic_floor",
+            self.auto_inference.creative_spark.global_stochastic_floor,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.creative_spark.selection_temperature",
+            self.auto_inference.creative_spark.selection_temperature,
+            0.0,
+            2.0,
+        )?;
+        validate_range(
+            "auto_inference.creative_spark.anchor_protection_strictness",
+            self.auto_inference.creative_spark.anchor_protection_strictness,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.tone_inference.urgency_threshold",
+            self.auto_inference.tone_inference.urgency_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.tone_inference.sadness_threshold",
+            self.auto_inference.tone_inference.sadness_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.tone_inference.technical_threshold",
+            self.auto_inference.tone_inference.technical_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.tone_inference.style_resonance_weight",
+            self.auto_inference.tone_inference.style_resonance_weight,
+            0.0,
+            1.0,
+        )?;
+        if self.auto_inference.dynamic_memory.base_memory_limit_mb == 0 {
+            return Err("auto_inference.dynamic_memory.base_memory_limit_mb must be >= 1".to_string());
+        }
+        if self.auto_inference.dynamic_memory.max_memory_limit_mb
+            < self.auto_inference.dynamic_memory.base_memory_limit_mb
+        {
+            return Err(
+                "auto_inference.dynamic_memory.max_memory_limit_mb must be >= base_memory_limit_mb"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 

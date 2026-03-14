@@ -1,6 +1,6 @@
-use crate::config::{EscapeProfile, SemanticMapConfig};
+use crate::config::{CreativeSparkConfig, EscapeProfile, SemanticMapConfig};
 use crate::spatial_index::{centroid, SpatialGrid};
-use crate::types::{RoutingResult, Unit};
+use crate::types::{CandidateRoute, RoutingResult, ScoredCandidate, Unit};
 use rand::Rng;
 use std::collections::HashSet;
 
@@ -90,6 +90,47 @@ impl SemanticRouter {
             candidate_ids,
             used_escape: false,
             rationale,
+        }
+    }
+
+    /// Phase 3.2: Select candidate with creative spark (15% stochastic floor).
+    /// Forces non-greedy selection 15% of the time, subject to anchor validation in resolver.
+    pub fn select_with_creative_floor(
+        candidates: &[ScoredCandidate],
+        config: &CreativeSparkConfig,
+    ) -> Option<ScoredCandidate> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let mut rng = rand::thread_rng();
+        let sample = rng.gen::<f32>();
+
+        if sample < config.global_stochastic_floor {
+            // Non-greedy selection: weighted random from top-K
+            let top_k: Vec<_> = candidates.iter().take(5).collect();
+            if top_k.is_empty() {
+                return candidates.first().cloned();
+            }
+
+            // Apply softmax-like weighting with temperature
+            let total_score: f32 = top_k
+                .iter()
+                .map(|c| (c.score / config.selection_temperature).exp())
+                .sum();
+            let mut cumulative = 0.0;
+            let threshold = rng.gen::<f32>() * total_score;
+
+            for candidate in &top_k {
+                cumulative += (candidate.score / config.selection_temperature).exp();
+                if cumulative >= threshold {
+                    return Some((*candidate).clone());
+                }
+            }
+            top_k.last().map(|c| (*c).clone())
+        } else {
+            // Greedy selection: return highest scored candidate
+            candidates.first().cloned()
         }
     }
 }
