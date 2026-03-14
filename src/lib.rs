@@ -1,5 +1,6 @@
 pub mod api;
 pub mod bloom_filter;
+pub mod common;
 pub mod config;
 pub mod datasets;
 pub mod document;

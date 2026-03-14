@@ -226,16 +226,32 @@ pub fn centroid(positions: &[[f32; 3]]) -> [f32; 3] {
 }
 
 fn select_layout_units(units: &[Unit], max_layout_units: usize) -> Vec<Unit> {
-    let mut selected = units.to_vec();
-    selected.sort_by(|lhs, rhs| {
-        rhs.anchor_status
-            .cmp(&lhs.anchor_status)
-            .then((rhs.memory_type == MemoryType::Core).cmp(&(lhs.memory_type == MemoryType::Core)))
-            .then(rhs.utility_score.total_cmp(&lhs.utility_score))
-            .then(rhs.frequency.cmp(&lhs.frequency))
+    // Collect indices with sort key to avoid cloning all units
+    let mut indexed: Vec<(usize, (bool, bool, f32, u64))> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| {
+            (i, (
+                u.anchor_status,
+                u.memory_type == MemoryType::Core,
+                u.utility_score,
+                u.frequency,
+            ))
+        })
+        .collect();
+    
+    indexed.sort_by(|lhs, rhs| {
+        rhs.1.0.cmp(&lhs.1.0)  // anchor_status desc
+            .then(rhs.1.1.cmp(&lhs.1.1))  // is_core desc
+            .then(rhs.1.2.total_cmp(&lhs.1.2))  // utility_score desc
+            .then(rhs.1.3.cmp(&lhs.1.3))  // frequency desc
     });
-    selected.truncate(max_layout_units.max(1));
-    selected
+    
+    indexed
+        .into_iter()
+        .take(max_layout_units.max(1))
+        .filter_map(|(i, _)| units.get(i).cloned())
+        .collect()
 }
 
 fn build_layout_outcome(

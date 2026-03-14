@@ -146,7 +146,7 @@ impl GpuForceLayout {
             label: Some("Repulsive Force Pipeline"),
             layout: Some(&pipeline_layout),
             module: &repulsive_shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -155,7 +155,7 @@ impl GpuForceLayout {
             label: Some("Attractive Force Pipeline"),
             layout: Some(&pipeline_layout),
             module: &attractive_shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });

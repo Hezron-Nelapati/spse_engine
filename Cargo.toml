@@ -15,13 +15,13 @@ ndarray = "0.15"
 rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.29", features = ["bundled"] }
 scraper = "0.17" # Required for Layer 12
-base64 = "0.21"
+base64 = "0.22"
 lopdf = "0.32"
 quick-xml = "0.31"
-zip = "0.6"
+zip = "2"
 bzip2 = "0.4"
 futures-util = "0.3"
 parquet = "53"
@@ -35,7 +35,7 @@ nalgebra = "0.33"
 simdutf8 = "0.1"
 
 # GPU acceleration dependencies
-wgpu = { version = "22", optional = true }
+wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 futures = { version = "0.3", optional = true }
 once_cell = { version = "1", optional = true }

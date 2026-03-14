@@ -211,39 +211,5 @@ fn exact_match_score(candidate: &str, query_terms: &[String], intent: Option<Int
         return 0.0;
     }
     
-    let candidate_terms: Vec<&str> = candidate.split_whitespace().collect();
-    let candidate_set: std::collections::BTreeSet<&str> = candidate_terms.iter().copied().collect();
-    let query_set: std::collections::BTreeSet<&str> = query_terms.iter().map(|s| s.as_str()).collect();
-    
-    // Check for exact match (candidate equals query)
-    if candidate_terms.len() == query_terms.len() {
-        let all_match = candidate_terms.iter().zip(query_terms.iter())
-            .all(|(c, q)| c.to_lowercase() == q.to_lowercase());
-        if all_match {
-            return 0.85; // Strong bonus for exact match
-        }
-    }
-    
-    // Check if candidate is a superset (e.g., "Donald Trump Jr." contains "Donald Trump")
-    // Penalize such candidates when we want exact entity match
-    let query_in_candidate = query_terms.iter().all(|q| candidate.contains(&q.to_lowercase()));
-    let candidate_has_extra = candidate_terms.len() > query_terms.len();
-    
-    if query_in_candidate && candidate_has_extra {
-        // Candidate is a longer form that contains the query - penalize
-        // e.g., "Donald Trump Jr." when querying "Donald Trump"
-        return -0.25;
-    }
-    
-    // Partial overlap bonus
-    let overlap = query_set.intersection(&candidate_set).count();
-    let overlap_ratio = overlap as f32 / query_terms.len().max(1) as f32;
-    
-    if overlap_ratio >= 0.8 {
-        overlap_ratio * 0.3
-    } else if overlap_ratio >= 0.5 {
-        overlap_ratio * 0.15
-    } else {
-        0.0
-    }
+    crate::common::similarity::SimilarityUtils::exact_match_score(candidate, query_terms)
 }

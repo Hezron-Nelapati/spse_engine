@@ -194,18 +194,7 @@ impl FineResolver {
 
     /// Calculate word overlap ratio between two strings
     fn word_overlap(a: &str, b: &str) -> f32 {
-        let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
-        let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
-        if words_a.is_empty() || words_b.is_empty() {
-            return 0.0;
-        }
-        let intersection = words_a.intersection(&words_b).count();
-        let union = words_a.union(&words_b).count();
-        if union == 0 {
-            0.0
-        } else {
-            intersection as f32 / union as f32
-        }
+        crate::common::similarity::SimilarityUtils::jaccard_similarity(a, b)
     }
 
     /// Phase 3.2: Validate candidate against high-trust anchors.
@@ -229,25 +218,24 @@ impl FineResolver {
 
     /// Check if candidate content contradicts an anchor unit
     fn contradicts_anchor(candidate_content: &str, anchor: &Unit) -> bool {
+        use crate::common::matching::categories::{MATH_PATTERNS, NEGATION_PATTERNS};
+        use crate::common::similarity::SimilarityUtils;
+        
         let candidate_lower = candidate_content.to_lowercase();
         let anchor_lower = anchor.content.to_lowercase();
 
         // Check for mathematical/identity anchors - never drift on these
-        let math_patterns = ["=", "+", "-", "*", "/", " is ", " are "];
-        for pattern in &math_patterns {
+        for pattern in MATH_PATTERNS.iter() {
             if anchor_lower.contains(pattern) {
                 // For math/identity, candidate must match exactly or be semantically equivalent
-                if !Self::semantically_equivalent(&candidate_lower, &anchor_lower) {
+                if !SimilarityUtils::semantically_equivalent(&candidate_lower, &anchor_lower) {
                     return true;
                 }
             }
         }
 
         // Check for direct negation patterns
-        let negation_patterns = [
-            "not ", "never ", "isn't ", "aren't ", "wasn't ", "weren't ",
-        ];
-        for negation in &negation_patterns {
+        for negation in NEGATION_PATTERNS.iter() {
             let candidate_has_negation = candidate_lower.contains(negation);
             let anchor_has_negation = anchor_lower.contains(negation);
             if candidate_has_negation != anchor_has_negation {
@@ -264,31 +252,6 @@ impl FineResolver {
 
     /// Check if two strings are semantically equivalent (simplified)
     fn semantically_equivalent(a: &str, b: &str) -> bool {
-        // Normalize and compare
-        let a_normalized = a.trim().to_lowercase();
-        let b_normalized = b.trim().to_lowercase();
-
-        // Direct match
-        if a_normalized == b_normalized {
-            return true;
-        }
-
-        // Check for numeric equivalence
-        let a_nums: Vec<&str> = a_normalized.split_whitespace().collect();
-        let b_nums: Vec<&str> = b_normalized.split_whitespace().collect();
-        if a_nums.len() == b_nums.len() {
-            let mut all_match = true;
-            for (i, j) in a_nums.iter().zip(b_nums.iter()) {
-                if i != j {
-                    all_match = false;
-                    break;
-                }
-            }
-            if all_match {
-                return true;
-            }
-        }
-
-        false
+        crate::common::similarity::SimilarityUtils::semantically_equivalent(a, b)
     }
 }

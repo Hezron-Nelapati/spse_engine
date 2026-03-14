@@ -10,6 +10,28 @@ use crate::config::ScoringWeights;
 use crate::types::{Unit, ScoredCandidate, ScoreBreakdown, ContextMatrix, SequenceState, MergedState, MemoryType};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
+use once_cell::sync::Lazy;
+
+/// Global cached GPU candidate scorer (lazy initialized)
+static GPU_SCORER: Lazy<Option<Arc<GpuCandidateScorer>>> = Lazy::new(|| {
+    crate::gpu::global_device().and_then(|gpu| {
+        match GpuCandidateScorer::new(&gpu) {
+            Ok(scorer) => {
+                log::info!("GPU candidate scorer initialized");
+                Some(Arc::new(scorer))
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize GPU scorer: {}", e);
+                None
+            }
+        }
+    })
+});
+
+/// Get the cached GPU scorer if available
+fn get_gpu_scorer() -> Option<Arc<GpuCandidateScorer>> {
+    GPU_SCORER.clone()
+}
 
 /// GPU-accelerated candidate scorer
 pub struct GpuCandidateScorer {
@@ -96,7 +118,7 @@ impl GpuCandidateScorer {
             label: Some("Candidate Scoring Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -311,40 +333,33 @@ pub fn score_candidates(
         return score_candidates_cpu(candidates, context, sequence, merged, weights);
     }
 
-    // Try GPU scoring
-    if let Some(gpu) = crate::gpu::global_device() {
-        match GpuCandidateScorer::new(&gpu) {
-            Ok(scorer) => {
-                // Prepare GPU data
-                let gpu_candidates = prepare_gpu_candidates(candidates, context, sequence, merged);
-                let gpu_weights = GpuWeightData::from_weights(weights, merged.freshness_boost);
+    // Try GPU scoring with cached scorer
+    if let Some(scorer) = get_gpu_scorer() {
+        // Prepare GPU data
+        let gpu_candidates = prepare_gpu_candidates(candidates, context, sequence, merged);
+        let gpu_weights = GpuWeightData::from_weights(weights, merged.freshness_boost);
 
-                match scorer.score_gpu(&gpu_candidates, &gpu_weights) {
-                    Ok(results) => {
-                        return results
-                            .into_iter()
-                            .zip(candidates.iter())
-                            .map(|(result, unit)| {
-                                let uuid = uuid::Uuid::from_u128(
-                                    (result.unit_id_high as u128) << 32 | result.unit_id_low as u128
-                                );
-                                ScoredCandidate {
-                                    unit_id: unit.id,
-                                    content: unit.content.clone(),
-                                    score: result.score,
-                                    breakdown: ScoreBreakdown::default(), // GPU doesn't return breakdown
-                                    memory_type: unit.memory_type,
-                                }
-                            })
-                            .collect();
-                    }
-                    Err(e) => {
-                        log::warn!("GPU scoring failed, falling back to CPU: {}", e);
-                    }
-                }
+        match scorer.score_gpu(&gpu_candidates, &gpu_weights) {
+            Ok(results) => {
+                return results
+                    .into_iter()
+                    .zip(candidates.iter())
+                    .map(|(result, unit)| {
+                        let uuid = uuid::Uuid::from_u128(
+                            (result.unit_id_high as u128) << 32 | result.unit_id_low as u128
+                        );
+                        ScoredCandidate {
+                            unit_id: unit.id,
+                            content: unit.content.clone(),
+                            score: result.score,
+                            breakdown: ScoreBreakdown::default(), // GPU doesn't return breakdown
+                            memory_type: unit.memory_type,
+                        }
+                    })
+                    .collect();
             }
             Err(e) => {
-                log::warn!("Failed to create GPU scorer, falling back to CPU: {}", e);
+                log::warn!("GPU scoring failed, falling back to CPU: {}", e);
             }
         }
     }

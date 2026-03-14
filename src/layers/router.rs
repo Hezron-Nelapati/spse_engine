@@ -3,6 +3,7 @@ use crate::spatial_index::{centroid, SpatialGrid};
 use crate::types::{CandidateRoute, RoutingResult, ScoredCandidate, Unit};
 use rand::Rng;
 use std::collections::HashSet;
+use uuid::Uuid;
 
 pub struct SemanticRouter {
     grid: SpatialGrid,
@@ -25,7 +26,10 @@ impl SemanticRouter {
             .collect::<Vec<_>>();
         let center = centroid(&positions);
         let mut neighbor_ids = self.grid.nearby(center, self.neighbor_radius);
-        neighbor_ids.retain(|id| active_units.iter().all(|unit| unit.id != *id));
+        
+        // Use HashSet for O(1) lookup instead of O(n*m) nested iteration
+        let active_ids: HashSet<Uuid> = active_units.iter().map(|u| u.id).collect();
+        neighbor_ids.retain(|id| !active_ids.contains(id));
 
         let mut active_regions = Vec::new();
         for position in positions.iter().take(6) {
@@ -66,8 +70,10 @@ impl SemanticRouter {
             if stochastic_escape {
                 rationale.push("stochastic_jump".to_string());
             }
+            // Use HashSet for O(1) lookup instead of O(n) Vec::contains
+            let mut seen_ids: HashSet<Uuid> = candidate_ids.iter().copied().collect();
             for unit in global.into_iter().take(max_candidates) {
-                if !candidate_ids.contains(&unit.id) {
+                if seen_ids.insert(unit.id) {
                     candidate_ids.push(unit.id);
                 }
                 if candidate_ids.len() >= target_candidates {

@@ -86,11 +86,13 @@ impl GpuDevice {
             return Err("GPU force-disabled by configuration".to_string());
         }
 
-        // Create instance with all backends
-        let instance = Instance::new(InstanceDescriptor {
+        // Create instance with all backends (wgpu v24 API)
+        let descriptor = wgpu::InstanceDescriptor {
             backends: Backends::all(),
-            ..Default::default()
-        });
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+        };
+        let instance = Instance::new(&descriptor);
 
         // Request adapter with power preference
         let power_pref = match config.power_preference {
@@ -110,7 +112,7 @@ impl GpuDevice {
         // Get adapter info
         let info = adapter.get_info();
         
-        // Request device with appropriate limits (wgpu v22 API)
+        // Request device with appropriate limits (wgpu v24 API)
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {

@@ -12,13 +12,17 @@ use futures_util::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Check if query is medical/scientific in nature
-fn is_medical_query(query_lower: &str) -> bool {
-    let medical_keywords = [
+#[cfg(feature = "gpu")]
+use once_cell::sync::Lazy;
+
+/// Cached medical keywords for query classification
+#[cfg(feature = "gpu")]
+static MEDICAL_KEYWORDS: Lazy<[&str; 45]> = Lazy::new(|| {
+    [
         "disease", "symptom", "treatment", "drug", "medicine", "medication",
         "clinical", "patient", "diagnosis", "therapy", "vaccine", "virus",
         "bacteria", "cancer", "diabetes", "heart", "brain", "blood",
@@ -27,23 +31,62 @@ fn is_medical_query(query_lower: &str) -> bool {
         "biological", "biochemical", "pathology", "epidemiology",
         "side effects", "dosage", "prescription", "fda", "nih",
         "placebo", "randomized", "trial", "study", "cohort",
-    ];
-    
-    medical_keywords.iter().any(|kw| query_lower.contains(kw))
-}
+    ]
+});
 
-/// Check if query is location/geographic in nature
-fn is_location_query(query_lower: &str) -> bool {
-    let location_keywords = [
+/// Cached location keywords for query classification
+#[cfg(feature = "gpu")]
+static LOCATION_KEYWORDS: Lazy<[&str; 27]> = Lazy::new(|| {
+    [
         "where is", "location of", "address", "city in", "country",
         "capital", "coordinates", "map", "latitude", "longitude",
         "near", "distance from", "directions to", "route",
         "place", "street", "avenue", "building", "landmark",
         "geographic", "geography", "region", "province", "state",
-        "town", "village", "postal", "zip code",
-    ];
-    
-    location_keywords.iter().any(|kw| query_lower.contains(kw))
+        "town", "village", "postal",
+    ]
+});
+
+/// Check if query is medical/scientific in nature
+fn is_medical_query(query_lower: &str) -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        MEDICAL_KEYWORDS.iter().any(|kw| query_lower.contains(kw))
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let medical_keywords = [
+            "disease", "symptom", "treatment", "drug", "medicine", "medication",
+            "clinical", "patient", "diagnosis", "therapy", "vaccine", "virus",
+            "bacteria", "cancer", "diabetes", "heart", "brain", "blood",
+            "surgery", "hospital", "doctor", "medical", "health", "pharma",
+            "enzyme", "protein", "gene", "dna", "rna", "cell", "molecular",
+            "biological", "biochemical", "pathology", "epidemiology",
+            "side effects", "dosage", "prescription", "fda", "nih",
+            "placebo", "randomized", "trial", "study", "cohort",
+        ];
+        medical_keywords.iter().any(|kw| query_lower.contains(kw))
+    }
+}
+
+/// Check if query is location/geographic in nature
+fn is_location_query(query_lower: &str) -> bool {
+    #[cfg(feature = "gpu")]
+    {
+        LOCATION_KEYWORDS.iter().any(|kw| query_lower.contains(kw))
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let location_keywords = [
+            "where is", "location of", "address", "city in", "country",
+            "capital", "coordinates", "map", "latitude", "longitude",
+            "near", "distance from", "directions to", "route",
+            "place", "street", "avenue", "building", "landmark",
+            "geographic", "geography", "region", "province", "state",
+            "town", "village", "postal", "zip code",
+        ];
+        location_keywords.iter().any(|kw| query_lower.contains(kw))
+    }
 }
 
 #[derive(Clone)]
@@ -905,20 +948,13 @@ impl RetrievalPipeline {
 }
 
 fn dedup_documents(docs: &mut Vec<RetrievedDocument>) {
-    let mut seen = Vec::new();
-    docs.retain(|doc| {
-        let key = if doc.source_url.is_empty() {
-            doc.title.to_lowercase()
-        } else {
-            doc.source_url.to_lowercase()
-        };
-        if seen.contains(&key) {
-            false
-        } else {
-            seen.push(key);
-            true
-        }
-    });
+    use crate::common::dedup::DedupUtils;
+    
+    DedupUtils::dedup_by_primary_field(
+        docs,
+        |doc| doc.source_url.as_str(),
+        |doc| doc.title.as_str(),
+    );
 }
 
 fn query_variants(query: &SanitizedQuery) -> Vec<String> {
@@ -953,6 +989,7 @@ fn push_query_variant(variants: &mut Vec<String>, candidate: String) {
 
 fn clean_search_query(text: &str) -> String {
     let mut tokens = Vec::new();
+    let mut seen = HashSet::new();
     for token in text.split_whitespace() {
         let cleaned = token
             .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
@@ -962,12 +999,10 @@ fn clean_search_query(text: &str) -> String {
         } else {
             cleaned
         };
-        if cleaned.is_empty() {
+        if cleaned.is_empty() || !seen.insert(cleaned.clone()) {
             continue;
         }
-        if !tokens.contains(&cleaned) {
-            tokens.push(cleaned);
-        }
+        tokens.push(cleaned);
     }
     tokens.join(" ")
 }

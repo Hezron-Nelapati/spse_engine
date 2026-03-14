@@ -608,61 +608,28 @@ impl ToneInferrer {
     }
 
     /// Detect urgency markers in input
-    fn detect_urgency(&self, input_lower: &str, config: &ToneInferenceConfig) -> f32 {
-        let urgency_keywords = [
-            "urgent", "emergency", "asap", "immediately", "now", "critical",
-            "important", "quickly", "hurry", "fast", "right now",
-        ];
-
-        let mut score = 0.0;
-        for keyword in &urgency_keywords {
-            if input_lower.contains(keyword) {
-                score += 0.15;
-            }
-        }
-
+    fn detect_urgency(&self, input_lower: &str, _config: &ToneInferenceConfig) -> f32 {
+        use crate::common::matching::{KeywordMatcher, categories::URGENCY_KEYWORDS};
+        
+        let score = KeywordMatcher::score_matches(input_lower, &*URGENCY_KEYWORDS, 0.15, 1.0);
+        
         // Check for exclamation marks
         let exclamation_count = input_lower.matches('!').count();
-        score += exclamation_count as f32 * 0.1;
-
-        score.min(1.0)
+        (score + exclamation_count as f32 * 0.1).min(1.0)
     }
 
     /// Detect sadness/empathy markers in input
     fn detect_sadness(&self, input_lower: &str, _config: &ToneInferenceConfig) -> f32 {
-        let sadness_keywords = [
-            "sad", "upset", "worried", "anxious", "depressed", "lonely",
-            "hurt", "pain", "suffering", "struggling", "difficult", "hard",
-            "lost", "grief", "cry", "tears", "hopeless",
-        ];
-
-        let mut score: f32 = 0.0;
-        for keyword in &sadness_keywords {
-            if input_lower.contains(keyword) {
-                score += 0.12;
-            }
-        }
-
-        score.min(1.0)
+        use crate::common::matching::{KeywordMatcher, categories::SADNESS_KEYWORDS};
+        
+        KeywordMatcher::score_matches(input_lower, &*SADNESS_KEYWORDS, 0.12, 1.0)
     }
 
     /// Detect technical domain markers in input
     fn detect_technical_domain(&self, input_lower: &str, _config: &ToneInferenceConfig) -> f32 {
-        let technical_keywords = [
-            "code", "function", "api", "algorithm", "debug", "error",
-            "variable", "method", "class", "system", "architecture",
-            "implementation", "database", "server", "client", "protocol",
-            "interface", "module", "component", "service", "endpoint",
-        ];
-
-        let mut score: f32 = 0.0;
-        for keyword in &technical_keywords {
-            if input_lower.contains(keyword) {
-                score += 0.08;
-            }
-        }
-
-        score.min(1.0)
+        use crate::common::matching::{KeywordMatcher, categories::TECHNICAL_KEYWORDS};
+        
+        KeywordMatcher::score_matches(input_lower, &*TECHNICAL_KEYWORDS, 0.08, 1.0)
     }
 
     /// Score input against a style anchor
