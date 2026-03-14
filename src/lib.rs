@@ -5,6 +5,7 @@ pub mod datasets;
 pub mod document;
 pub mod drill_lib;
 pub mod engine;
+pub mod gpu;
 pub mod layers;
 pub mod memory;
 pub mod open_sources;

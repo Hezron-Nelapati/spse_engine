@@ -757,6 +757,52 @@ impl Default for AutoInferenceConfig {
     }
 }
 
+/// GPU acceleration configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuConfig {
+    /// Enable GPU acceleration
+    pub enabled: bool,
+    /// Force CPU mode even if GPU available
+    pub force_cpu: bool,
+    /// Power preference: "low" or "high"
+    pub power_preference: String,
+    /// Minimum GPU memory required (MB)
+    pub min_memory_mb: u64,
+    /// Batch size for GPU operations (0 = auto)
+    pub batch_size: usize,
+    /// Timeout for GPU operations (ms)
+    pub timeout_ms: u64,
+    /// Use GPU for candidate scoring
+    pub use_for_scoring: bool,
+    /// Use GPU for force-directed layout
+    pub use_for_layout: bool,
+    /// Use GPU for distance calculations
+    pub use_for_distance: bool,
+    /// Minimum candidates to use GPU scoring
+    pub min_candidates_for_gpu: usize,
+    /// Minimum units to use GPU layout
+    pub min_units_for_gpu_layout: usize,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            force_cpu: false,
+            power_preference: "high".to_string(),
+            min_memory_mb: 512,
+            batch_size: 1024,
+            timeout_ms: 5000,
+            use_for_scoring: true,
+            use_for_layout: true,
+            use_for_distance: true,
+            min_candidates_for_gpu: 256,
+            min_units_for_gpu_layout: 100,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IntentAdaptiveProfile {
@@ -1784,6 +1830,9 @@ pub struct EngineConfig {
     /// Phase 3: LLM-Like Core configuration (auto-inference features)
     #[serde(default)]
     pub auto_inference: AutoInferenceConfig,
+    /// GPU acceleration configuration
+    #[serde(default)]
+    pub gpu: GpuConfig,
 }
 
 impl Default for EngineConfig {
@@ -1811,6 +1860,7 @@ impl Default for EngineConfig {
             silent_training: default_silent_training_config(),
             huggingface_streaming: HuggingFaceStreamingConfig::default(),
             auto_inference: AutoInferenceConfig::default(),
+            gpu: GpuConfig::default(),
         }
     }
 }

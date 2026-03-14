@@ -10,6 +10,12 @@ use crate::engine::Engine;
 use crate::memory::store::MemoryStore;
 use crate::types::SourceKind;
 
+/// Default corpus size when GPU is unavailable (MB)
+const DEFAULT_CORPUS_SIZE_MB_CPU: usize = 7;
+
+/// Default corpus size when GPU is available (MB) - larger for better GPU utilization
+const DEFAULT_CORPUS_SIZE_MB_GPU: usize = 50;
+
 /// Stress drill configuration
 #[derive(Debug, Clone)]
 pub struct StressDrillConfig {
@@ -32,8 +38,15 @@ pub enum SourceTypeId {
 
 impl Default for StressDrillConfig {
     fn default() -> Self {
+        // Use larger corpus when GPU is available for better acceleration
+        let corpus_size_mb = if cfg!(feature = "gpu") && crate::gpu::is_gpu_available() {
+            DEFAULT_CORPUS_SIZE_MB_GPU
+        } else {
+            DEFAULT_CORPUS_SIZE_MB_CPU
+        };
+        
         Self {
-            corpus_size_mb: 7, // Reduced from 100MB for faster test execution
+            corpus_size_mb,
             source_types: vec![
                 SourceTypeId::Html,
                 SourceTypeId::QaJson,

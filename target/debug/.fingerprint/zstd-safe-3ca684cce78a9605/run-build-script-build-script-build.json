@@ -1,1 +1,0 @@
-{"rustc":10088478398040096810,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[11328745298441753262,"build_script_build",false,9359262564000197616],[3675885400245110264,"build_script_build",false,10909296508882662541]],"local":[{"Precalculated":"5.0.2+zstd.1.5.2"}],"rustflags":["-C","target-cpu=native"],"config":0,"compile_kind":0}

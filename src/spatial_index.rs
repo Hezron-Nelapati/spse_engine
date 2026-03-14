@@ -58,6 +58,36 @@ impl SpatialGrid {
 }
 
 pub fn force_directed_layout(units: &[Unit], config: &SemanticMapConfig) -> LayoutOutcome {
+    // Try GPU acceleration first if available and beneficial
+    #[cfg(feature = "gpu")]
+    {
+        if units.len() >= 100 && crate::gpu::is_gpu_available() {
+            if let Some(outcome) = force_directed_layout_gpu(units, config) {
+                return LayoutOutcome {
+                    position_updates: outcome.position_updates,
+                    mean_displacement: outcome.mean_displacement,
+                    rolled_back: outcome.rolled_back,
+                };
+            }
+        }
+    }
+    
+    // CPU fallback
+    force_directed_layout_cpu(units, config)
+}
+
+/// GPU-accelerated force-directed layout (requires gpu feature)
+#[cfg(feature = "gpu")]
+fn force_directed_layout_gpu(
+    units: &[Unit],
+    config: &SemanticMapConfig,
+) -> Option<crate::gpu::compute::force_layout::GpuLayoutOutcome> {
+    use crate::gpu::compute::force_layout::force_layout_gpu;
+    force_layout_gpu(units, config)
+}
+
+/// CPU implementation of force-directed layout
+fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> LayoutOutcome {
     let selected = select_layout_units(units, config.max_layout_units);
     if selected.len() < 2 {
         return LayoutOutcome {

@@ -632,3 +632,20 @@ auto_inference:
     base_memory_limit_mb: 350           # Idle memory limit
     max_memory_limit_mb: 550            # Peak during reasoning
     thought_buffer_size_kb: 64          # Per-step buffer size
+
+# ============================================================================
+# GPU Acceleration Configuration
+# ============================================================================
+
+gpu:
+  enabled: true                         # Enable GPU acceleration when available
+  force_cpu: false                      # Force CPU mode even if GPU available
+  power_preference: "high"              # Power preference: "low" or "high"
+  min_memory_mb: 512                    # Minimum GPU memory required (MB)
+  batch_size: 1024                      # Batch size for GPU operations (0 = auto)
+  timeout_ms: 5000                      # Timeout for GPU operations (ms)
+  use_for_scoring: true                 # Use GPU for candidate scoring
+  use_for_layout: true                  # Use GPU for force-directed layout
+  use_for_distance: true                # Use GPU for distance calculations
+  min_candidates_for_gpu: 256           # Minimum candidates to use GPU scoring
+  min_units_for_gpu_layout: 100         # Minimum units to use GPU layout

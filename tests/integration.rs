@@ -2029,7 +2029,7 @@ fn e2e_multi_turn_context_loss() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Test long conversation (20+ turns)
+/// Test long conversation (GPU-aware sizing)
 #[test]
 fn e2e_multi_turn_long_conversation() {
     let db_path = temp_db_path("e2e_long_conv");
@@ -2038,8 +2038,13 @@ fn e2e_multi_turn_long_conversation() {
     
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
     
-    // Long conversation (reduced from 50 to 20 for faster tests)
-    for i in 0..20 {
+    // GPU-aware conversation sizing: longer when GPU available
+    #[cfg(feature = "gpu")]
+    let turn_count = if spse_engine::gpu::is_gpu_available() { 50 } else { 20 };
+    #[cfg(not(feature = "gpu"))]
+    let turn_count = 20;
+    
+    for i in 0..turn_count {
         let result = rt.block_on(engine.process(&format!("Query number {} about topic {}", i, i % 5)));
         assert!(!result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
                 "Long conversation turn {} should complete", i);
@@ -2135,7 +2140,7 @@ fn e2e_training_data_corruption() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Test large corpus training (reduced for faster tests)
+/// Test large corpus training (GPU-aware sizing)
 #[test]
 fn e2e_large_corpus_training() {
     let db_path = temp_db_path("e2e_large_corpus");
@@ -2144,9 +2149,14 @@ fn e2e_large_corpus_training() {
     
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
     
-    // Simulate corpus with 30 documents (reduced from 100 for faster tests)
+    // GPU-aware corpus sizing: larger when GPU available for better acceleration
+    #[cfg(feature = "gpu")]
+    let doc_count = if spse_engine::gpu::is_gpu_available() { 200 } else { 30 };
+    #[cfg(not(feature = "gpu"))]
+    let doc_count = 30;
+    
     let start = std::time::Instant::now();
-    for i in 0..30 {
+    for i in 0..doc_count {
         let doc = format!("Large corpus document {} with substantial content for training purposes. We need enough text for unit discovery.", i);
         let _ = rt.block_on(engine.process(&doc));
     }
@@ -2156,7 +2166,7 @@ fn e2e_large_corpus_training() {
     let (units, core) = engine.memory_counts();
     assert!(units >= 0, "Large corpus should produce valid memory state");
     
-    println!("Processed 30 docs in {:?}, {} units, {} core", duration, units, core);
+    println!("Processed {} docs in {:?}, {} units, {} core", doc_count, duration, units, core);
     
     let _ = std::fs::remove_file(&db_path);
 }
@@ -2191,8 +2201,13 @@ fn e2e_partial_output() {
     
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
     
-    // Stress the system (reduced from 100 to 30 for faster tests)
-    for i in 0..30 {
+    // GPU-aware stress sizing: larger when GPU available
+    #[cfg(feature = "gpu")]
+    let stress_count = if spse_engine::gpu::is_gpu_available() { 100 } else { 30 };
+    #[cfg(not(feature = "gpu"))]
+    let stress_count = 30;
+    
+    for i in 0..stress_count {
         let doc = format!("Resource exhaustion test document {} with content", i);
         let _ = rt.block_on(engine.process(&doc));
     }
@@ -2229,7 +2244,7 @@ fn e2e_pipeline_failure_recovery() {
     let _ = std::fs::remove_file(&db_path);
 }
 
-/// Test cascading failures
+/// Test cascading failures (GPU-aware sizing)
 #[test]
 fn e2e_cascading_failures() {
     let db_path = temp_db_path("e2e_cascading");
@@ -2239,9 +2254,14 @@ fn e2e_cascading_failures() {
     
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
     
-    // Generate cascading failure conditions (reduced from 50 to 20 for faster tests)
+    // GPU-aware failure test sizing: more iterations when GPU available
+    #[cfg(feature = "gpu")]
+    let test_count = if spse_engine::gpu::is_gpu_available() { 50 } else { 20 };
+    #[cfg(not(feature = "gpu"))]
+    let test_count = 20;
+    
     let mut failures = 0;
-    for i in 0..20 {
+    for i in 0..test_count {
         let result = rt.block_on(engine.process(&format!("Cascading test {} with garbage !!!@@@", i)));
         if result.predicted_text.is_empty() && result.trace.active_regions.is_empty() {
             failures += 1;
@@ -2249,7 +2269,7 @@ fn e2e_cascading_failures() {
     }
     
     // Verify cascading failures handled (not all should fail)
-    assert!(failures < 20, "Not all queries should fail in cascading scenario");
+    assert!(failures < test_count, "Not all queries should fail in cascading scenario");
     
     let _ = std::fs::remove_file(&db_path);
 }
