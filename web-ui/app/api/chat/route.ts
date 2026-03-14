@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const SPSE_API_URL = process.env.SPSE_API_URL || 'http://localhost:3000'
+const SPSE_API_URL = process.env.SPSE_API_URL || 'http://localhost:3001'
 
 interface Message {
   role: 'user' | 'assistant' | 'system'

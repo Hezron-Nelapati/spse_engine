@@ -16,12 +16,11 @@ use std::sync::Arc;
 
 // Phase 6.2: OpenAI-compatible API module
 pub mod openai_compat;
-use openai_compat::openai_router;
 
 #[derive(Clone)]
-struct ApiState {
-    engine: Arc<Engine>,
-    auto_mode_config: AutoModeConfig,
+pub struct ApiState {
+    pub engine: Arc<Engine>,
+    pub auto_mode_config: AutoModeConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,17 +37,15 @@ const PROTOBUF_MIME: &str = "application/x-protobuf";
 
 pub fn router(engine: Arc<Engine>) -> Router {
     let auto_mode_config = engine.config().auto_inference.auto_mode.clone();
-    let state = ApiState { engine: engine.clone(), auto_mode_config };
-    
-    // Phase 6.2: Merge OpenAI-compatible routes with SPSE routes
-    let openai_routes = openai_router(engine);
+    let state = ApiState { engine, auto_mode_config };
     
     Router::new()
         .route("/api/v1/train/batch", post(train_batch))
         .route("/api/v1/train/status/:job_id", get(training_status))
         .route("/api/v1/status", get(auto_mode_status))
+        .route("/v1/chat/completions", post(openai_compat::chat_completions))
+        .route("/v1/models", get(openai_compat::list_models))
         .with_state(state)
-        .merge(openai_routes)
 }
 
 pub async fn serve(engine: Arc<Engine>, port: u16) -> Result<(), String> {
