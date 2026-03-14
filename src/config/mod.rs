@@ -229,6 +229,13 @@ pub struct IntentConfig {
     pub domain_hint_weight: f32,
     pub preference_signal_weight: f32,
     pub certainty_softener_weight: f32,
+    // Question intent scoring patterns
+    pub question_marker_score: f32,
+    pub question_starter_score: f32,
+    pub proper_noun_bonus: f32,
+    pub of_construction_bonus: f32,
+    pub implicit_question_patterns: Vec<String>,
+    pub implicit_question_score: f32,
 }
 
 impl Default for IntentConfig {
@@ -244,6 +251,21 @@ impl Default for IntentConfig {
             domain_hint_weight: 0.14,
             preference_signal_weight: 0.14,
             certainty_softener_weight: 0.10,
+            // Question intent scoring
+            question_marker_score: 0.30,
+            question_starter_score: 0.32,
+            proper_noun_bonus: 0.12,
+            of_construction_bonus: 0.18,
+            implicit_question_patterns: vec![
+                // Generalized patterns - single words that indicate information-seeking
+                "latest".to_string(), "current".to_string(), "recent".to_string(), 
+                "price".to_string(), "value".to_string(), "define".to_string(), "explain".to_string(),
+                // Common question phrase patterns (generalized)
+                "how to".to_string(), "how do".to_string(), "how many".to_string(), "how much".to_string(), 
+                "what is".to_string(), "what are".to_string(),
+                "who is".to_string(), "who was".to_string(), "what does".to_string(), "meaning of".to_string(),
+            ],
+            implicit_question_score: 0.25,
         }
     }
 }

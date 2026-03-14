@@ -735,7 +735,7 @@ impl Engine {
                 "What does HIIT stand for?",
                 Some(probe_documents.clone()),
                 Vec::new(),
-                false,
+                true,
             )
             .await;
 
@@ -1054,6 +1054,9 @@ impl Engine {
         });
         let layer_16_resolution_time_ms = layer_16_start.elapsed().as_millis() as u64;
 
+        // Check if retrieval was triggered but returned no documents
+        let retrieval_failed = used_retrieval && merged.evidence.documents.is_empty();
+
         let mut decoded = resolved
             .as_ref()
             .map(|resolved| {
@@ -1064,7 +1067,34 @@ impl Engine {
                 text: "No candidate could be resolved.".to_string(),
                 grounded: false,
             });
-        if !merged.evidence.documents.is_empty() {
+
+        // If retrieval failed, provide a helpful message instead of random memory content
+        if retrieval_failed && !decoded.grounded {
+            let prompt_lower = packet.original_text.to_lowercase();
+            let is_realtime_query = prompt_lower.contains("current") 
+                || prompt_lower.contains("latest") 
+                || prompt_lower.contains("recent")
+                || prompt_lower.contains("today")
+                || prompt_lower.contains("now")
+                || prompt_lower.contains("price")
+                || prompt_lower.contains("stock")
+                || prompt_lower.contains("won")
+                || prompt_lower.contains("winner")
+                || prompt_lower.contains("2026")
+                || prompt_lower.contains("2025");
+            
+            if is_realtime_query {
+                decoded.text = format!(
+                    "I don't have access to current real-time information about {}. My knowledge is based on general knowledge sources and may not reflect recent events or live data.",
+                    packet.original_text
+                );
+            } else {
+                decoded.text = format!(
+                    "I searched multiple sources but couldn't find specific information about {}. Please try rephrasing your query or providing more context.",
+                    packet.original_text
+                );
+            }
+        } else if !merged.evidence.documents.is_empty() {
             if matches!(intent_profile.primary, IntentKind::Extract) {
                 if let Some(list_answer) =
                     list_evidence_answer(&packet.original_text, &merged.evidence.documents)
@@ -1183,7 +1213,7 @@ impl Engine {
             &adaptive,
             output_strategy,
             reasoning_support.labels,
-            safety_warnings,
+            Vec::new(),
             feedback,
             memory_summary,
             trace_sources,
@@ -4269,14 +4299,13 @@ fn simple_result_with_intent(
     let intent_resolution = intent_resolution_source(&intent_profile).to_string();
     let intent_confidence = format!("{:.3}", intent_profile.confidence);
     let intent_reasons = intent_profile.reasons.join(",");
-    let memory_snapshot = memory_summary.clone();
     ProcessResult {
         predicted_text,
         confidence: 1.0,
         used_retrieval: false,
         trace: ExplainTrace {
             intent_profile,
-            memory_summary,
+            memory_summary: memory_summary.clone(),
             evidence_sources,
             layer_notes: vec![LayerNote {
                 layer: 20,
@@ -4299,57 +4328,79 @@ fn simple_result_with_intent(
                     [
                         ("primary", intent_primary),
                         ("confidence", intent_confidence),
-                        ("resolver", intent_resolution),
+                        ("resolution_source", intent_resolution),
                         ("reasons", intent_reasons),
-                        ("path", route.to_string()),
-                    ],
-                ),
-                debug_step(
-                    9,
-                    "retrieval_gate",
-                    "Retrieval bypassed for the direct response path.",
-                    [
-                        ("should_retrieve", "false".to_string()),
-                        ("status", "skipped".to_string()),
-                        ("path", route.to_string()),
-                    ],
-                ),
-                debug_step(
-                    13,
-                    "reasoning_merge",
-                    "Reasoning merge bypassed for the direct response path.",
-                    [
-                        ("status", "skipped".to_string()),
-                        ("path", route.to_string()),
-                    ],
-                ),
-                debug_step(
-                    16,
-                    "resolution",
-                    "Direct response path selected an output without candidate search.",
-                    [
-                        ("mode", "direct_response".to_string()),
-                        ("path", route.to_string()),
                     ],
                 ),
                 debug_step(
                     17,
                     "output",
-                    "Answer returned without full candidate search.",
+                    "Direct response generated.",
                     [
-                        ("path", route.to_string()),
-                        ("strategy", "direct_response".to_string()),
+                        ("route", route.to_string()),
                         ("predicted_text", text.clone()),
                     ],
                 ),
+            ],
+            active_regions: vec![],
+            retrieval_query: None,
+            score_breakdowns: vec![],
+            selected_unit: None,
+            safety_warnings: vec![],
+            feedback_events: vec![],
+        },
+    }
+}
+
+fn simple_result_with_safety(
+    text: String,
+    evidence_sources: Vec<String>,
+    route: &str,
+    request_input: &str,
+    safety_warnings: Vec<String>,
+) -> ProcessResult {
+    let evidence_sources = unique_strings(evidence_sources);
+    let predicted_text = text.clone();
+    let normalized_input = input::normalize_text(request_input);
+    let warnings_count = safety_warnings.len().to_string();
+    ProcessResult {
+        predicted_text,
+        confidence: 1.0,
+        used_retrieval: false,
+        trace: ExplainTrace {
+            intent_profile: IntentProfile::default(),
+            memory_summary: String::new(),
+            evidence_sources,
+            layer_notes: vec![LayerNote {
+                layer: 19,
+                note: route.to_string(),
+            }],
+            debug_steps: vec![
                 debug_step(
-                    20,
-                    "memory",
-                    "Memory snapshot recorded after direct response.",
-                    [("memory_summary", memory_snapshot)],
+                    1,
+                    "input",
+                    "Input received but blocked by safety layer.",
+                    [
+                        ("normalized_input", normalized_input),
+                        ("route", route.to_string()),
+                    ],
+                ),
+                debug_step(
+                    19,
+                    "safety",
+                    "Request blocked due to safety concerns.",
+                    [
+                        ("blocked", "true".to_string()),
+                        ("warnings_count", warnings_count),
+                    ],
                 ),
             ],
-            ..ExplainTrace::default()
+            active_regions: vec![],
+            retrieval_query: None,
+            score_breakdowns: vec![],
+            selected_unit: None,
+            safety_warnings,
+            feedback_events: vec![],
         },
     }
 }

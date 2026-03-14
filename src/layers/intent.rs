@@ -131,6 +131,7 @@ impl IntentDetector {
                     &tokens,
                     references_document_context,
                     context,
+                    config,
                 ),
             ),
         ];
@@ -816,8 +817,39 @@ fn score_verify(
             ("confirm", 0.34),
             ("validate", 0.34),
             ("double check", 0.34),
+            ("is it true", 0.42),
+            ("is that true", 0.40),
+            ("true or false", 0.38),
+            ("myth or fact", 0.36),
+            ("debunk", 0.34),
         ],
     );
+    
+    // Strong verification patterns
+    if normalized.starts_with("verify ") || normalized.starts_with("fact check") {
+        score += 0.20;
+    }
+    if normalized.starts_with("check if ") || normalized.starts_with("is it true that") {
+        score += 0.18;
+    }
+    
+    // Question patterns that imply verification
+    if normalized.contains(" is ") && normalized.contains("?") {
+        // "Is climate change caused by..." pattern
+        if normalized.starts_with("is ") && normalized.contains(" caused by ") {
+            score += 0.25;
+        }
+        // "Is X visible from Y" pattern
+        if normalized.starts_with("is ") && (normalized.contains(" visible ") || normalized.contains(" harmful ")) {
+            score += 0.22;
+        }
+    }
+    
+    // "Did X happen" patterns for historical verification
+    if normalized.starts_with("did ") && normalized.contains("?") {
+        score += 0.15;
+    }
+    
     if !temporal_cues.is_empty() {
         score += 0.12;
     }
@@ -940,7 +972,7 @@ fn score_explain(normalized: &str, tokens: &[String], context: &ContextMatrix) -
 }
 
 fn score_compare(normalized: &str, tokens: &[String], _context: &ContextMatrix) -> f32 {
-    cue_score(
+    let mut score = cue_score(
         normalized,
         tokens,
         &[
@@ -950,8 +982,48 @@ fn score_compare(normalized: &str, tokens: &[String], _context: &ContextMatrix) 
             ("vs", 0.34),
             ("tradeoff", 0.34),
             ("better than", 0.22),
+            ("pros and cons", 0.36),
+            ("advantages", 0.24),
+            ("disadvantages", 0.24),
+            ("differences between", 0.44),
+            ("comparison", 0.38),
+            ("contrast", 0.36),
+            ("relative to", 0.28),
         ],
-    )
+    );
+    
+    // Boost for "X vs Y" patterns
+    if normalized.contains(" vs ") || normalized.contains(" versus ") {
+        score += 0.25;
+    }
+    
+    // Boost for "differences between X and Y" pattern
+    if normalized.contains("differences between") || normalized.contains("difference between") {
+        score += 0.28;
+    }
+    
+    // Boost for comparison language
+    if normalized.contains("which is better") || normalized.contains("which one") {
+        score += 0.18;
+    }
+    
+    // Boost for "X and Y comparison" or "X Y comparison" patterns
+    if normalized.contains("comparison") {
+        score += 0.15;
+    }
+    
+    // Boost for "X vs Y specs" or "X vs Y benchmarks" patterns
+    if (normalized.contains(" specs") || normalized.contains(" benchmarks") || normalized.contains(" performance")) 
+        && (normalized.contains(" vs ") || normalized.contains(" versus ")) {
+        score += 0.22;
+    }
+    
+    // Boost for "X for Y" comparison contexts (e.g., "Rust and Go for backend")
+    if normalized.contains(" for ") && normalized.contains(" and ") {
+        score += 0.12;
+    }
+    
+    score
 }
 
 fn score_extract(normalized: &str, tokens: &[String], references_document_context: bool) -> f32 {
@@ -1194,24 +1266,53 @@ fn score_question(
     tokens: &[String],
     references_document_context: bool,
     context: &ContextMatrix,
+    config: &IntentConfig,
 ) -> f32 {
     let mut score = 0.0;
+    
+    // Question marker (?)
     if contains_question_marker(raw_input) {
-        score += 0.26;
+        score += config.question_marker_score;
     }
+    
+    // Question starter words (what, why, how, etc.)
     if tokens
         .first()
         .map(|token| is_question_starter(token))
         .unwrap_or(false)
     {
-        score += 0.28;
+        score += config.question_starter_score;
     }
+    
     if references_document_context {
         score += 0.1;
     }
-    if normalized.contains("what does it say") || normalized.contains("what is") || normalized.contains("who is") {
-        score += 0.18;
+    
+    // Check implicit question patterns from config
+    for pattern in &config.implicit_question_patterns {
+        if normalized.contains(pattern) {
+            score += config.implicit_question_score;
+            break;
+        }
     }
+    
+    // Boost for queries with proper nouns (capitalized words)
+    let has_proper_noun = tokens.iter().any(|t| {
+        t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) && t.len() > 1
+    });
+    if has_proper_noun && score < config.intent_floor_threshold {
+        score += config.proper_noun_bonus;
+    }
+    
+    // Boost for "X of Y" constructions (information-seeking noun phrases)
+    if score < config.intent_floor_threshold && tokens.len() >= 2 {
+        let has_of_construction = normalized.contains(" of ");
+        let has_noun_at_start = tokens.first().map(|t| t.len() > 3).unwrap_or(false);
+        if has_of_construction && has_noun_at_start {
+            score += config.of_construction_bonus;
+        }
+    }
+    
     if !context.summary.is_empty() {
         score += 0.04;
     }

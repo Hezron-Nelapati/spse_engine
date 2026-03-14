@@ -127,6 +127,30 @@ intent:
   domain_hint_weight: 0.14
   preference_signal_weight: 0.14
   certainty_softener_weight: 0.10
+  # Question intent scoring
+  question_marker_score: 0.30
+  question_starter_score: 0.32
+  proper_noun_bonus: 0.15
+  of_construction_bonus: 0.25
+  implicit_question_patterns:
+    - "latest"
+    - "current"
+    - "recent"
+    - "price"
+    - "value"
+    - "define"
+    - "explain"
+    - "how to"
+    - "how do"
+    - "how many"
+    - "how much"
+    - "what is"
+    - "what are"
+    - "who is"
+    - "who was"
+    - "what does"
+    - "meaning of"
+  implicit_question_score: 0.42
 
 adaptive_behavior:
   intent_profiles:

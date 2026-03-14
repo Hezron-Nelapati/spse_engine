@@ -8,12 +8,43 @@ use crate::types::{
     DatabaseHealthMetrics, EvidenceState, RetrievedDocument, SanitizedQuery, TrainingSourceType,
 };
 use chrono::Utc;
+use futures_util::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Check if query is medical/scientific in nature
+fn is_medical_query(query_lower: &str) -> bool {
+    let medical_keywords = [
+        "disease", "symptom", "treatment", "drug", "medicine", "medication",
+        "clinical", "patient", "diagnosis", "therapy", "vaccine", "virus",
+        "bacteria", "cancer", "diabetes", "heart", "brain", "blood",
+        "surgery", "hospital", "doctor", "medical", "health", "pharma",
+        "enzyme", "protein", "gene", "dna", "rna", "cell", "molecular",
+        "biological", "biochemical", "pathology", "epidemiology",
+        "side effects", "dosage", "prescription", "fda", "nih",
+        "placebo", "randomized", "trial", "study", "cohort",
+    ];
+    
+    medical_keywords.iter().any(|kw| query_lower.contains(kw))
+}
+
+/// Check if query is location/geographic in nature
+fn is_location_query(query_lower: &str) -> bool {
+    let location_keywords = [
+        "where is", "location of", "address", "city in", "country",
+        "capital", "coordinates", "map", "latitude", "longitude",
+        "near", "distance from", "directions to", "route",
+        "place", "street", "avenue", "building", "landmark",
+        "geographic", "geography", "region", "province", "state",
+        "town", "village", "postal", "zip code",
+    ];
+    
+    location_keywords.iter().any(|kw| query_lower.contains(kw))
+}
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -31,7 +62,7 @@ pub struct RetrievalPipeline {
 impl RetrievalPipeline {
     pub fn new(config: &EngineConfig) -> Self {
         let client = Client::builder()
-            .user_agent("spse_engine/0.1")
+            .user_agent("spse_engine/0.1 (educational research project)")
             .timeout(std::time::Duration::from_millis(
                 config.retrieval_io.retrieval_timeout_ms,
             ))
@@ -203,86 +234,59 @@ impl RetrievalPipeline {
         query: &SanitizedQuery,
         limit: usize,
     ) -> Result<Vec<RetrievedDocument>, String> {
-        let mut docs = Vec::new();
-        let mut errors = Vec::new();
-        let connector_budget = limit.max(6);
+        let query_lower = query.raw_query.to_lowercase();
+        let is_medical_query = is_medical_query(&query_lower);
+        let is_location_query = is_location_query(&query_lower);
+
+        // Fetch from all sources in parallel for each query variant
+        let mut all_docs = Vec::new();
+        let mut all_errors = Vec::new();
 
         for variant in query_variants(query) {
-            let variant_docs = match self
-                .fetch_duckduckgo_documents(&variant, connector_budget.saturating_sub(docs.len()))
-                .await
-            {
-                Ok(found) => found,
-                Err(err) => {
-                    errors.push(err);
-                    Vec::new()
-                }
-            };
-            let variant_grounded = has_grounded_candidate(&variant_docs);
-            docs.extend(variant_docs);
+            // Execute all fetches in parallel using boxed futures
+            let mut futures_vec: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<RetrievedDocument>, String>> + Send>>> = Vec::new();
+            
+            // Always include these sources
+            futures_vec.push(Box::pin(self.fetch_wikipedia_documents(&variant, 3)));
+            futures_vec.push(Box::pin(self.fetch_duckduckgo_documents(&variant, 3)));
+            futures_vec.push(Box::pin(self.fetch_wikidata_documents(&variant, 2)));
 
-            if docs.len() < connector_budget && !variant_grounded {
-                match self
-                    .fetch_wikipedia_documents(
-                        &variant,
-                        connector_budget.saturating_sub(docs.len()),
-                    )
-                    .await
-                {
-                    Ok(mut found) => docs.append(&mut found),
-                    Err(err) => errors.push(err),
+            // Conditional sources
+            if is_medical_query {
+                futures_vec.push(Box::pin(self.fetch_pubmed_central_documents(&variant, 2)));
+            }
+            if is_location_query {
+                futures_vec.push(Box::pin(self.fetch_nominatim_documents(&variant, 2)));
+            }
+
+            // Execute all fetches in parallel
+            let results = join_all(futures_vec).await;
+
+            // Collect results
+            for result in results {
+                match result {
+                    Ok(docs) => all_docs.extend(docs),
+                    Err(err) => all_errors.push(err),
                 }
             }
 
-            if docs.len() < connector_budget {
-                match self
-                    .fetch_wikidata_documents(&variant, connector_budget.saturating_sub(docs.len()))
-                    .await
-                {
-                    Ok(mut found) => docs.append(&mut found),
-                    Err(err) => errors.push(err),
-                }
-            }
+            // Deduplicate and rank after each variant
+            dedup_documents(&mut all_docs);
+            rank_documents_for_query(&variant, &mut all_docs);
 
-            if docs.len() < connector_budget {
-                match self
-                    .fetch_pubmed_central_documents(
-                        &variant,
-                        connector_budget.saturating_sub(docs.len()),
-                    )
-                    .await
-                {
-                    Ok(mut found) => docs.append(&mut found),
-                    Err(err) => errors.push(err),
-                }
-            }
-
-            if docs.len() < connector_budget {
-                match self
-                    .fetch_nominatim_documents(
-                        &variant,
-                        connector_budget.saturating_sub(docs.len()),
-                    )
-                    .await
-                {
-                    Ok(mut found) => docs.append(&mut found),
-                    Err(err) => errors.push(err),
-                }
-            }
-
-            dedup_documents(&mut docs);
-            rank_documents_for_query(&variant, &mut docs);
-            docs.truncate(connector_budget);
-            if docs.len() >= limit && has_grounded_candidate(&docs) {
+            // Check if we have enough grounded content
+            if all_docs.len() >= limit && has_grounded_candidate(&all_docs) {
                 break;
             }
         }
 
-        if docs.is_empty() {
-            return Err(errors.join("; "));
+        all_docs.truncate(limit);
+
+        if all_docs.is_empty() {
+            return Err(format!("All sources failed: {}", all_errors.join("; ")));
         }
 
-        Ok(self.hydrate_documents(docs, limit).await)
+        Ok(self.hydrate_documents(all_docs, limit).await)
     }
 
     async fn fetch_duckduckgo_documents(
@@ -679,6 +683,91 @@ impl RetrievalPipeline {
         Ok(docs)
     }
 
+    /// Fetch from SearX metasearch engine (aggregates Google, Bing, Yahoo, etc.)
+    async fn fetch_searx_documents(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RetrievedDocument>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Use a public SearX instance
+        let url = reqwest::Url::parse_with_params(
+            "https://searx.be/search",
+            &[
+                ("q", query),
+                ("format", "json"),
+                ("engines", "google,bing,duckduckgo,yahoo"),
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let body = response.text().await.map_err(|err| err.to_string())?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|err| err.to_string())?;
+        let mut docs = Vec::new();
+
+        if let Some(results) = value.get("results").and_then(Value::as_array) {
+            for item in results.iter().take(limit) {
+                let title = item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let content = item
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let url = item
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+
+                if title.is_empty() && content.is_empty() {
+                    continue;
+                }
+
+                let raw_content = if content.is_empty() {
+                    title.to_string()
+                } else {
+                    format!("{}: {}", title, content)
+                };
+
+                let normalized = input::normalize_text(&raw_content);
+                if normalized.is_empty() {
+                    continue;
+                }
+
+                docs.push(RetrievedDocument {
+                    source_url: if url.is_empty() {
+                        "https://searx.be".to_string()
+                    } else {
+                        url.to_string()
+                    },
+                    title: title.to_string(),
+                    raw_content,
+                    normalized_content: normalized,
+                    retrieved_at: Utc::now(),
+                    trust_score: 0.65, // Slightly lower trust for aggregated results
+                    cached: false,
+                });
+            }
+        }
+
+        Ok(docs)
+    }
+
     async fn fetch_wikipedia_documents(
         &self,
         query: &str,
@@ -739,8 +828,14 @@ impl RetrievalPipeline {
 
                 let summary_response = match self.client.get(summary_url.clone()).send().await {
                     Ok(response) => response,
-                    Err(_) => continue,
+                    Err(_) => {
+                        // Add delay on error to avoid rate limiting
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
                 };
+                // Add small delay between requests to avoid rate limiting
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let summary_body = match summary_response.text().await {
                     Ok(body) => body,
                     Err(_) => continue,
@@ -1044,31 +1139,13 @@ impl MultiEngineAggregator {
     /// Query all configured engines in parallel
     async fn query_all_engines(&self, query: &str, limit: usize) -> Vec<EngineResult> {
         let mut results = Vec::new();
+        let query_lower = query.to_lowercase();
         
-        // DuckDuckGo
-        if results.len() < self.config.max_engines {
-            let start = Instant::now();
-            match self.query_duckduckgo(query, limit).await {
-                Ok(docs) => {
-                    results.push(EngineResult {
-                        engine_name: "duckduckgo".to_string(),
-                        documents: docs,
-                        latency_ms: start.elapsed().as_millis() as u64,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    results.push(EngineResult {
-                        engine_name: "duckduckgo".to_string(),
-                        documents: Vec::new(),
-                        latency_ms: start.elapsed().as_millis() as u64,
-                        error: Some(e),
-                    });
-                }
-            }
-        }
+        // Determine which engines are relevant based on query content
+        let is_medical = is_medical_query(&query_lower);
+        let is_location = is_location_query(&query_lower);
         
-        // Wikipedia
+        // Always start with Wikipedia for general knowledge (highest priority)
         if results.len() < self.config.max_engines {
             let start = Instant::now();
             match self.query_wikipedia(query, limit).await {
@@ -1091,7 +1168,30 @@ impl MultiEngineAggregator {
             }
         }
         
-        // Wikidata
+        // DuckDuckGo for general web search
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_duckduckgo(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "duckduckgo".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "duckduckgo".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        // Wikidata for structured data
         if results.len() < self.config.max_engines {
             let start = Instant::now();
             match self.query_wikidata(query, limit).await {
@@ -1114,8 +1214,8 @@ impl MultiEngineAggregator {
             }
         }
         
-        // PubMed Central
-        if results.len() < self.config.max_engines {
+        // PubMed Central - ONLY for medical/scientific queries
+        if is_medical && results.len() < self.config.max_engines {
             let start = Instant::now();
             match self.query_pubmed(query, limit).await {
                 Ok(docs) => {
@@ -1137,8 +1237,8 @@ impl MultiEngineAggregator {
             }
         }
         
-        // Nominatim (OpenStreetMap)
-        if results.len() < self.config.max_engines {
+        // Nominatim (OpenStreetMap) - only for location queries
+        if is_location && results.len() < self.config.max_engines {
             let start = Instant::now();
             match self.query_nominatim(query, limit).await {
                 Ok(docs) => {

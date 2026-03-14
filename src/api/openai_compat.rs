@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use futures::stream::Stream;
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -298,7 +298,7 @@ fn create_stream(
         .collect();
 
     let num_chunks = chunks.len();
-    let stream = futures::stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
+    let stream = futures_util::stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
         let delta = if i == 0 {
             Delta {
                 role: Some("assistant".to_string()),
@@ -333,9 +333,9 @@ fn create_stream(
     }));
 
     // Add [DONE] marker at end
-    let done_stream = futures::stream::once(async { Ok(Event::default().data("[DONE]")) });
+    let done_stream = futures_util::stream::once(async { Ok(Event::default().data("[DONE]")) });
     
-    futures::stream::select(stream, done_stream)
+    futures_util::stream::select(stream, done_stream)
 }
 
 // ============================================================================
