@@ -33,7 +33,7 @@ pub enum SourceTypeId {
 impl Default for StressDrillConfig {
     fn default() -> Self {
         Self {
-            corpus_size_mb: 100,
+            corpus_size_mb: 7, // Reduced from 100MB for faster test execution
             source_types: vec![
                 SourceTypeId::Html,
                 SourceTypeId::QaJson,

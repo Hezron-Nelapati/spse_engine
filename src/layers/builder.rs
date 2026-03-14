@@ -108,9 +108,12 @@ impl DiscoveryThresholds {
 
         Self {
             min_frequency: if packet.training_mode {
+                // In training mode, use the lower of base_frequency or min_threshold
+                // to allow unit discovery even for short documents
                 base_frequency
-                    .max(config.min_frequency_threshold)
+                    .min(config.min_frequency_threshold)
                     .saturating_add(chunk_scale)
+                    .max(1)
             } else {
                 base_frequency
                     .max(config.min_frequency_threshold)
@@ -420,8 +423,11 @@ fn should_reject_fragment(stats: &WindowStats, config: &UnitBuilderConfig) -> bo
         return false;
     }
 
+    // Multi-word phrases with at least one edge boundary are valid
+    // (e.g., "dynamic units" appearing mid-sentence has edge_boundary_hits > 0)
     if stats.content.contains(char::is_whitespace) {
-        return true;
+        // Only reject if it has NO boundaries at all
+        return stats.edge_boundary_hits == 0;
     }
 
     // Reject fragments with outer punctuation (leading/trailing non-alphanumeric chars)

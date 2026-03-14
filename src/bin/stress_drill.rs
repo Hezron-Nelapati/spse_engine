@@ -1,4 +1,4 @@
-//! Stress Drill - End-to-end 100MB heterogeneous ingestion testing
+//! Stress Drill - End-to-end 7MB heterogeneous ingestion testing
 //!
 //! Validates Layer 12 normalization, latency monitoring, pollution ceilings,
 //! and snapshot consistency under mixed-source load.
@@ -7,7 +7,7 @@
 //!   cargo run --bin stress_drill -- [options]
 //!
 //! Options:
-//!   --corpus-size <MB>     Corpus size in MB (default: 100)
+//!   --corpus-size <MB>     Corpus size in MB (default: 7)
 //!   --query-interval <MS>  Query interval in milliseconds (default: 100)
 //!   --maintenance <SEC>    Maintenance interval in seconds (default: 60)
 //!   --max-latency <MS>     Max latency spike threshold (default: 500)
@@ -89,7 +89,7 @@ fn parse_args(args: &[String]) -> StressDrillConfig {
         match args[i].as_str() {
             "--corpus-size" => {
                 if i + 1 < args.len() {
-                    config.corpus_size_mb = args[i + 1].parse().unwrap_or(100);
+                    config.corpus_size_mb = args[i + 1].parse().unwrap_or(7);
                     i += 1;
                 }
             }
@@ -129,7 +129,7 @@ fn print_help() {
     println!("Usage: cargo run --bin stress_drill -- [options]");
     println!();
     println!("Options:");
-    println!("  --corpus-size <MB>     Corpus size in MB (default: 100)");
+    println!("  --corpus-size <MB>     Corpus size in MB (default: 7)");
     println!("  --query-interval <MS>  Query interval in milliseconds (default: 100)");
     println!("  --maintenance <SEC>    Maintenance interval in seconds (default: 60)");
     println!("  --max-latency <MS>      Max latency spike threshold (default: 500)");

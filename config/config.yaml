@@ -503,7 +503,7 @@ source_policies:
     fields_to_skip: ["revision", "contributor", "timestamp"]
     merge_to_core: false
     trust_bonus: 0.10
-    memory_type: episodic
+    memory_type: core
     decay_days: 30
     usage_tag: "core_knowledge"
   wikidata_truthy:
