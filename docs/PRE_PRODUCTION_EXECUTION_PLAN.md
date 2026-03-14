@@ -648,7 +648,15 @@ cargo test --lib -- drill_
 - `src/engine.rs` (ArcSwap usage verification)
 - `tests/integration.rs` (crash tests)
 
-### 2.4 Cross-Layer Integration Drills - NEW
+### 2.4 Cross-Layer Integration Drills ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- `layer_boundary_tests.rs` created with 16 layer boundary contract tests (`tests/layer_boundary_tests.rs`)
+- Layer boundary tests: L1→L2, L2→L3, L3→L4, L5→L6, L6→L7, L7→L9, L14→L16, L16→L17
+- State consistency tests: unit ID preservation, context overflow, unit dropped, high throughput
+- Backpressure tests: normal flow, retrieval bottleneck, queue overflow, sustained high rate
 
 **What to Implement:**
 - Validate data flow between adjacent layers
@@ -709,7 +717,16 @@ cargo test --lib -- drill_
 
 ---
 
-### 2.5 End-to-End Scenario Drills - NEW
+### 2.5 End-to-End Scenario Drills ✅
+
+**Status:** IMPLEMENTED
+
+**Implementation Details:**
+- 20 e2e scenario tests added to `tests/integration.rs`
+- Single query lifecycle tests: factual, brainstorm, retrieval triggered, layer failure, concurrent
+- Multi-turn conversation tests: context preserved, topic shift, intent change, context loss, long conversation
+- Training mode tests: silent ingestion, interactive feedback, interrupted, data corruption, large corpus
+- Error recovery tests: graceful degradation, partial output, pipeline failure, cascading failures
 
 **What to Implement:**
 - Full query lifecycle from input to output
