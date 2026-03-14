@@ -1283,3 +1283,8 @@ layer_2_unit_builder:
         suggested_fixes,
     })
 }
+
+fn main() {
+    // Library binary - no-op main for compilation
+    println!("pollution_dev_lib is a library, not a runnable binary");
+}

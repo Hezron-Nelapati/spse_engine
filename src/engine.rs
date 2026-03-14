@@ -1,6 +1,6 @@
 use crate::config::{
-    AdaptiveTrustProfile, EngineConfig, EscapeProfile, FineResolverConfig, RetrievalThresholds,
-    ScoringWeights, TrustConfig,
+    AdaptiveTrustProfile, EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
+    RetrievalThresholds, ScoringWeights, TrustConfig,
 };
 use crate::datasets::{self, DatasetSinkControl, DatasetTextChunk, PreparationReport};
 use crate::document::{
@@ -169,6 +169,7 @@ struct AdaptiveRuntimeSettings {
     trust: TrustConfig,
     retrieval: RetrievalThresholds,
     additional_cost_penalty: f32,
+    shaping: IntentShapingConfig,
 }
 
 impl AdaptiveRuntimeSettings {
@@ -187,6 +188,7 @@ impl AdaptiveRuntimeSettings {
             trust: config.trust.clone(),
             retrieval: config.retrieval.clone(),
             additional_cost_penalty: 0.0,
+            shaping: IntentShapingConfig::default(),
         }
     }
 }
@@ -930,11 +932,20 @@ impl Engine {
             }
         });
         let layer_16_start = Instant::now();
-        let resolved = FineResolver::select(
+        
+        // Collect anchor units for shaping (high-trust factual anchors)
+        let anchor_units: Vec<&Unit> = final_candidates
+            .iter()
+            .filter(|unit| unit.trust_score >= adaptive.shaping.anchor_trust_threshold)
+            .collect();
+        
+        let resolved = FineResolver::select_with_shaping(
             &scored,
             resolver_mode,
             candidate_route.used_escape,
             &adaptive.resolver,
+            &adaptive.shaping,
+            &anchor_units,
         )
         .or_else(|| {
             final_candidates
@@ -1530,6 +1541,7 @@ impl Engine {
         let (resolver, resolver_mode) = blend_resolver_profile(&self.config, &profile_blend);
         settings.resolver = resolver;
         settings.resolver_mode = resolver_mode;
+        settings.shaping = blend_shaping_config(&self.config, &profile_blend);
 
         let trust_signal = dynamic_trust_signal(intent_profile);
         if trust_signal.harden {
@@ -6184,6 +6196,55 @@ fn blend_scoring_weights(config: &EngineConfig, blend: &BehaviorProfileBlend) ->
     }
 }
 
+fn blend_shaping_config(config: &EngineConfig, blend: &BehaviorProfileBlend) -> IntentShapingConfig {
+    let factual = config
+        .adaptive_behavior
+        .intent_profile("factual")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+    let explanatory = config
+        .adaptive_behavior
+        .intent_profile("explanatory")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+    let procedural = config
+        .adaptive_behavior
+        .intent_profile("procedural")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+    let creative = config
+        .adaptive_behavior
+        .intent_profile("creative")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+    let advisory = config
+        .adaptive_behavior
+        .intent_profile("advisory")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+    let casual = config
+        .adaptive_behavior
+        .intent_profile("casual")
+        .map(|profile| profile.shaping.clone())
+        .unwrap_or_default();
+
+    // For shaping, use dominant profile's settings rather than blending
+    // since boolean flags like allow_semantic_drift shouldn't be averaged
+    if let Some(name) = dominant_behavior_profile_name(blend) {
+        if let Some(profile) = config.adaptive_behavior.intent_profile(name) {
+            return profile.shaping.clone();
+        }
+    }
+
+    // Fallback: if any profile has allow_semantic_drift=true, use creative settings
+    if blend.creative > 0.3 || blend.casual > 0.5 {
+        return creative;
+    }
+
+    // Default to factual (conservative) shaping
+    factual
+}
+
 fn blend_escape_profile(config: &EngineConfig, blend: &BehaviorProfileBlend) -> EscapeProfile {
     let factual = config
         .adaptive_behavior
@@ -6306,6 +6367,8 @@ fn blend_resolver_profile(
         )
         .clamp(0.0, 1.0),
         evidence_answer_confidence_threshold: config.resolver.evidence_answer_confidence_threshold,
+        creative_drift_tolerance: config.resolver.creative_drift_tolerance,
+        factual_corruption_threshold: config.resolver.factual_corruption_threshold,
     };
 
     let mode = dominant_behavior_profile_name(blend).and_then(|name| match name {

@@ -290,6 +290,7 @@ impl Default for AdaptiveBehaviorConfig {
                     min_confidence_floor: 0.20,
                     mode: Some(ResolverMode::Exploratory),
                 },
+                shaping: IntentShapingConfig::default(),
             },
         );
         intent_profiles.insert(
@@ -313,6 +314,7 @@ impl Default for AdaptiveBehaviorConfig {
                     min_confidence_floor: 0.24,
                     mode: Some(ResolverMode::Balanced),
                 },
+                shaping: IntentShapingConfig::default(),
             },
         );
         intent_profiles.insert(
@@ -336,6 +338,7 @@ impl Default for AdaptiveBehaviorConfig {
                     min_confidence_floor: 0.30,
                     mode: Some(ResolverMode::Deterministic),
                 },
+                shaping: IntentShapingConfig::default(),
             },
         );
         intent_profiles.insert(
@@ -359,6 +362,7 @@ impl Default for AdaptiveBehaviorConfig {
                     min_confidence_floor: 0.28,
                     mode: Some(ResolverMode::Balanced),
                 },
+                shaping: IntentShapingConfig::default(),
             },
         );
         intent_profiles.insert(
@@ -381,6 +385,128 @@ impl Default for AdaptiveBehaviorConfig {
                     selection_temperature: 0.75,
                     min_confidence_floor: 0.18,
                     mode: Some(ResolverMode::Exploratory),
+                },
+                shaping: IntentShapingConfig {
+                    allow_semantic_drift: true,
+                    drift_tolerance: 0.25,
+                    preserve_factual_anchor: true,
+                    anchor_trust_threshold: 0.80,
+                },
+            },
+        );
+        intent_profiles.insert(
+            "brainstorm".to_string(),
+            IntentAdaptiveProfile {
+                scoring: ScoringWeights {
+                    spatial: 0.06,
+                    context: 0.30,
+                    sequence: 0.12,
+                    transition: 0.06,
+                    utility: 0.22,
+                    confidence: 0.06,
+                    evidence: 0.04,
+                },
+                escape: EscapeProfile {
+                    stochastic_jump_prob: 0.35,
+                    beam_width: 10,
+                },
+                resolver: AdaptiveResolverProfile {
+                    selection_temperature: 0.90,
+                    min_confidence_floor: 0.12,
+                    mode: Some(ResolverMode::Exploratory),
+                },
+                shaping: IntentShapingConfig {
+                    allow_semantic_drift: true,
+                    drift_tolerance: 0.35,
+                    preserve_factual_anchor: true,
+                    anchor_trust_threshold: 0.80,
+                },
+            },
+        );
+        intent_profiles.insert(
+            "plan".to_string(),
+            IntentAdaptiveProfile {
+                scoring: ScoringWeights {
+                    spatial: 0.08,
+                    context: 0.22,
+                    sequence: 0.28,
+                    transition: 0.14,
+                    utility: 0.12,
+                    confidence: 0.10,
+                    evidence: 0.06,
+                },
+                escape: EscapeProfile {
+                    stochastic_jump_prob: 0.12,
+                    beam_width: 5,
+                },
+                resolver: AdaptiveResolverProfile {
+                    selection_temperature: 0.35,
+                    min_confidence_floor: 0.22,
+                    mode: Some(ResolverMode::Balanced),
+                },
+                shaping: IntentShapingConfig {
+                    allow_semantic_drift: false,
+                    drift_tolerance: 0.0,
+                    preserve_factual_anchor: true,
+                    anchor_trust_threshold: 0.75,
+                },
+            },
+        );
+        intent_profiles.insert(
+            "act".to_string(),
+            IntentAdaptiveProfile {
+                scoring: ScoringWeights {
+                    spatial: 0.06,
+                    context: 0.20,
+                    sequence: 0.24,
+                    transition: 0.16,
+                    utility: 0.16,
+                    confidence: 0.12,
+                    evidence: 0.06,
+                },
+                escape: EscapeProfile {
+                    stochastic_jump_prob: 0.08,
+                    beam_width: 4,
+                },
+                resolver: AdaptiveResolverProfile {
+                    selection_temperature: 0.25,
+                    min_confidence_floor: 0.25,
+                    mode: Some(ResolverMode::Balanced),
+                },
+                shaping: IntentShapingConfig {
+                    allow_semantic_drift: false,
+                    drift_tolerance: 0.0,
+                    preserve_factual_anchor: true,
+                    anchor_trust_threshold: 0.85,
+                },
+            },
+        );
+        intent_profiles.insert(
+            "critique".to_string(),
+            IntentAdaptiveProfile {
+                scoring: ScoringWeights {
+                    spatial: 0.08,
+                    context: 0.26,
+                    sequence: 0.16,
+                    transition: 0.10,
+                    utility: 0.14,
+                    confidence: 0.16,
+                    evidence: 0.10,
+                },
+                escape: EscapeProfile {
+                    stochastic_jump_prob: 0.10,
+                    beam_width: 5,
+                },
+                resolver: AdaptiveResolverProfile {
+                    selection_temperature: 0.30,
+                    min_confidence_floor: 0.24,
+                    mode: Some(ResolverMode::Balanced),
+                },
+                shaping: IntentShapingConfig {
+                    allow_semantic_drift: false,
+                    drift_tolerance: 0.0,
+                    preserve_factual_anchor: true,
+                    anchor_trust_threshold: 0.80,
                 },
             },
         );
@@ -405,6 +531,7 @@ impl Default for AdaptiveBehaviorConfig {
                     min_confidence_floor: 0.26,
                     mode: Some(ResolverMode::Balanced),
                 },
+                shaping: IntentShapingConfig::default(),
             },
         );
 
@@ -436,10 +563,31 @@ impl Default for AdaptiveBehaviorConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct IntentShapingConfig {
+    pub allow_semantic_drift: bool,
+    pub drift_tolerance: f32,
+    pub preserve_factual_anchor: bool,
+    pub anchor_trust_threshold: f32,
+}
+
+impl Default for IntentShapingConfig {
+    fn default() -> Self {
+        Self {
+            allow_semantic_drift: false,
+            drift_tolerance: 0.0,
+            preserve_factual_anchor: true,
+            anchor_trust_threshold: 0.80,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IntentAdaptiveProfile {
     pub scoring: ScoringWeights,
     pub escape: EscapeProfile,
     pub resolver: AdaptiveResolverProfile,
+    pub shaping: IntentShapingConfig,
 }
 
 impl Default for IntentAdaptiveProfile {
@@ -448,6 +596,7 @@ impl Default for IntentAdaptiveProfile {
             scoring: ScoringWeights::default(),
             escape: EscapeProfile::default(),
             resolver: AdaptiveResolverProfile::default(),
+            shaping: IntentShapingConfig::default(),
         }
     }
 }
@@ -1223,6 +1372,8 @@ pub struct FineResolverConfig {
     pub selection_temperature: f32,
     pub min_confidence_floor: f32,
     pub evidence_answer_confidence_threshold: f32,
+    pub creative_drift_tolerance: f32,
+    pub factual_corruption_threshold: f32,
 }
 
 impl Default for FineResolverConfig {
@@ -1231,6 +1382,8 @@ impl Default for FineResolverConfig {
             selection_temperature: 0.7,
             min_confidence_floor: 0.22,
             evidence_answer_confidence_threshold: 0.22,
+            creative_drift_tolerance: 0.25,
+            factual_corruption_threshold: 0.15,
         }
     }
 }

@@ -194,6 +194,95 @@ adaptive_behavior:
         selection_temperature: 0.75
         min_confidence_floor: 0.18
         mode: "exploratory"
+      shaping:
+        allow_semantic_drift: true
+        drift_tolerance: 0.25
+        preserve_factual_anchor: true
+        anchor_trust_threshold: 0.80
+    brainstorm:
+      scoring:
+        w_spatial: 0.06
+        w_context: 0.30
+        w_sequence: 0.12
+        w_transition: 0.06
+        w_utility: 0.22
+        w_confidence: 0.06
+        w_evidence: 0.04
+      escape:
+        stochastic_jump_prob: 0.35
+        beam_width: 10
+      resolver:
+        selection_temperature: 0.90
+        min_confidence_floor: 0.12
+        mode: "exploratory"
+      shaping:
+        allow_semantic_drift: true
+        drift_tolerance: 0.35
+        preserve_factual_anchor: true
+        anchor_trust_threshold: 0.80
+    plan:
+      scoring:
+        w_spatial: 0.08
+        w_context: 0.22
+        w_sequence: 0.28
+        w_transition: 0.14
+        w_utility: 0.12
+        w_confidence: 0.10
+        w_evidence: 0.06
+      escape:
+        stochastic_jump_prob: 0.12
+        beam_width: 5
+      resolver:
+        selection_temperature: 0.35
+        min_confidence_floor: 0.22
+        mode: "balanced"
+      shaping:
+        allow_semantic_drift: false
+        drift_tolerance: 0.0
+        preserve_factual_anchor: true
+        anchor_trust_threshold: 0.75
+    act:
+      scoring:
+        w_spatial: 0.06
+        w_context: 0.20
+        w_sequence: 0.24
+        w_transition: 0.16
+        w_utility: 0.16
+        w_confidence: 0.12
+        w_evidence: 0.06
+      escape:
+        stochastic_jump_prob: 0.08
+        beam_width: 4
+      resolver:
+        selection_temperature: 0.25
+        min_confidence_floor: 0.25
+        mode: "balanced"
+      shaping:
+        allow_semantic_drift: false
+        drift_tolerance: 0.0
+        preserve_factual_anchor: true
+        anchor_trust_threshold: 0.85
+    critique:
+      scoring:
+        w_spatial: 0.08
+        w_context: 0.26
+        w_sequence: 0.16
+        w_transition: 0.10
+        w_utility: 0.14
+        w_confidence: 0.16
+        w_evidence: 0.10
+      escape:
+        stochastic_jump_prob: 0.10
+        beam_width: 5
+      resolver:
+        selection_temperature: 0.30
+        min_confidence_floor: 0.24
+        mode: "balanced"
+      shaping:
+        allow_semantic_drift: false
+        drift_tolerance: 0.0
+        preserve_factual_anchor: true
+        anchor_trust_threshold: 0.80
     advisory:
       scoring:
         w_spatial: 0.10
@@ -320,6 +409,8 @@ layer_16_fine_resolver:
   selection_temperature: 0.60
   min_confidence_floor: 0.22
   evidence_answer_confidence_threshold: 0.22
+  creative_drift_tolerance: 0.25
+  factual_corruption_threshold: 0.15
 
 layer_20_telemetry:
   log_score_breakdowns: true

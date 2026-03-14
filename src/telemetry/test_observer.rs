@@ -36,6 +36,19 @@ pub struct TestObservation {
     pub score_breakdown: Option<ScoreBreakdown>,
     pub final_answer_confidence: f32,
     pub config_values_used: ConfigSnapshot,
+    // Intent blend telemetry fields
+    pub heuristic_intent: Option<String>,
+    pub heuristic_confidence: Option<f32>,
+    pub memory_backed_intent: Option<String>,
+    pub memory_backed_confidence: Option<f32>,
+    pub blended_intent: Option<String>,
+    pub blended_confidence: Option<f32>,
+    pub intents_agree: Option<bool>,
+    pub drift_detected: Option<bool>,
+    pub drift_reason: Option<String>,
+    pub shaping_allow_drift: Option<bool>,
+    pub shaping_drift_tolerance: Option<f32>,
+    pub active_memory_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +97,8 @@ pub struct ConfigSnapshot {
     pub max_query_expansion_terms: usize,
     pub max_retrieval_results: usize,
     pub retrieval_timeout_ms: u64,
+    pub creative_drift_tolerance: f32,
+    pub factual_corruption_threshold: f32,
 }
 
 impl From<&EngineConfig> for ConfigSnapshot {
@@ -108,6 +123,8 @@ impl From<&EngineConfig> for ConfigSnapshot {
             max_query_expansion_terms: config.query.max_query_expansion_terms,
             max_retrieval_results: config.retrieval_io.max_retrieval_results,
             retrieval_timeout_ms: config.retrieval_io.retrieval_timeout_ms,
+            creative_drift_tolerance: config.resolver.creative_drift_tolerance,
+            factual_corruption_threshold: config.resolver.factual_corruption_threshold,
         }
     }
 }
@@ -212,6 +229,19 @@ impl TestObserver {
             score_breakdown: scoring.score_breakdown,
             final_answer_confidence,
             config_values_used: ConfigSnapshot::from(config),
+            // Intent blend telemetry fields (defaults for now)
+            heuristic_intent: None,
+            heuristic_confidence: None,
+            memory_backed_intent: None,
+            memory_backed_confidence: None,
+            blended_intent: None,
+            blended_confidence: None,
+            intents_agree: None,
+            drift_detected: None,
+            drift_reason: None,
+            shaping_allow_drift: None,
+            shaping_drift_tolerance: None,
+            active_memory_channel: None,
         }
     }
 }

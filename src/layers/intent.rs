@@ -1,7 +1,7 @@
 use crate::config::{IntentConfig, RetrievalThresholds};
 use crate::types::{
-    ConfidenceStats, ContextMatrix, IntentFallbackMode, IntentKind, IntentProfile, IntentScore,
-    ScoredCandidate, SearchDecision, SequenceState,
+    ConfidenceStats, ContextMatrix, IntentBlendReport, IntentFallbackMode, IntentKind,
+    IntentProfile, IntentScore, ScoredCandidate, SearchDecision, SequenceState,
 };
 
 pub struct IntentDetector;
@@ -1284,6 +1284,77 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
     }
 
     intersection as f32 / lhs.len().max(rhs.len()) as f32
+}
+
+impl IntentDetector {
+    /// Blend heuristic intent classification with memory-backed intent lookup.
+    /// This validates intent detection by cross-referencing Intent-channel memory units.
+    pub fn hybrid_blend(
+        heuristic_profile: &IntentProfile,
+        memory_backed_intent: Option<IntentKind>,
+        memory_backed_confidence: f32,
+        heuristic_weight: f32,
+        memory_weight: f32,
+    ) -> IntentBlendReport {
+        let heuristic_intent = heuristic_profile.primary;
+        let heuristic_confidence = heuristic_profile.confidence;
+
+        let intents_agree = memory_backed_intent
+            .map(|mem_intent| mem_intent == heuristic_intent)
+            .unwrap_or(true);
+
+        let drift_detected = !intents_agree && memory_backed_confidence > 0.3;
+
+        let drift_reason = if drift_detected {
+            Some(format!(
+                "Heuristic {:?} ({:.2}) conflicts with memory-backed {:?} ({:.2})",
+                heuristic_intent, heuristic_confidence, memory_backed_intent, memory_backed_confidence
+            ))
+        } else {
+            None
+        };
+
+        // Blend the confidence scores
+        let blended_confidence = if let Some(_mem_intent) = memory_backed_intent {
+            if intents_agree {
+                // Intents agree: boost confidence
+                (heuristic_confidence * heuristic_weight + memory_backed_confidence * memory_weight)
+                    .min(1.0)
+            } else {
+                // Intents disagree: use weighted average but flag drift
+                heuristic_confidence * heuristic_weight + memory_backed_confidence * memory_weight
+            }
+        } else {
+            // No memory-backed intent: use heuristic confidence
+            heuristic_confidence
+        };
+
+        // Determine blended intent
+        let blended_intent = if let Some(mem_intent) = memory_backed_intent {
+            if intents_agree || memory_backed_confidence > heuristic_confidence + 0.2 {
+                // Use memory-backed if it agrees or is significantly more confident
+                mem_intent
+            } else {
+                heuristic_intent
+            }
+        } else {
+            heuristic_intent
+        };
+
+        IntentBlendReport {
+            heuristic_intent,
+            heuristic_confidence,
+            memory_backed_intent,
+            memory_backed_confidence,
+            blended_intent,
+            blended_confidence,
+            heuristic_weight,
+            memory_weight,
+            intents_agree,
+            drift_detected,
+            drift_reason,
+        }
+    }
 }
 
 #[cfg(test)]

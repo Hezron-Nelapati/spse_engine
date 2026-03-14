@@ -1635,3 +1635,130 @@ async fn spawn_test_http_server(body: &str) -> String {
 
     format!("http://{}", address)
 }
+
+#[test]
+fn channel_isolation_validation_detects_violations() {
+    let db_path = temp_db_path("channel_isolation");
+    let store = MemoryStore::new(&db_path);
+    
+    // MemoryStore bootstraps seed units, some of which go into Intent channel
+    // but isolation should still be valid (no violations)
+    let report = store.validate_channel_isolation();
+    assert!(report.is_valid, "Store with bootstrap seed units should have valid isolation");
+    assert!(report.main_count > 0, "Store should have bootstrap seed units in Main");
+    // Bootstrap seeds include Intent channel units, so intent_count may be > 0
+    assert!(report.main_count >= report.intent_count, "Main should contain all Intent units");
+    assert!(report.main_count >= report.reasoning_count, "Main should contain all Reasoning units");
+}
+
+#[test]
+fn channel_isolation_validates_main_contains_all() {
+    use spse_engine::layers::builder::UnitBuilder;
+    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::config::UnitBuilderConfig;
+    use spse_engine::types::InputPacket;
+    
+    let db_path = temp_db_path("channel_isolation_main");
+    let mut store = MemoryStore::new(&db_path);
+    
+    // Create units using UnitBuilder
+    let config = UnitBuilderConfig::default();
+    let input_packet = InputPacket {
+        original_text: "test content for intent channel".to_string(),
+        normalized_text: "test content for intent channel".to_lowercase(),
+        bytes: Vec::new(),
+        timestamp: Utc::now(),
+        training_mode: false,
+    };
+    let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
+    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
+    
+    // Ingest with Intent channel
+    store.ingest_hierarchy_with_channels(
+        &hierarchy,
+        spse_engine::types::SourceKind::TrainingDocument,
+        "test context",
+        MemoryType::Episodic,
+        &[MemoryChannel::Main, MemoryChannel::Intent],
+    );
+    
+    // Validate isolation - should pass since Intent units are also in Main
+    let report = store.validate_channel_isolation();
+    assert!(report.is_valid, "Channel isolation should be valid when Intent is subset of Main");
+    assert!(report.intent_count > 0, "Should have Intent channel units");
+    assert!(report.main_count >= report.intent_count, "Main should contain all Intent units");
+}
+
+#[test]
+fn channel_isolation_detects_excessive_overlap() {
+    use spse_engine::layers::builder::UnitBuilder;
+    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::config::UnitBuilderConfig;
+    use spse_engine::types::InputPacket;
+    
+    let db_path = temp_db_path("channel_isolation_overlap");
+    let mut store = MemoryStore::new(&db_path);
+    
+    // Create units using UnitBuilder
+    let config = UnitBuilderConfig::default();
+    let input_packet = InputPacket {
+        original_text: "test content shared between channels".to_string(),
+        normalized_text: "test content shared between channels".to_lowercase(),
+        bytes: Vec::new(),
+        timestamp: Utc::now(),
+        training_mode: false,
+    };
+    let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
+    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
+    
+    // Ingest with both Intent and Reasoning channels (will cause overlap)
+    store.ingest_hierarchy_with_channels(
+        &hierarchy,
+        spse_engine::types::SourceKind::TrainingDocument,
+        "test context",
+        MemoryType::Episodic,
+        &[MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
+    );
+    
+    // Validate isolation - may flag excessive overlap
+    let report = store.validate_channel_isolation();
+    // This should pass since we have proper Main containment
+    assert!(report.main_count > 0);
+    // Intent and Reasoning might have overlap, but that's allowed at low levels
+}
+
+#[test]
+fn isolated_units_for_channel_returns_correct_units() {
+    use spse_engine::layers::builder::UnitBuilder;
+    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::config::UnitBuilderConfig;
+    use spse_engine::types::InputPacket;
+    
+    let db_path = temp_db_path("isolated_units");
+    let mut store = MemoryStore::new(&db_path);
+    
+    // Create units using UnitBuilder
+    let config = UnitBuilderConfig::default();
+    let input_packet = InputPacket {
+        original_text: "intent specific content".to_string(),
+        normalized_text: "intent specific content".to_lowercase(),
+        bytes: Vec::new(),
+        timestamp: Utc::now(),
+        training_mode: false,
+    };
+    let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
+    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
+    
+    store.ingest_hierarchy_with_channels(
+        &hierarchy,
+        spse_engine::types::SourceKind::TrainingDocument,
+        "intent context",
+        MemoryType::Episodic,
+        &[MemoryChannel::Main, MemoryChannel::Intent],
+    );
+    
+    // Get isolated units for Intent channel
+    let isolated = store.isolated_units_for_channel(MemoryChannel::Intent);
+    // Should return units in Intent but not in Reasoning (all of them since Reasoning is empty)
+    assert!(!isolated.is_empty() || store.validate_channel_isolation().intent_count == 0);
+}

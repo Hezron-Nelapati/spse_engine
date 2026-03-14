@@ -3,9 +3,10 @@ use crate::config::{GovernanceConfig, SemanticMapConfig};
 use crate::persistence::Db;
 use crate::spatial_index::force_directed_layout;
 use crate::types::{
-    ActivatedUnit, CandidateStatus, DatabaseHealthMetrics, DatabaseMaturityStage, FeedbackEvent,
-    GovernanceReport, Link, MemoryChannel, MemoryType, PollutionFinding, PrunedUnitReference,
-    SequenceState, SourceKind, Unit, UnitCandidate, UnitHierarchy, UnitLevel,
+    ActivatedUnit, CandidateStatus, ChannelIsolationReport, ChannelIsolationViolation,
+    DatabaseHealthMetrics, DatabaseMaturityStage, FeedbackEvent, GovernanceReport,
+    IsolationViolationType, Link, MemoryChannel, MemoryType, PollutionFinding,
+    PrunedUnitReference, SequenceState, SourceKind, Unit, UnitCandidate, UnitHierarchy, UnitLevel,
 };
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
@@ -538,6 +539,111 @@ impl MemoryStore {
         scored.sort_by(|lhs, rhs| rhs.0.total_cmp(&lhs.0));
         scored.truncate(limit);
         scored.into_iter().map(|(_, unit)| unit).collect()
+    }
+
+    /// Validate channel isolation - ensure units are properly isolated across channels.
+    /// Returns a report of any isolation violations detected.
+    pub fn validate_channel_isolation(&self) -> ChannelIsolationReport {
+        let mut report = ChannelIsolationReport::default();
+        
+        // Get all unit IDs across all channels
+        let main_ids: HashSet<Uuid> = self
+            .channel_index
+            .get(&MemoryChannel::Main)
+            .cloned()
+            .unwrap_or_default();
+        let intent_ids: HashSet<Uuid> = self
+            .channel_index
+            .get(&MemoryChannel::Intent)
+            .cloned()
+            .unwrap_or_default();
+        let reasoning_ids: HashSet<Uuid> = self
+            .channel_index
+            .get(&MemoryChannel::Reasoning)
+            .cloned()
+            .unwrap_or_default();
+
+        // Check for proper isolation: Main should contain all units
+        // Intent and Reasoning should be subsets of Main
+        report.main_count = main_ids.len();
+        report.intent_count = intent_ids.len();
+        report.reasoning_count = reasoning_ids.len();
+
+        // Verify Intent units are also in Main
+        let intent_not_in_main: Vec<Uuid> = intent_ids.difference(&main_ids).copied().collect();
+        if !intent_not_in_main.is_empty() {
+            report.violations.push(ChannelIsolationViolation {
+                violation_type: IsolationViolationType::IntentNotInMain,
+                unit_ids: intent_not_in_main,
+                description: "Intent channel contains units not present in Main channel".to_string(),
+            });
+        }
+
+        // Verify Reasoning units are also in Main
+        let reasoning_not_in_main: Vec<Uuid> = reasoning_ids.difference(&main_ids).copied().collect();
+        if !reasoning_not_in_main.is_empty() {
+            report.violations.push(ChannelIsolationViolation {
+                violation_type: IsolationViolationType::ReasoningNotInMain,
+                unit_ids: reasoning_not_in_main,
+                description: "Reasoning channel contains units not present in Main channel".to_string(),
+            });
+        }
+
+        // Check for content leakage between Intent and Reasoning channels
+        // These should be independent - a unit shouldn't typically be in both
+        let intent_reasoning_overlap: Vec<Uuid> = intent_ids
+            .intersection(&reasoning_ids)
+            .copied()
+            .collect();
+        
+        // Allow some overlap but flag excessive overlap
+        let overlap_ratio = if intent_ids.is_empty() || reasoning_ids.is_empty() {
+            0.0
+        } else {
+            intent_reasoning_overlap.len() as f32 / intent_ids.len().max(reasoning_ids.len()) as f32
+        };
+        
+        if overlap_ratio > 0.3 {
+            report.violations.push(ChannelIsolationViolation {
+                violation_type: IsolationViolationType::ExcessiveIntentReasoningOverlap,
+                unit_ids: intent_reasoning_overlap,
+                description: format!(
+                    "Intent and Reasoning channels have excessive overlap ({:.1}%)",
+                    overlap_ratio * 100.0
+                ),
+            });
+        }
+
+        report.is_valid = report.violations.is_empty();
+        report
+    }
+
+    /// Get units that should be isolated to a specific channel (not present in other channels)
+    pub fn isolated_units_for_channel(&self, channel: MemoryChannel) -> Vec<Unit> {
+        let channel_ids: HashSet<Uuid> = self
+            .channel_index
+            .get(&channel)
+            .cloned()
+            .unwrap_or_default();
+
+        let other_channel_ids: HashSet<Uuid> = match channel {
+            MemoryChannel::Main => HashSet::new(), // Main contains all
+            MemoryChannel::Intent => self
+                .channel_index
+                .get(&MemoryChannel::Reasoning)
+                .cloned()
+                .unwrap_or_default(),
+            MemoryChannel::Reasoning => self
+                .channel_index
+                .get(&MemoryChannel::Intent)
+                .cloned()
+                .unwrap_or_default(),
+        };
+
+        channel_ids
+            .difference(&other_channel_ids)
+            .filter_map(|id| self.cache.get(id).cloned())
+            .collect()
     }
 
     pub fn sequence_state(&self) -> SequenceState {
