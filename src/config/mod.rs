@@ -1620,6 +1620,12 @@ pub struct TelemetryConfig {
     pub telemetry_sample_rate: f32,
     pub warning_threshold_utility_drop: f32,
     pub observation_log_path: Option<String>,
+    /// Phase 4: Telemetry worker configuration
+    pub worker: TelemetryWorkerConfig,
+    /// Phase 4: Hot store configuration
+    pub hot_store: HotStoreConfig,
+    /// Phase 4: Latency monitor configuration
+    pub latency_monitor: LatencyMonitorConfig,
 }
 
 impl Default for TelemetryConfig {
@@ -1629,6 +1635,90 @@ impl Default for TelemetryConfig {
             telemetry_sample_rate: 1.0,
             warning_threshold_utility_drop: 0.30,
             observation_log_path: None,
+            worker: TelemetryWorkerConfig::default(),
+            hot_store: HotStoreConfig::default(),
+            latency_monitor: LatencyMonitorConfig::default(),
+        }
+    }
+}
+
+/// Phase 4: Telemetry worker configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryWorkerConfig {
+    /// Enable async telemetry worker
+    pub enabled: bool,
+    /// Hot store path (SQLite)
+    pub hot_store_path: String,
+    /// Cold log path (append-only file)
+    pub cold_log_path: String,
+    /// Batch size for flushing events
+    pub batch_size: usize,
+    /// Flush interval in milliseconds
+    pub flush_interval_ms: u64,
+    /// Maximum channel capacity before backpressure
+    pub channel_capacity: usize,
+    /// Sample rate for high-frequency events (0.0-1.0)
+    pub sample_rate: f32,
+}
+
+impl Default for TelemetryWorkerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hot_store_path: "telemetry/hot.db".to_string(),
+            cold_log_path: "telemetry/cold.log".to_string(),
+            batch_size: 100,
+            flush_interval_ms: 100,
+            channel_capacity: 10000,
+            sample_rate: 1.0,
+        }
+    }
+}
+
+/// Phase 4: Hot store configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotStoreConfig {
+    /// Path to SQLite database
+    pub path: String,
+    /// Maximum events to retain (older events pruned)
+    pub max_events: usize,
+    /// Prune interval in seconds
+    pub prune_interval_secs: u64,
+}
+
+impl Default for HotStoreConfig {
+    fn default() -> Self {
+        Self {
+            path: "telemetry/hot.db".to_string(),
+            max_events: 100_000,
+            prune_interval_secs: 300,
+        }
+    }
+}
+
+/// Phase 4: Latency monitor configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LatencyMonitorConfig {
+    /// Alert threshold in milliseconds (default 200ms for low-spec)
+    pub alert_threshold_ms: u64,
+    /// Window size for percentile calculation
+    pub window_size: usize,
+    /// Enable latency monitoring
+    pub enabled: bool,
+    /// Sample rate for latency recording (0.0-1.0)
+    pub sample_rate: f32,
+}
+
+impl Default for LatencyMonitorConfig {
+    fn default() -> Self {
+        Self {
+            alert_threshold_ms: 200,
+            window_size: 1000,
+            enabled: true,
+            sample_rate: 1.0,
         }
     }
 }

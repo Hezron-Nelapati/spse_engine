@@ -25,9 +25,14 @@ use crate::layers::search::{top_unit_ids, CandidateScorer};
 use crate::memory::store::{MemorySnapshot, MemoryStore};
 use crate::open_sources;
 use crate::scheduler::{PriorityScheduler, WorkPriority};
+use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
 use crate::telemetry::test_observer::{
     ObservationMemory, ObservationRetrieval, ObservationScoring, ObservationTimings,
     ObservationUnits, ScoreBreakdown as ObservedScoreBreakdown, TestObserver,
+};
+use crate::telemetry::{
+    HotStore, LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent,
+    TelemetryWorker, TelemetryWorkerConfig, TraceContext, TraceId,
 };
 use crate::training::{self, TrainingPhasePlan, TrainingScope};
 use crate::types::{
@@ -208,6 +213,14 @@ pub struct Engine {
     jobs: Arc<Mutex<HashMap<String, TrainingJobStatus>>>,
     session_documents: Arc<Mutex<SessionDocuments>>,
     observer: Option<TestObserver>,
+    /// Phase 4: Telemetry worker for async event emission
+    telemetry_worker: Option<TelemetryWorker>,
+    /// Phase 4: Latency monitor for p50/p95/p99 tracking
+    latency_monitor: Arc<LatencyMonitor>,
+    /// Phase 4: Dynamic memory allocator for reasoning buffers
+    dynamic_memory: Arc<DynamicMemoryAllocator>,
+    /// Phase 4: Trace context for session/trace ID management
+    trace_context: Arc<Mutex<TraceContext>>,
 }
 
 impl Engine {
@@ -234,6 +247,40 @@ impl Engine {
         let session_documents = Arc::new(Mutex::new(SessionDocuments::default()));
         let (feedback_tx, feedback_rx) = bounded(1024);
         let observer = TestObserver::from_config(&config);
+
+        // Phase 4: Initialize telemetry worker
+        let telemetry_worker = if config.telemetry.worker.enabled {
+            TelemetryWorker::new(TelemetryWorkerConfig {
+                enabled: config.telemetry.worker.enabled,
+                hot_store_path: config.telemetry.worker.hot_store_path.clone(),
+                cold_log_path: config.telemetry.worker.cold_log_path.clone(),
+                batch_size: config.telemetry.worker.batch_size,
+                flush_interval_ms: config.telemetry.worker.flush_interval_ms,
+                channel_capacity: config.telemetry.worker.channel_capacity,
+                sample_rate: config.telemetry.worker.sample_rate,
+            }).ok()
+        } else {
+            None
+        };
+
+        // Phase 4: Initialize latency monitor
+        let latency_monitor = Arc::new(LatencyMonitor::new(LatencyMonitorConfig {
+            alert_threshold_ms: config.telemetry.latency_monitor.alert_threshold_ms,
+            window_size: config.telemetry.latency_monitor.window_size,
+            enabled: config.telemetry.latency_monitor.enabled,
+            sample_rate: config.telemetry.latency_monitor.sample_rate,
+        }));
+
+        // Phase 4: Initialize dynamic memory allocator
+        let dynamic_memory = Arc::new(DynamicMemoryAllocator::new(DynamicMemoryConfig {
+            enabled: config.auto_inference.dynamic_memory.enabled,
+            base_memory_limit_mb: config.auto_inference.dynamic_memory.base_memory_limit_mb,
+            max_memory_limit_mb: config.auto_inference.dynamic_memory.max_memory_limit_mb,
+            thought_buffer_size_kb: config.auto_inference.dynamic_memory.thought_buffer_size_kb,
+        }));
+
+        // Phase 4: Initialize trace context
+        let trace_context = Arc::new(Mutex::new(TraceContext::new()));
 
         spawn_maintenance(
             memory.clone(),
@@ -262,6 +309,10 @@ impl Engine {
             jobs,
             session_documents,
             observer,
+            telemetry_worker,
+            latency_monitor,
+            dynamic_memory,
+            trace_context,
         };
         engine
     }
@@ -529,6 +580,44 @@ impl Engine {
 
     pub fn memory_summary(&self) -> String {
         self.load_memory_snapshot().memory_summary()
+    }
+
+    /// Phase 4: Emit a telemetry event
+    pub fn emit_telemetry(&self, event: TelemetryEvent) {
+        if let Some(worker) = &self.telemetry_worker {
+            let _ = worker.emit(event);
+        }
+    }
+
+    /// Phase 4: Get latency summary
+    pub fn latency_summary(&self) -> crate::telemetry::LatencySummary {
+        self.latency_monitor.summary()
+    }
+
+    /// Phase 4: Get dynamic memory stats
+    pub fn dynamic_memory_stats(&self) -> MemoryStats {
+        self.dynamic_memory.stats()
+    }
+
+    /// Phase 4: Get current trace context
+    pub fn trace_context(&self) -> (SessionId, TraceId) {
+        if let Ok(ctx) = self.trace_context.lock() {
+            (ctx.session_id, ctx.trace_id)
+        } else {
+            (SessionId::new(), TraceId::new())
+        }
+    }
+
+    /// Phase 4: Start a new trace for a query
+    pub fn start_new_trace(&self) {
+        if let Ok(mut ctx) = self.trace_context.lock() {
+            ctx.start_new_trace();
+        }
+    }
+
+    /// Phase 4: Create a latency timer for a layer
+    pub fn latency_timer(&self, layer: u8) -> LatencyTimer {
+        LatencyTimer::new(&self.latency_monitor, layer)
     }
 
     pub fn audit_pollution(&self, limit: usize) -> Vec<crate::types::PollutionFinding> {

@@ -203,6 +203,46 @@ fn <action>_<expected_outcome>() {
 }
 ```
 
+### Development Testing Guidelines
+
+During development, use **minimal corpora with high density** for fast verification:
+
+1. **Unit tests only**: `cargo test --lib --no-default-features -- <module_name>`
+   - Skips GPU compilation and integration tests
+   - Example: `cargo test --lib --no-default-features -- telemetry::trace`
+
+2. **Skip GPU features**: Use `--no-default-features` flag to disable GPU acceleration
+   - GPU compilation adds significant build time
+   - Most logic tests don't require GPU
+
+3. **Targeted module testing**: Filter tests by module path
+   - `cargo test --lib -- telemetry::hot_store` - tests only hot_store module
+   - `cargo test --lib -- memory::dynamic` - tests only dynamic memory module
+
+4. **Fast check cycle**: Use `cargo check` before running tests
+   - Catches compilation errors quickly
+   - Only run full tests after check passes
+
+5. **Minimal test data**: Tests should use small, dense datasets
+   - Prefer 10-100 items over 1000+ items
+   - Focus on edge cases and boundary conditions
+   - Use `tempfile` for isolated test environments
+
+6. **Avoid slow patterns**:
+   - Don't use `std::thread::sleep` in tests
+   - Mock time-dependent operations
+   - Use in-memory SQLite (`:memory:`) instead of file-based
+
+### Verification Commands
+
+| Purpose | Command |
+|---------|---------|
+| Quick compile check | `cargo check` |
+| Unit tests (no GPU) | `cargo test --lib --no-default-features` |
+| Single module test | `cargo test --lib --no-default-features -- <module>` |
+| Full test suite | `cargo test` |
+| Clippy linting | `cargo clippy` |
+
 ## Threshold Reference
 
 Key thresholds that must remain in config:

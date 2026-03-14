@@ -418,6 +418,24 @@ layer_20_telemetry:
   telemetry_sample_rate: 1.0
   warning_threshold_utility_drop: 0.30
   observation_log_path:
+  # Phase 4: Enhanced telemetry configuration
+  worker:
+    enabled: true
+    hot_store_path: "telemetry/hot.db"
+    cold_log_path: "telemetry/cold.log"
+    batch_size: 100
+    flush_interval_ms: 100
+    channel_capacity: 10000
+    sample_rate: 1.0
+  hot_store:
+    path: "telemetry/hot.db"
+    max_events: 100000
+    prune_interval_secs: 300
+  latency_monitor:
+    alert_threshold_ms: 200           # 200ms threshold for low-spec devices
+    window_size: 1000
+    enabled: true
+    sample_rate: 1.0
 
 training_phases:
   bootstrap:

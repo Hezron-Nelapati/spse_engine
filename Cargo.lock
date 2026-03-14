@@ -3336,6 +3336,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "simdutf8",
+ "tempfile",
  "tokio",
  "tower",
  "uuid",

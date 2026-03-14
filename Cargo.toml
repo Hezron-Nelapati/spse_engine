@@ -51,3 +51,4 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tower = "0.5"
+tempfile = "3"
