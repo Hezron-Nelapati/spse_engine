@@ -247,7 +247,81 @@ fn normalize_window(window: &str, config: &UnitBuilderConfig) -> Option<(String,
         return None;
     }
 
-    Some((condensed.clone(), condensed.to_lowercase()))
+    let normalized = condensed.to_lowercase();
+
+    // Reject unicode escape sequences (\\uXXXX or uXXXX patterns from JSON)
+    // These appear when JSON escape sequences leak into text processing
+    if looks_like_unicode_escape(&normalized) {
+        return None;
+    }
+
+    // Reject URL/path fragments and file extensions
+    if looks_like_url_fragment(&normalized) {
+        return None;
+    }
+
+    Some((condensed, normalized))
+}
+
+/// Check if the normalized string looks like a JSON unicode escape sequence
+fn looks_like_unicode_escape(normalized: &str) -> bool {
+    // Pattern: u followed by 4-6 hex digits (e.g., u0259, u00b0, u20ac)
+    // Also catch escaped form: \\uXXXX
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() <= 12 {
+        // Look for u[0-9a-f]{4,6} pattern
+        for i in 0..chars.len().saturating_sub(4) {
+            if chars[i] == 'u' {
+                let hex_count = chars[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .count();
+                if hex_count >= 4 && hex_count <= 6 {
+                    // Check if this is most of the string (likely just the escape)
+                    let rest_len = chars.len() - hex_count - 1;
+                    if rest_len <= 3 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if the normalized string looks like a URL/path fragment
+fn looks_like_url_fragment(normalized: &str) -> bool {
+    // Reject fragments containing path separators that are too short
+    if normalized.contains('/') && normalized.len() < 20 {
+        return true;
+    }
+
+    // Reject fragments with colons that look like URL schemes (but allow time formats)
+    if normalized.contains(':') && normalized.len() < 20 {
+        // Allow common time formats like "12:30"
+        let colon_pos = normalized.find(':').unwrap_or(0);
+        let before = &normalized[..colon_pos];
+        let after = &normalized[colon_pos + 1..];
+        if !before.chars().all(|c| c.is_ascii_digit()) || !after.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+
+    // Reject file extension fragments (e.g., ".png", "file.pdf", "-map.png")
+    if normalized.len() < 20 && normalized.contains('.') {
+        let common_extensions = [
+            "png", "jpg", "jpeg", "gif", "pdf", "txt", "gz", "tar", "zip",
+            "html", "htm", "css", "js", "json", "xml", "md", "rst",
+            "py", "rs", "c", "cpp", "h", "java", "go", "ts",
+        ];
+        for ext in common_extensions {
+            if normalized.ends_with(&format!(".{}", ext)) || normalized.ends_with(&format!(".{}\"", ext)) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn utility_for(stats: &WindowStats, total_bytes: f32, config: &UnitBuilderConfig) -> f32 {
@@ -350,8 +424,38 @@ fn should_reject_fragment(stats: &WindowStats, config: &UnitBuilderConfig) -> bo
         return true;
     }
 
+    // Reject fragments with outer punctuation (leading/trailing non-alphanumeric chars)
+    // This catches pollution like "claude-", "sudan_", "file.", "-Ude"
+    if has_outer_punctuation(&stats.content) {
+        return true;
+    }
+
     is_single_alphanumeric_token(&stats.content)
         && stats.content.chars().count() >= config.min_fragment_length.max(1)
+}
+
+/// Check if content has leading or trailing punctuation that indicates pollution
+fn has_outer_punctuation(content: &str) -> bool {
+    if content.is_empty() {
+        return false;
+    }
+    
+    let chars: Vec<char> = content.chars().collect();
+    let first = chars[0];
+    let last = chars[chars.len() - 1];
+    
+    // Check for leading punctuation (but allow common prefixes like "$" for currency)
+    let has_leading_punct = !first.is_alphanumeric() && first != '$' && first != '£' && first != '€';
+    
+    // Check for trailing punctuation (but allow common suffixes like "%" for percentages)
+    let has_trailing_punct = !last.is_alphanumeric() && last != '%' && last != '\'';
+    
+    // Reject if has outer punctuation and is short (likely pollution)
+    if (has_leading_punct || has_trailing_punct) && chars.len() <= 12 {
+        return true;
+    }
+    
+    false
 }
 
 fn is_single_alphanumeric_token(text: &str) -> bool {

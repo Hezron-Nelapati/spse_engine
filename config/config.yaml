@@ -2,23 +2,23 @@ version: "1.0"
 schema_version: 1
 
 layer_2_unit_builder:
-  min_frequency_threshold: 2
+  min_frequency_threshold: 3
   initial_utility_score: 0.5
   edit_distance_cluster_threshold: 1
-  rolling_hash_window_sizes: [2, 3, 4, 5, 6, 7, 8]
+  rolling_hash_window_sizes: [3, 4, 5, 6, 7, 8]
   max_activated_units: 96
-  punctuation_ratio_limit: 0.55
+  punctuation_ratio_limit: 0.35
   hash_base: 257
-  min_fragment_length: 4
+  min_fragment_length: 5
   utf8_recovery_min_bytes: 2
   utility_compression_gain_cap: 1.2
   utility_span_weight: 0.45
   utility_frequency_weight: 0.30
   utility_density_weight: 0.22
   utility_base_scale: 0.16
-  utility_full_boundary_bonus: 0.18
-  utility_edge_boundary_bonus: 0.05
-  utility_no_boundary_penalty: -0.12
+  utility_full_boundary_bonus: 0.22
+  utility_edge_boundary_bonus: 0.03
+  utility_no_boundary_penalty: -0.18
   salience_base: 0.18
   salience_digit_weight: 0.35
   salience_upper_weight: 0.20

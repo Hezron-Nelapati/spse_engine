@@ -91,6 +91,10 @@ pub struct MemoryStore {
     pattern_cache_hits: u64,
     pattern_cache_lookups: u64,
     db: Arc<Db>,
+    // Deferred writes buffer for batch flushing
+    pending_writes: Vec<Unit>,
+    pending_writes_threshold: usize,
+    write_deferred: bool,
 }
 
 #[derive(Default)]
@@ -356,6 +360,9 @@ impl MemoryStore {
             pattern_cache_hits: 0,
             pattern_cache_lookups: 0,
             db,
+            pending_writes: Vec::new(),
+            pending_writes_threshold: 500,
+            write_deferred: true,
         };
         if seed_bootstrap_units {
             store.ensure_bootstrap_seeds();
@@ -966,9 +973,11 @@ impl MemoryStore {
             cap_pruned_references(&mut pruned_references);
         }
 
-        for unit in self.cache.values() {
+        let units_to_persist: Vec<Unit> = self.cache.values().cloned().collect();
+        for unit in &units_to_persist {
             self.persist(unit);
         }
+        self.flush_pending_writes();
 
         let snapshot_path = self
             .db
@@ -2065,8 +2074,32 @@ impl MemoryStore {
         }
     }
 
-    fn persist(&self, unit: &Unit) {
-        let _ = self.db.upsert_unit(unit);
+    fn persist(&mut self, unit: &Unit) {
+        if self.write_deferred {
+            self.pending_writes.push(unit.clone());
+            if self.pending_writes.len() >= self.pending_writes_threshold {
+                self.flush_pending_writes();
+            }
+        } else {
+            let _ = self.db.upsert_unit(unit);
+        }
+    }
+
+    /// Flush all pending writes to database in a single batch transaction
+    pub fn flush_pending_writes(&mut self) {
+        if self.pending_writes.is_empty() {
+            return;
+        }
+        let units: Vec<Unit> = self.pending_writes.drain(..).collect();
+        let _ = self.db.batch_upsert_units(&units);
+    }
+
+    /// Enable or disable deferred writes
+    pub fn set_write_deferred(&mut self, deferred: bool) {
+        self.write_deferred = deferred;
+        if !deferred {
+            self.flush_pending_writes();
+        }
     }
 
     fn remove_from_channels(&mut self, unit: &Unit) {

@@ -186,6 +186,20 @@ impl Db {
         Ok(())
     }
 
+    /// Batch upsert units in a single transaction for efficiency
+    pub fn batch_upsert_units(&self, units: &[Unit]) -> SqlResult<()> {
+        if units.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        for unit in units {
+            upsert_unit_in_table(&tx, "units", unit)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn archive_units(&self, units: &[Unit]) -> SqlResult<()> {
         if units.is_empty() {
             return Ok(());
