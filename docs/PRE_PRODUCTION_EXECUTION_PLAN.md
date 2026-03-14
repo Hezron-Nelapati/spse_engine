@@ -1,9 +1,9 @@
 # SPSE Engine Pre-Production Execution Plan
 
-**Document Version:** 1.2  
+**Document Version:** 1.3  
 **Created:** March 14, 2026  
-**Last Updated:** March 15, 2026
-**Priority Order:** Creative > Drill Related > Core Logic/Tests > Web UI
+**Last Updated:** March 15, 2026  
+**Priority Order:** Foundation > LLM-Like Core > Retrieval > Optimization > Interface
 
 ---
 
@@ -794,10 +794,12 @@ cargo test --lib -- drill_
 
 ---
 
-## Phase 3: Core Logic & Tests
+## Phase 3: Core Infrastructure
 
-**Estimated Duration:** 4-5 weeks  
+**Estimated Duration:** 3-4 weeks  
 **Dependencies:** Phase 2 complete
+
+**Objective:** Build foundational infrastructure that enables all subsequent LLM-like features. Telemetry provides debugging visibility, Reasoning Loop enables complex queries, and Concurrency validation ensures system stability.
 
 ### 3.1 Global Logging Engine & Trace Visualization (Layer 20)
 
@@ -812,34 +814,34 @@ cargo test --lib -- drill_
 1. **Create Async Telemetry Worker** (`src/telemetry/worker.rs`):
    ```rust
    pub struct TelemetryWorker {
-       sender: Sender<TelemetryEvent>,
-       hot_store: SqliteHotStore,
-       cold_log: AppendOnlyFile,
-   }
-   
-   pub enum TelemetryEvent {
-       Calculation { layer: u8, operation: String, duration_ms: u64 },
-       DbPush { unit_id: Uuid, memory_type: MemoryType },
-       Retrieval { source: String, results: usize },
-       MorphAction { action: String, before: String, after: String },
-       IntentLabel { label: IntentKind, channel: MemoryChannel, score: f32 },
-   }
-   ```
+n       sender: Sender<TelemetryEvent>,
+n       hot_store: SqliteHotStore,
+n       cold_log: AppendOnlyFile,
+n   }
+n   
+n   pub enum TelemetryEvent {
+n       Calculation { layer: u8, operation: String, duration_ms: u64 },
+n       DbPush { unit_id: Uuid, memory_type: MemoryType },
+n       Retrieval { source: String, results: usize },
+n       MorphAction { action: String, before: String, after: String },
+n       IntentLabel { label: IntentKind, channel: MemoryChannel, score: f32 },
+n   }
+n   ```
 
 2. **Add Session/Trace IDs** (`src/telemetry/trace.rs`):
-   - Generate `session_id` on engine init
-   - Generate `trace_id` per query
-   - Include in all telemetry events
+n   - Generate `session_id` on engine init
+n   - Generate `trace_id` per query
+n   - Include in all telemetry events
 
 3. **Create SQLite Hot Store** (`src/telemetry/hot_store.rs`):
-   - Table schema for recent events (last 10,000)
-   - Index on `session_id`, `trace_id`, `timestamp`
-   - Auto-prune old events
+n   - Table schema for recent events (last 10,000)
+n   - Index on `session_id`, `trace_id`, `timestamp`
+n   - Auto-prune old events
 
 4. **Wire into Engine** (`src/engine.rs`):
-   - Initialize `TelemetryWorker` in `Engine::new()`
-   - Emit events at each layer boundary
-   - Add `intent_label` emission in intent classification
+n   - Initialize `TelemetryWorker` in `Engine::new()`
+n   - Emit events at each layer boundary
+n   - Add `intent_label` emission in intent classification
 
 **Files to Create:**
 - `src/telemetry/worker.rs`
@@ -851,51 +853,399 @@ cargo test --lib -- drill_
 - `src/engine.rs` (wire worker)
 - `config/config.yaml` (Layer 20 config expansion)
 
-**Drill Coverage for Layer 20 - NEW:**
+---
 
-1. **Telemetry Worker Drills:**
+### 3.2 Recursive Self-Ingestion Loop (Chain-of-Thought)
+
+**What to Implement:**
+- Generate silent "Thought Units" that loop back as input
+- Solve complex logic/coding problems step-by-step
+- Max 5 internal steps before final answer
+- Requires Telemetry (3.1) for reasoning step logging
+
+**How to Implement:**
+
+1. **Add Silent Thought Output** (`src/engine.rs`):
    ```rust
-   // Happy path: Event emitted at layer boundary
-   fn telemetry_event_emission();
-   // Happy path: Session/Trace ID propagation
-   fn telemetry_id_propagation();
-   // Edge case: High event rate (backpressure)
-   fn telemetry_high_event_rate();
-   // Failure: Worker channel full
-   fn telemetry_channel_full();
-   // Stress: 10,000 events/second sustained
-   fn telemetry_high_throughput();
+   pub enum OutputType {
+       FinalAnswer(String),
+       SilentThought(String),  // Internal reasoning step
+   }
    ```
 
-2. **Hot/Cold Store Drills:**
+2. **Add Thought Unit Type** (`src/types.rs`):
    ```rust
-   // Happy path: Event stored in hot SQLite
-   fn telemetry_hot_store_write();
-   // Happy path: Event archived to cold log
-   fn telemetry_cold_log_archive();
-   // Edge case: Hot store at capacity (10,000 events)
-   fn telemetry_hot_store_capacity();
-   // Failure: SQLite write failure
-   fn telemetry_sqlite_failure();
-   // Failure: Cold log disk full
-   fn telemetry_disk_full();
+   pub struct ThoughtUnit {
+       pub content: String,
+       pub step: usize,
+       pub internal_only: bool,  // true = hidden from user
+   }
    ```
 
-3. **Intent Label Capture Drills:**
+3. **Log Reasoning Steps** (`src/telemetry/worker.rs`):
    ```rust
-   // Happy path: IntentLabel event captured
-   fn telemetry_intent_label_capture();
-   // Edge case: MemoryChannel::Intent in trace
-   fn telemetry_intent_channel_trace();
-   // Edge case: Hybrid blend breakdown in trace
-   fn telemetry_blend_breakdown_trace();
-   // Failure: Intent label missing in trace
-   fn telemetry_intent_label_missing();
+   pub enum TelemetryEvent {
+       // ... existing variants
+       ReasoningStep { step: usize, thought: String, confidence: f32 },
+   }
    ```
+
+4. **Update Config** (`config/config.yaml`):
+   ```yaml
+   resolver:
+     reasoning_loop:
+       enabled: true
+       max_internal_steps: 5
+       trigger_confidence_floor: 0.4
+   ```
+
+**Files to Modify:**
+- `src/engine.rs` (reasoning loop)
+- `src/types.rs` (ThoughtUnit)
+- `src/telemetry/worker.rs` (reasoning step logging)
+- `config/config.yaml` (reasoning_loop config)
 
 ---
 
-### 3.2 Multi-Engine Consensus & Structured Parsing
+### 3.3 Concurrency Stress Test (Three-Class Model)
+
+**What to Implement:**
+- Run parallel Silent Training workers alongside Inference threads
+- Enforce priority: Inference > Interactive Training > Silent Batch > Maintenance
+- Verify inference latency <200ms/token under load
+
+**How to Implement:**
+
+1. **Create Priority Scheduler** (`src/scheduler.rs` - already exists, extend):
+   ```rust
+   pub enum TaskPriority {
+       Inference,        // Highest: user-facing queries
+       InteractiveTraining, // User-guided learning
+       SilentBatch,       // Background corpus ingestion
+       Maintenance,       // Lowest: pruning, compaction
+   }
+   ```
+
+2. **Add Latency Monitor** (`src/telemetry/latency.rs`):
+   - Track p50, p95, p99 latency per priority class
+   - Alert when inference latency exceeds 200ms
+
+**Files to Create:**
+- `src/telemetry/latency.rs`
+- `src/bin/concurrency_stress.rs`
+
+**Files to Modify:**
+- `src/scheduler.rs` (priority enforcement)
+- `src/engine.rs` (thread-safe access patterns)
+
+---
+
+### 3.4 Core Infrastructure Drills
+
+**Drill Coverage:**
+
+1. **Telemetry Worker Drills:**
+   ```rust
+   fn telemetry_event_emission();
+   fn telemetry_id_propagation();
+   fn telemetry_high_event_rate();
+   fn telemetry_channel_full();
+   ```
+
+2. **Reasoning Loop Drills:**
+   ```rust
+   fn reasoning_loop_complex_logic();
+   fn reasoning_loop_low_confidence();
+   fn reasoning_loop_max_steps();
+   fn reasoning_loop_infinite_prevention();
+   ```
+
+3. **Concurrency Drills:**
+   ```rust
+   fn concurrency_inference_preemption();
+   fn concurrency_priority_inversion();
+   fn concurrency_all_saturated();
+   fn concurrency_deadlock_recovery();
+   ```
+
+**Files to Modify:**
+- `src/bin/drill_harness.rs` (add drill modes)
+- `tests/integration.rs` (integration tests)
+
+---
+
+## Phase 4: LLM-Like Core
+
+**Estimated Duration:** 3-4 weeks  
+**Dependencies:** Phase 3 complete (Telemetry required for debugging)
+
+**Objective:** Transform SPSE into an **Autonomous Personal Intelligence** with LLM-like fluidity. Auto-Mode inference, controlled creativity, and style resonance work together.
+
+**Constraint:** MVP is **Auto-Mode Only** (no user toggles). Creativity is internally gated (10-20% drift).
+
+### 4.1 Auto-Mode Inference Engine
+
+**What to Implement:**
+- System infers intent, tone, and creativity level dynamically
+- No UI toggles or API parameters for `mode`, `temperature`, or `profile`
+- Full `RuntimeProfile` inference from query + history
+
+**How to Implement:**
+
+1. **Create Auto-Profile Inferrer** (`src/layers/auto_profile.rs`):
+   ```rust
+   pub struct RuntimeProfile {
+       pub intent: IntentKind,
+       pub tone: ToneKind,
+       pub creativity_level: f32,
+       pub style_anchor_id: Option<Uuid>,
+   }
+   
+   pub enum ToneKind {
+       Empathetic,
+       Direct,
+       Exploratory,
+       NeutralProfessional,
+   }
+   ```
+
+2. **Update Intent Detector** (`src/layers/intent.rs`):
+   - Modify `classify()` to return `RuntimeProfile`
+   - Add `infer_auto_profile()` method
+
+3. **Remove External Control** (`src/api.rs`):
+   - Remove `mode`, `temperature`, `top_p` from request schema
+   - All requests map to Auto-Mode
+
+**Files to Create:**
+- `src/layers/auto_profile.rs`
+
+**Files to Modify:**
+- `src/layers/intent.rs` (return RuntimeProfile)
+- `src/api.rs` (remove mode/temp params)
+- `src/config/mod.rs` (AutoInferenceConfig)
+- `config/config.yaml` (auto_inference section)
+
+---
+
+### 4.2 Creative Spark & Stochastic Walks (MERGED)
+
+**What to Implement:**
+- Force 15% stochastic drift in candidate selection for human-like variability
+- Anchor validation gate prevents factual corruption
+- Stochastic semantic walks for metaphor generation (brainstorm mode)
+- **MERGED:** Both modify `router.rs` traversal logic
+
+**How to Implement:**
+
+1. **Add Traversal Mode** (`src/layers/router.rs`):
+   ```rust
+   pub enum TraversalMode {
+       GreedyNearest,       // Default
+       StochasticWalk,      // Random walk for brainstorm
+       DriftFloor,          // 15% non-greedy sampling
+   }
+   
+   impl Router {
+       pub fn sample_with_drift_floor(
+           candidates: &[ScoredCandidate],
+           floor_ratio: f32,
+       ) -> Option<ScoredCandidate>;
+       
+       pub fn traverse_stochastic_walk(
+           &self,
+           start_position: Vec3,
+           depth: usize,
+           temperature: f32,
+       ) -> Vec3;
+   }
+   ```
+
+2. **Add Anchor Validation Gate** (`src/layers/resolver.rs`):
+   ```rust
+   impl FineResolver {
+       /// Validate sampled candidate against Core anchors
+       pub fn validate_against_anchors(
+           candidate: &Unit,
+           anchors: &[Unit],
+       ) -> AnchorValidationResult {
+           // Check if candidate contradicts any Core anchor
+           // Immutable anchor types: mathematical_constant, user_identity, verified_code_syntax
+           // If contradiction -> reject and re-sample greedily
+       }
+   }
+   ```
+
+3. **Wire into Engine** (`src/engine.rs`):
+   - Replace greedy selection with `sample_with_drift_floor()`
+   - Apply anchor validation after sampling
+   - Re-sample greedily if anchor validation fails
+
+4. **Update Config** (`config/config.yaml`):
+   ```yaml
+   resolver:
+     global_stochastic_floor: 0.15  # Enforced 15% non-greedy sampling
+     max_factual_drift_tolerance: 0.05  # Max deviation on anchored facts
+     immutable_anchor_types:
+       - "mathematical_constant"
+       - "user_identity"
+       - "verified_code_syntax"
+   ```
+
+**Files to Modify:**
+- `src/layers/router.rs` (drift sampling)
+- `src/layers/resolver.rs` (anchor validation)
+- `src/engine.rs` (wire drift + validation)
+- `config/config.yaml` (resolver.stochastic_floor)
+
+---
+
+### 4.3 Style Anchor Resonance (Emergent Tone)
+
+**What to Implement:**
+- Dynamic retrieval of "Style Anchors" (exemplar texts) to bias vocabulary selection
+- Replace rule-based tone weights with semantic resonance
+- Session-persistent style state
+
+**How to Implement:**
+
+1. **Add Style Anchor Support** (`src/memory/store.rs`):
+   ```rust
+   pub struct StyleAnchor {
+       pub id: Uuid,
+       pub name: String,           // "Shakespeare", "Legal", "Noir", "Academic"
+       pub exemplar_text: String,
+       pub style_vector: Vec<f32>,  // Semantic embedding of style
+   }
+   
+   impl MemoryStore {
+       pub fn ingest_style_anchor(&mut self, anchor: StyleAnchor);
+       pub fn retrieve_style_anchor(&self, tone: ToneKind) -> Option<StyleAnchor>;
+   }
+   ```
+
+2. **Add Style Resonance Scoring** (`src/layers/search.rs`):
+   ```rust
+   impl CandidateScorer {
+       /// Add style resonance component to 7D scoring
+       pub fn score_with_style_resonance(
+           &self,
+           candidate: &Unit,
+           style_anchor: &StyleAnchor,
+       ) -> f32 {
+           let resonance = 1.0 - cosine_distance(&candidate.embedding, &style_anchor.style_vector);
+           // Boost candidates close to active style anchor
+           resonance
+       }
+   }
+   ```
+
+3. **Persist Style State** (`src/layers/context.rs`):
+   ```rust
+   pub struct SessionStyleState {
+       pub active_style_anchor_id: Option<Uuid>,
+       pub decay_rate: f32,  // 0.0 = permanent for session
+   }
+   ```
+
+4. **Ingest Default Style Anchors** (`data/style_anchors.json`):
+   - 50 style exemplars covering common tones
+   - Empathetic, Direct, Exploratory, Academic, Noir, Legal, etc.
+
+**Files to Create:**
+- `data/style_anchors.json`
+
+**Files to Modify:**
+- `src/memory/store.rs` (style anchor storage)
+- `src/layers/search.rs` (style resonance scoring)
+- `src/layers/context.rs` (session style state)
+- `config/config.yaml` (style_anchors config)
+
+---
+
+### 4.4 LLM-Like Core Drills
+
+**Drill Coverage:**
+
+1. **Auto-Mode Inference Drills:**
+   ```rust
+   // Happy path: Sad query triggers empathetic tone
+   fn auto_mode_empathetic_tone();
+   // Happy path: Urgent query triggers direct tone
+   fn auto_mode_direct_tone();
+   // Happy path: Brainstorm triggers exploratory tone
+   fn auto_mode_exploratory_tone();
+   // Edge case: Mixed signals (sad + urgent)
+   fn auto_mode_mixed_signals();
+   // Failure: No tone match (fallback to neutral)
+   fn auto_mode_fallback_neutral();
+   ```
+
+2. **Creative Drift Safety Drills:**
+   ```rust
+   // Happy path: 15% drift on factual query produces synonym variation
+   fn creative_drift_factual_synonym();
+   // Happy path: Math query "2+2" stays "4" despite drift
+   fn creative_drift_math_anchor();
+   // Edge case: Drift suggests wrong answer, anchor blocks
+   fn creative_drift_anchor_blocks();
+   // Failure: All anchors corrupted (should never happen)
+   fn creative_drift_anchor_corruption();
+   // Stress: High drift on many anchors
+   fn creative_drift_many_anchors();
+   ```
+
+3. **Style Consistency Drills:**
+   ```rust
+   // Happy path: Noir style maintained across 500 words
+   fn style_consistency_noir();
+   // Happy path: Academic style for technical query
+   fn style_consistency_academic();
+   // Edge case: Style conflict (query tone != style anchor)
+   fn style_consistency_conflict();
+   // Failure: Style anchor missing
+   fn style_consistency_missing_anchor();
+   ```
+
+4. **Stochastic Walk Drills:**
+   ```rust
+   // Happy path: Walk produces metaphorically related result
+   fn stochastic_walk_metaphor();
+   // Happy path: Walk depth 3 reaches distant concept
+   fn stochastic_walk_depth();
+   // Edge case: Walk returns to start (loop)
+   fn stochastic_walk_loop();
+   // Failure: Empty neighborhood during walk
+   fn stochastic_walk_empty_neighborhood();
+   ```
+
+5. **Reasoning Loop Drills:**
+   ```rust
+   // Happy path: Complex logic solved in 3 steps
+   fn reasoning_loop_complex_logic();
+   // Happy path: Low confidence triggers loop
+   fn reasoning_loop_low_confidence();
+   // Edge case: Max steps reached without solution
+   fn reasoning_loop_max_steps();
+   // Failure: Infinite loop prevention
+   fn reasoning_loop_infinite_prevention();
+   // Stress: Very complex problem (many steps)
+   fn reasoning_loop_complex_problem();
+   ```
+
+**Files to Modify:**
+- `src/bin/drill_harness.rs` (add drill modes)
+- `src/drill_lib.rs` (drill implementations)
+- `tests/integration.rs` (integration tests)
+
+---
+
+## Phase 5: Retrieval & Optimization
+
+**Estimated Duration:** 3-4 weeks  
+**Dependencies:** Phase 4 complete
+
+### 5.1 Multi-Engine Consensus & Structured Parsing
 
 **What to Implement:**
 - Extend Layers 11-13 to aggregate multiple search engines
@@ -906,6 +1256,160 @@ cargo test --lib -- drill_
 
 1. **Add Multi-Engine Aggregator** (`src/layers/retrieval.rs`):
    ```rust
+   pub struct MultiEngineAggregator {
+       engines: Vec<SearchEngine>,
+       consensus_threshold: f32,
+   }
+   
+   impl MultiEngineAggregator {
+       pub fn aggregate(&self, query: &str) -> ConsensusResult {
+           // Query all engines
+           // Apply consensus scoring: agreement across engines
+           // Return merged with confidence boost for corroboration
+       }
+   }
+   ```
+
+2. **Update Evidence Merge** (`src/layers/merge.rs`):
+   - Apply baseline policy: `0.5·Trust + 0.3·Recency + 0.2·Agreement`
+   - Handle internal pseudo-sources vs external web evidence
+
+3. **Add Format Adapters** (`src/document.rs`):
+   - `HuggingFaceRowAdapter`: Parse dataset rows
+   - `WikipediaXmlAdapter`: Extract articles with section hierarchy
+
+**Files to Modify:**
+- `src/layers/retrieval.rs` (multi-engine)
+- `src/layers/merge.rs` (consensus)
+- `src/document.rs` (adapters)
+
+---
+
+### 5.2 Config Sweeping & Benchmarking
+
+**What to Implement:**
+- Automate parameter sweeping on 100MB corpus
+- Output Pareto frontier graphs (Latency vs Pollution)
+- Optimize SpatialGrid index rebuild cadence
+
+**How to Implement:**
+
+1. **Extend Config Sweep Harness** (`src/bin/test_harness.rs`):
+   - Sweep `global_stochastic_floor` (0.10, 0.15, 0.20, 0.25)
+   - Sweep `reasoning_loop_max_steps` (3, 5, 7)
+   - Sweep `spatial_cell_size` (2.0, 4.0, 6.0, 8.0)
+
+**Files to Modify:**
+- `src/bin/test_harness.rs` (extend)
+- `scripts/analyze_results.py` (Pareto analysis)
+
+---
+
+### 5.3 Retrieval & Optimization Drills
+
+**Drill Coverage:**
+
+1. **Multi-Engine Aggregation Drills:**
+   ```rust
+   fn multi_engine_agreement();
+   fn multi_engine_disagreement();
+   fn multi_engine_all_unavailable();
+   ```
+
+2. **Format Adapter Drills:**
+   ```rust
+   fn adapter_huggingface_row();
+   fn adapter_wikipedia_xml();
+   fn adapter_malformed_json();
+   ```
+
+**Files to Modify:**
+- `src/bin/drill_harness.rs` (add drill modes)
+- `tests/integration.rs` (integration tests)
+
+---
+
+## Phase 6: User Interface
+
+**Estimated Duration:** 3-4 weeks  
+**Dependencies:** Phase 5 complete
+
+**Objective:** Deliver user-facing interface with Auto-Mode only (no toggles). OpenAI-compatible API enables LLM replacement for existing clients.
+
+### 6.1 Web UI (Auto-Mode Interface)
+
+**What to Implement:**
+- Web UI connecting to SPSE API
+- **DELETE Mode Toggles** - Replace with "Auto-Mode Active" indicator
+- Real-time Layer 20 trace visualization
+- Intent breakdown display
+
+**How to Implement:**
+
+1. **Create Next.js Project** (`web-ui/`):
+   - `AutoModeIndicator.tsx` - Shows active inferred profile
+   - `TraceVisualization.tsx` - WebSocket telemetry stream
+   - `IntentBreakdown.tsx` - Hybrid blend score display
+
+**Files to Create:**
+- `web-ui/` directory with Next.js project
+
+---
+
+### 6.2 OpenAI-Compatible API Layer (Auto-Mode Locked)
+
+**What to Implement:**
+- Full OpenAI Chat Completions API compatibility for LLM replacement
+- Model selection maps to SPSE profiles
+- System prompt handling via L6 Context Manager
+- Streaming SSE output for token-by-token responses
+- **Auto-Mode locked:** No temperature/mode params accepted
+
+**How to Implement:**
+
+1. **Create OpenAI API adapter** (`src/api/openai_compat.rs`):
+   ```rust
+   pub struct ChatCompletionRequest {
+       pub model: String,           // Maps to SPSE profile
+       pub messages: Vec<Message>,
+       // temperature, top_p IGNORED - Auto-Mode only
+   }
+   ```
+
+2. **Add Streaming Output** (`src/api/streaming.rs`):
+   - SSE format for token-by-token emission
+   - Stop sequence handling
+
+**Files to Create:**
+- `src/api/openai_compat.rs`
+- `src/api/streaming.rs`
+
+**Files to Modify:**
+- `src/api.rs` (route OpenAI endpoints)
+
+---
+
+### 6.3 User Interface Drills
+
+**Drill Coverage:**
+
+1. **Auto-Mode Indicator Drills:**
+   ```rust
+   fn ui_auto_mode_indicator();
+   fn ui_mode_toggle_disabled();
+   fn ui_inferred_tone_display();
+   ```
+
+2. **OpenAI API Drills:**
+   ```rust
+   fn openai_chat_completion();
+   fn openai_streaming();
+   fn openai_temperature_ignored();
+   ```
+
+**Files to Modify:**
+- `src/bin/drill_harness.rs` (add drill modes)
+- `tests/integration.rs` (integration tests)
    pub struct MultiEngineAggregator {
        engines: Vec<SearchEngine>,
        consensus_threshold: f32,
@@ -982,381 +1486,18 @@ cargo test --lib -- drill_
 
 ---
 
-### 3.3 Concurrency Stress Test (Three-Class Model)
-
-**What to Implement:**
-- Run parallel Silent Training workers alongside Inference threads
-- Enforce priority: Inference > Interactive Training > Silent Batch > Maintenance
-- Verify inference latency <200ms/token under load
-
-**How to Implement:**
-
-1. **Create Priority Scheduler** (`src/scheduler.rs` - already exists, extend):
-   ```rust
-   pub enum ExecutionClass {
-       Inference,         // Priority 1
-       InteractiveTraining, // Priority 2
-       SilentBatch,       // Priority 3
-       Maintenance,       // Priority 4
-   }
-   ```
-
-2. **Add Load Test** (`src/bin/concurrency_drill.rs`):
-   - Spawn N Silent Training workers ingesting Hugging Face streams
-   - Run concurrent inference queries
-   - Measure latency percentiles (p50, p95, p99)
-   - Assert p95 < 200ms
-
-3. **Add Queue Depth Monitoring** (`src/telemetry/`):
-   - Track `QueueDepths` struct
-   - Report to Layer 20 telemetry
-   - Alert on saturation
-
-**Files to Create:**
-- `src/bin/concurrency_drill.rs`
-
-**Files to Modify:**
-- `src/scheduler.rs` (extend)
-- `src/engine.rs` (priority enforcement)
-
-**Drill Coverage for Concurrency - NEW:**
-
-1. **Priority Scheduler Drills:**
-   ```rust
-   // Happy path: Inference preempts Silent Batch
-   fn scheduler_inference_preemption();
-   // Happy path: Interactive Training > Silent Batch
-   fn scheduler_interactive_priority();
-   // Edge case: Equal priority tasks
-   fn scheduler_equal_priority();
-   // Edge case: Priority inversion detection
-   fn scheduler_priority_inversion();
-   // Failure: Starvation of low-priority tasks
-   fn scheduler_starvation();
-   // Stress: All priority levels saturated
-   fn scheduler_all_saturated();
-   ```
-
-2. **Latency Drills:**
-   ```rust
-   // Happy path: p95 < 200ms under normal load
-   fn latency_normal_load();
-   // Edge case: Latency spike during maintenance
-   fn latency_maintenance_spike();
-   // Edge case: Latency during Silent Training
-   fn latency_silent_training_impact();
-   // Failure: Latency exceeds 200ms threshold
-   fn latency_threshold_exceeded();
-   // Stress: p99 measurement under sustained load
-   fn latency_sustained_load_p99();
-   ```
-
-3. **Queue Depth Drills:**
-   ```rust
-   // Happy path: Queue depth within limits
-   fn queue_depth_normal();
-   // Edge case: Queue approaching saturation
-   fn queue_depth_near_saturation();
-   // Failure: Queue overflow
-   fn queue_depth_overflow();
-   // Stress: Monitoring under burst traffic
-   fn queue_depth_burst_traffic();
-   ```
-
----
-
-### 3.4 Config Sweeping & Benchmarking
-
-**What to Implement:**
-- Automate parameter sweeping on 100MB corpus
-- Include Silent Training Mode parameter sweeps
-- Output Pareto frontier graphs (Latency vs Pollution)
-- Optimize SpatialGrid index rebuild cadence
-
-**How to Implement:**
-
-1. **Extend Config Sweep Harness** (`src/bin/test_harness.rs`):
-   ```rust
-   struct SweepConfig {
-       entropy_range: Vec<f32>,
-       trust_range: Vec<f32>,
-       anchor_threshold_range: Vec<f32>,
-       spatial_cell_size_range: Vec<f32>,
-       max_memory_delta_range: Vec<f32>,
-       batch_size_range: Vec<usize>,
-   }
-   ```
-
-2. **Add Pareto Analysis** (`scripts/analyze_sweep.py`):
-   - Read sweep results from JSON
-   - Generate Pareto frontier plot
-   - Identify optimal config for 200GB training run
-
-3. **Add SpatialGrid Optimization**:
-   - Sweep `spatial_cell_size` (2.0, 4.0, 6.0, 8.0)
-   - Sweep `max_layout_iterations` (12, 24, 36)
-   - Measure rebuild time vs query accuracy
-
-**Files to Modify:**
-- `src/bin/test_harness.rs` (extend)
-- `scripts/analyze_results.py` (Pareto analysis)
-
----
-
-## Phase 4: Web UI (SPSE Chat Interface)
-
-**Estimated Duration:** 3-4 weeks  
-**Dependencies:** Phase 3 complete (Layer 20 telemetry)
-
-### 4.1 React/Next.js Interface
-
-**What to Implement:**
-- Web UI connecting to SPSE API
-- Mode toggles: Creative / Precise / Research
-- Real-time Layer 20 trace visualization
-
-**How to Implement:**
-
-1. **Create Next.js Project** (`web-ui/`):
-   ```
-   web-ui/
-   ├── app/
-   │   ├── page.tsx           # Main chat interface
-   │   ├── layout.tsx
-   │   └── api/
-   │       └── chat/route.ts  # API proxy to SPSE
-   ├── components/
-   │   ├── ChatInterface.tsx
-   │   ├── ModeToggle.tsx
-   │   ├── TraceVisualization.tsx
-   │   └── IntentBreakdown.tsx
-   ├── lib/
-   │   └── spse-client.ts
-   └── package.json
-   ```
-
-2. **Implement Mode Toggle**:
-   - Creative: `mode=exploratory`, high `stochastic_jump_prob`
-   - Precise: `mode=deterministic`, low `stochastic_jump_prob`
-   - Research: `mode=balanced`, retrieval-heavy
-
-3. **Add Trace Visualization**:
-   - WebSocket connection to SPSE telemetry stream
-   - Display layer-by-layer processing
-   - Show timing per layer
-   - Highlight retrieval decisions
-
-**Files to Create:**
-- `web-ui/` directory with Next.js project
-
----
-
-### 4.2 Hybrid Intent Score Breakdown Display
-
-**What to Implement:**
-- Display intent score breakdown (heuristic vs memory-backed)
-- Show active `MemoryChannel` (Intent/Reasoning/Main)
-- Demonstrate dual-memory architecture to user
-
-**How to Implement:**
-
-1. **Create IntentBreakdown Component** (`web-ui/components/IntentBreakdown.tsx`):
-   ```tsx
-   interface IntentBreakdownProps {
-       heuristicScore: number;
-       memoryBackedScore: number;
-       blendedScore: number;
-       activeChannel: 'main' | 'intent' | 'reasoning';
-       intentLabel: string;
-   }
-   ```
-
-2. **Add API Endpoint** (`src/api.rs`):
-   - Extend `/query` response to include `IntentBlendReport`
-   - Add `/telemetry/stream` WebSocket endpoint
-
-**Files to Modify:**
-- `src/api.rs` (extend endpoints)
-
----
-
-### 4.3 OpenAI-Compatible API Layer
-
-**What to Implement:**
-- Full OpenAI Chat Completions API compatibility for LLM replacement
-- Model selection maps to SPSE profiles
-- System prompt handling via L6 Context Manager
-- Streaming SSE output for token-by-token responses
-
-**How to Implement:**
-
-1. **Create OpenAI API Adapter** (`src/api/openai_compat.rs`):
-   ```rust
-   // POST /v1/chat/completions
-   pub struct ChatCompletionRequest {
-       pub model: String,           // Maps to profile: "spse-creative", "spse-precise"
-       pub messages: Vec<Message>,
-       pub temperature: Option<f32>,
-       pub max_tokens: Option<usize>,
-       pub stop: Option<Vec<String>>,
-       pub stream: Option<bool>,
-   }
-   
-   pub struct ChatCompletionResponse {
-       pub id: String,
-       pub object: String,  // "chat.completion" or "chat.completion.chunk"
-       pub created: u64,
-       pub model: String,
-       pub choices: Vec<Choice>,
-       pub usage: Usage,
-   }
-   ```
-
-2. **Map OpenAI Params to SPSE Config:**
-   ```rust
-   fn map_model_to_profile(model: &str) -> &'static str {
-       match model {
-           "spse-creative" => "brainstorm",
-           "spse-precise" => "deterministic",
-           "spse-research" => "balanced",
-           _ => "balanced",
-       }
-   }
-   
-   fn map_temperature(temp: f32) -> ResolverMode {
-       if temp < 0.3 { ResolverMode::Deterministic }
-       else if temp < 0.7 { ResolverMode::Balanced }
-       else { ResolverMode::Exploratory }
-   }
-   ```
-
-3. **Handle System Prompts** (`src/layers/context.rs`):
-   - Inject system message as high-priority context unit
-   - Mark as anchor to prevent truncation
-   - Apply to all queries in session
-
-4. **Implement Streaming Output** (`src/api/streaming.rs`):
-   ```rust
-   pub struct StreamingResponse {
-       pub stream: bool,
-       pub stop_sequences: Vec<String>,
-   }
-   
-   impl StreamingResponse {
-       pub fn to_sse_chunk(&self, token: &str) -> String;
-       pub fn check_stop(&self, output: &str) -> bool;
-   }
-   ```
-
-**Files to Create:**
-- `src/api/openai_compat.rs`
-- `src/api/streaming.rs`
-
-**Files to Modify:**
-- `src/api.rs` (route registration)
-- `src/layers/context.rs` (system prompt handling)
-- `config/config.yaml` (model definitions)
-
-**Drill Coverage for OpenAI API - NEW:**
-
-1. **Chat Completions Drills:**
-   ```rust
-   // Happy path: Standard chat completion
-   fn openai_chat_completion();
-   // Happy path: Streaming response via SSE
-   fn openai_streaming_completion();
-   // Edge case: System prompt injection
-   fn openai_system_prompt();
-   // Edge case: Temperature mapping
-   fn openai_temperature_mapping();
-   // Failure: Invalid model name
-   fn openai_invalid_model();
-   // Failure: Max tokens exceeded
-   fn openai_max_tokens_exceeded();
-   ```
-
-2. **Stop Sequence Drills:**
-   ```rust
-   // Happy path: Stop sequence triggers
-   fn openai_stop_sequence();
-   // Edge case: Multiple stop sequences
-   fn openai_multiple_stop_sequences();
-   // Edge case: Stop sequence not found
-   fn openai_stop_not_found();
-   ```
-
----
-
-### 4.4 Web UI Drill Coverage
-
-1. **Mode Toggle Drills:**
-   ```rust
-   // Happy path: Creative mode enables exploratory resolver
-   fn ui_mode_creative_exploratory();
-   // Happy path: Precise mode enables deterministic resolver
-   fn ui_mode_precise_deterministic();
-   // Happy path: Research mode enables balanced + retrieval-heavy
-   fn ui_mode_research_balanced();
-   // Edge case: Mode toggle during active query
-   fn ui_mode_toggle_mid_query();
-   // Failure: Invalid mode parameter
-   fn ui_mode_invalid();
-   ```
-
-2. **Trace Visualization Drills:**
-   ```rust
-   // Happy path: WebSocket connects and receives events
-   fn ui_trace_websocket_connect();
-   // Happy path: Layer-by-layer timing displayed
-   fn ui_trace_layer_timing();
-   // Edge case: WebSocket reconnection on disconnect
-   fn ui_trace_reconnection();
-   // Failure: WebSocket timeout
-   fn ui_trace_timeout();
-   // Stress: High-frequency trace events
-   fn ui_trace_high_frequency();
-   ```
-
-3. **Intent Breakdown Display Drills:**
-   ```rust
-   // Happy path: Heuristic/memory scores displayed
-   fn ui_intent_breakdown_scores();
-   // Happy path: Active channel indicator shown
-   fn ui_intent_active_channel();
-   // Edge case: Missing memory-backed score (N/A display)
-   fn ui_intent_missing_memory_score();
-   // Failure: Intent blend report unavailable
-   fn ui_intent_report_unavailable();
-   ```
-
-4. **API Endpoint Drills:**
-   ```rust
-   // Happy path: /query returns valid response
-   fn api_query_success();
-   // Happy path: /telemetry/stream WebSocket upgrade
-   fn api_telemetry_stream_upgrade();
-   // Edge case: /query with malformed request
-   fn api_query_malformed();
-   // Edge case: Rate limiting triggered
-   fn api_rate_limit();
-   // Failure: Internal server error handling
-   fn api_internal_error();
-   // Stress: Concurrent API requests
-   fn api_concurrent_requests();
-   ```
-
----
-
 ## Execution Timeline
 
 | Phase | Duration | Start | Dependencies |
 |-------|----------|-------|--------------|
 | Phase 1: Creative Mode | 2-3 weeks | Week 1 | None |
 | Phase 2: Drill Suite | 3-4 weeks | Week 4 | Phase 1 |
-| Phase 3: Core Logic | 4-5 weeks | Week 8 | Phase 2 |
-| Phase 4: Web UI & API | 3-4 weeks | Week 13 | Phase 3 |
+| Phase 3: Core Infrastructure | 3-4 weeks | Week 8 | Phase 2 |
+| Phase 4: LLM-Like Core | 3-4 weeks | Week 12 | Phase 3 |
+| Phase 5: Retrieval & Optimization | 3-4 weeks | Week 16 | Phase 4 |
+| Phase 6: User Interface | 3-4 weeks | Week 20 | Phase 5 |
 
-**Total Estimated Duration:** 13-17 weeks
+**Total Estimated Duration:** 20-24 weeks
 
 ---
 
@@ -1394,49 +1535,42 @@ cargo test --lib -- drill_
   - [ ] Layer 14: Candidate scorer 7D features, weight application, NaN handling
   - [ ] Layer 16: Fine resolver top-k, temperature sampling, empty pool
   - [ ] Layer 18: Feedback controller learning, impact scoring, batch
-- [ ] **Cross-layer integration drills pass:**
-  - [ ] Layer boundary contracts: L1→L2, L2→L3, L3→L4, L5→L6, L6→L7, L7→L9, L14→L16, L16→L17
-  - [ ] State consistency: unit ID preserved, context overflow, unit dropped, high throughput
-  - [ ] Pipeline backpressure: normal flow, retrieval bottleneck, queue overflow, sustained rate
-- [ ] **End-to-end scenario drills pass:**
-  - [ ] Single query lifecycle: factual, brainstorm creative, retrieval triggered, layer failure, concurrent
-  - [ ] Multi-turn conversation: context preserved, topic shift, intent change, context loss, long conversation
-  - [ ] Training mode: silent training, interactive training, interrupted, data corruption, large corpus
-  - [ ] Error recovery: graceful degradation, partial output, pipeline recovery, cascading failures
 
 ### Phase 3
-- [ ] Layer 20 telemetry captures all calculations with Session/Trace IDs
-- [ ] Multi-engine consensus improves retrieval quality
-- [ ] Inference latency <200ms under concurrent Silent Training load
-- [ ] Pareto frontier identifies optimal config
-- [ ] **Layer 20 telemetry drills pass:**
-  - [ ] Telemetry worker: event emission, ID propagation, high event rate, channel full, high throughput
-  - [ ] Hot/cold store: hot store write, cold log archive, hot store capacity, SQLite failure, disk full
-  - [ ] Intent label capture: intent label capture, intent channel trace, blend breakdown trace, label missing
-- [ ] **Multi-engine consensus drills pass:**
-  - [ ] Multi-engine aggregation: agreement, triple consensus, disagreement, partial timeout, all unavailable, parallel stress
-  - [ ] Evidence merge: baseline policy, internal vs external, equal conflict, all empty
-  - [ ] Format adapters: HuggingFace row, Wikipedia XML, malformed JSON, missing fields, invalid XML
-- [ ] **Concurrency drills pass:**
-  - [ ] Priority scheduler: inference preemption, interactive priority, equal priority, priority inversion, starvation, all saturated
-  - [ ] Latency: normal load, maintenance spike, silent training impact, threshold exceeded, sustained load p99
-  - [ ] Queue depth: normal, near saturation, overflow, burst traffic
+- [ ] Telemetry captures all calculations with Session/Trace IDs
+- [ ] Reasoning loop solves complex queries via silent thought steps
+- [ ] Inference latency <200ms under concurrent load
+- [ ] **Core Infrastructure Drills pass:**
+  - [ ] Telemetry: event emission, ID propagation, high event rate, channel full
+  - [ ] Reasoning loop: complex logic, low confidence, max steps, infinite prevention
+  - [ ] Concurrency: inference preemption, priority inversion, all saturated, deadlock recovery
 
 ### Phase 4
-- [ ] Web UI displays real-time trace visualization
-- [ ] Mode toggles correctly affect engine behavior
-- [ ] Intent breakdown visible to user
-- [ ] **OpenAI API compatibility:** chat completions work with existing LLM clients
-- [ ] **Streaming output:** token-by-token SSE, stop sequences
-- [ ] **System prompt handling:** injected as anchor context unit
-- [ ] **Web UI drills pass:**
-  - [ ] Mode toggle: creative exploratory, precise deterministic, research balanced, toggle mid query, invalid mode
-  - [ ] Trace visualization: websocket connect, layer timing, reconnection, timeout, high frequency
-  - [ ] Intent breakdown: scores displayed, active channel, missing memory score, report unavailable
-  - [ ] API endpoints: query success, telemetry stream upgrade, malformed query, rate limit, internal error, concurrent requests
-- [ ] **OpenAI API drills pass:**
-  - [ ] Chat completions: standard completion, streaming, system prompt, temperature mapping, invalid model, max tokens
-  - [ ] Stop sequences: single, multiple, not found
+- [ ] **Auto-Mode inference works:** intent, tone, creativity inferred from query + history
+- [ ] **15% creative drift enforced:** stochastic floor applied to all candidate selection
+- [ ] **Anchor validation gate blocks factual corruption:** Core anchors protected from drift
+- [ ] **Style anchor resonance active:** tone consistency maintained across session
+- [ ] **Stochastic walks enabled:** metaphor generation for brainstorm/creative intents
+- [ ] **LLM-Like Core Drills pass:**
+  - [ ] Auto-mode inference: empathetic tone, direct tone, exploratory tone, mixed signals, fallback neutral
+  - [ ] Creative drift safety: factual synonym, math anchor, anchor blocks, anchor corruption, many anchors
+  - [ ] Style consistency: noir, academic, conflict, missing anchor
+  - [ ] Stochastic walk: metaphor, depth, loop, empty neighborhood
+
+### Phase 5
+- [ ] Multi-engine consensus improves retrieval quality
+- [ ] Config sweep identifies optimal parameters for latency vs pollution tradeoff
+- [ ] **Retrieval & Optimization Drills pass:**
+  - [ ] Multi-engine aggregation: agreement, disagreement, all unavailable
+  - [ ] Format adapters: HuggingFace row, Wikipedia XML, malformed JSON
+
+### Phase 6
+- [ ] User Interface provides accurate and intuitive user experience
+- [ ] OpenAI-compatible API enables LLM replacement for existing clients
+- [ ] Auto-Mode indicator displays correctly without mode toggles
+- [ ] **User Interface Drills pass:**
+  - [ ] Auto-mode indicator: displays correctly, toggle disabled, inferred tone display
+  - [ ] OpenAI API: chat completion, streaming, temperature ignored
 
 ---
 
@@ -1458,42 +1592,32 @@ cargo test --lib -- drill_
    - Mitigation: Priority queue with timeout
    - Fallback: Emergency maintenance pause under high inference load
 
-5. **Intent Blend Conflict - NEW**
-   - Risk: Heuristic and memory-backed scores diverge significantly
-   - Mitigation: Confidence interval check before blending
-   - Fallback: Use higher-confidence source exclusively
+5. **Auto-Mode Tone Misclassification**
+   - Risk: Query tone inferred incorrectly, leading to inappropriate response style
+   - Mitigation: Multi-signal tone detection (keywords + intent + history)
+   - Fallback: Default to NeutralProfessional tone on ambiguous signals
 
-6. **Intent Channel Memory Leak - NEW**
-   - Risk: Intent channel accumulates low-quality signals
-   - Mitigation: Intent-specific pruning thresholds in L21 governance
-   - Fallback: Periodic intent channel flush
+6. **Creative Drift Factual Corruption**
+   - Risk: 15% stochastic drift selects candidate that contradicts Core anchor
+   - Mitigation: Anchor validation gate re-samples greedily on contradiction
+   - Fallback: Disable drift entirely for mathematical/identity queries
 
-7. **Multi-Engine Consensus Failure - NEW**
-   - Risk: All external engines unavailable or disagree
-   - Mitigation: Internal pseudo-sources as fallback
-   - Fallback: Return cached results with staleness warning
+7. **Reasoning Loop Infinite Recursion**
+   - Risk: Silent thought steps loop without reaching final answer
+   - Mitigation: Max 5 steps enforced, confidence threshold check
+   - Fallback: Force final answer with partial reasoning
 
-8. **Pipeline Backpressure - NEW**
-   - Risk: L11 retrieval creates bottleneck starving downstream layers
-   - Mitigation: Queue depth monitoring with early warning
-   - Fallback: Skip retrieval for low-priority queries
+8. **Style Anchor Drift Mid-Session**
+   - Risk: Active style anchor changes unexpectedly during conversation
+   - Mitigation: Session-persistent style state with decay_rate=0
+   - Fallback: Lock style anchor after first 3 turns
 
-9. **Cross-Layer State Corruption - NEW**
-   - Risk: Unit dropped or corrupted between layer transitions
-   - Mitigation: Unit ID checksum validation at each layer boundary
-   - Fallback: Re-ingest from last known good state
+9. **Stochastic Walk Semantic Disconnect**
+   - Risk: Random walk reaches semantically unrelated concept
+   - Mitigation: Temperature-weighted step selection, max depth 4
+   - Fallback: Fall back to greedy nearest neighbor selection
 
-10. **WebSocket Trace Flooding**
-    - Risk: High-frequency telemetry events overwhelm UI clients
-    - Mitigation: Event throttling and aggregation in telemetry worker
-    - Fallback: Client-side buffering with backpressure signal
-
-11. **OpenAI API Incompatibility**
+10. **OpenAI API Incompatibility**
     - Risk: Subtle differences in API behavior break existing LLM integrations
     - Mitigation: Comprehensive API compatibility test suite against OpenAI spec
     - Fallback: Compatibility shims that emulate missing behaviors
-
-12. **Streaming Token Latency**
-    - Risk: Token streaming slower than user expectation (vs LLM token rates)
-    - Mitigation: Pre-compute candidate tokens, pipeline generation with emission
-    - Fallback: Batch streaming (emit chunks instead of single tokens)
