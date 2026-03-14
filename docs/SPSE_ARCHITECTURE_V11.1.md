@@ -403,6 +403,10 @@ pub struct ScoringWeights {
     pub w_evidence: f32,
 }
 
+// Scoring Note:
+// Confidence is derived from source corroboration count and recency decay.
+// Utility is derived from observed frequency and prediction success.
+
 // NEW: Style Resonance Scoring
 fn score_style_resonance(&self, candidate: &Unit, anchor: &StyleAnchor) -> f32 {
     self.semantic_similarity(candidate.embedding, anchor.embedding)
@@ -1038,6 +1042,8 @@ pub enum TelemetryEvent {
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**MVP Communication Note:** The API server, engine core, and background tasks communicate through a shared memory directory and append-only event log. No direct RPC is required for MVP deployment, which keeps coordination simple in the single-process design.
+
 ### 10.2 Resource Requirements
 
 | Resource | Minimum | Recommended |
@@ -1100,6 +1106,10 @@ pub struct TrustHeuristics {
 | Idle | ~350MB |
 | Reasoning | ~550MB |
 | Peak | < 600MB |
+
+### 12.4 Evaluation Assumptions
+
+These targets assume an average workload of roughly 200 queries/day, average query length of 50-100 tokens, and an external retrieval rate of approximately 20%. Memory growth, telemetry volume, and cache behavior should be re-baselined if real-world usage materially exceeds those assumptions.
 
 ---
 
