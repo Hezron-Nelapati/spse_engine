@@ -667,3 +667,43 @@ gpu:
   use_for_distance: true                # Use GPU for distance calculations
   min_candidates_for_gpu: 256           # Minimum candidates to use GPU scoring
   min_units_for_gpu_layout: 100         # Minimum units to use GPU layout
+
+# ============================================================================
+# Phase 5: Retrieval & Optimization Configuration
+# ============================================================================
+
+# Phase 5.1: Multi-Engine Consensus Retrieval
+multi_engine:
+  enabled: true                         # Enable multi-engine aggregation
+  consensus_threshold: 0.60             # Minimum agreement ratio for consensus
+  trust_weight: 0.40                    # Weight for source trust in consensus
+  agreement_weight: 0.35                # Weight for agreement count in consensus
+  diversity_weight: 0.25                # Weight for source diversity in consensus
+  max_engines: 5                        # Maximum engines to query in parallel
+  engine_timeout_ms: 1500               # Timeout for individual engine queries
+  structured_parsing_enabled: true      # Enable structured parsing for known formats
+
+# Phase 5.2: Config Sweeping & Benchmarking
+config_sweep:
+  enabled: true                         # Enable config sweeping
+  corpus_size_mb: 7                     # Corpus size for benchmarking (MB)
+  reasoning_trigger_floor_values:       # Values to test for reasoning trigger
+    - 0.30
+    - 0.40
+    - 0.50
+  max_internal_steps_values:            # Values to test for max reasoning steps
+    - 2
+    - 3
+    - 5
+  global_stochastic_floor_values:       # Values to test for stochastic floor
+    - 0.10
+    - 0.15
+    - 0.20
+  memory_limit_mb_values:               # Values to test for memory limits
+    - 350
+    - 450
+    - 550
+  latency_target_ms: 200                # Latency target for optimization (ms)
+  pollution_ceiling_percent: 1.0       # Pollution ceiling target (%)
+  iterations_per_config: 3             # Iterations per config
+  pareto_output_path: "benchmarks/pareto_frontier.json"

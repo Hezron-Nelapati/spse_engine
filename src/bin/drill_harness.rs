@@ -117,6 +117,14 @@ fn list_drills() {
     for mode in &[DrillMode::PollutionCeiling, DrillMode::PollutionPurge] {
         println!("  {:?}", mode);
     }
+    
+    println!();
+    println!("=== Phase 5: Retrieval & Optimization Drills ===");
+    for mode in &[DrillMode::MultiEngineConsensus, DrillMode::MultiEngineDisagreement,
+                   DrillMode::MultiEngineUnavailable, DrillMode::StructuredParsing,
+                   DrillMode::ConfigSweepPareto, DrillMode::ConfigSweepNoOptimal] {
+        println!("  {:?}", mode);
+    }
 }
 
 fn run_all_drills() {
@@ -152,6 +160,13 @@ fn run_all_drills() {
         // Pollution
         DrillMode::PollutionCeiling,
         DrillMode::PollutionPurge,
+        // Phase 5: Retrieval & Optimization
+        DrillMode::MultiEngineConsensus,
+        DrillMode::MultiEngineDisagreement,
+        DrillMode::MultiEngineUnavailable,
+        DrillMode::StructuredParsing,
+        DrillMode::ConfigSweepPareto,
+        DrillMode::ConfigSweepNoOptimal,
     ];
     
     let mut report = DrillReport::default();
@@ -256,6 +271,13 @@ fn parse_drill_mode(s: &str) -> DrillMode {
         // Pollution
         "PollutionCeiling" | "pollution_ceiling" => DrillMode::PollutionCeiling,
         "PollutionPurge" | "pollution_purge" => DrillMode::PollutionPurge,
+        // Phase 5: Retrieval & Optimization
+        "MultiEngineConsensus" | "multi_engine_consensus" => DrillMode::MultiEngineConsensus,
+        "MultiEngineDisagreement" | "multi_engine_disagreement" => DrillMode::MultiEngineDisagreement,
+        "MultiEngineUnavailable" | "multi_engine_unavailable" => DrillMode::MultiEngineUnavailable,
+        "StructuredParsing" | "structured_parsing" => DrillMode::StructuredParsing,
+        "ConfigSweepPareto" | "config_sweep_pareto" => DrillMode::ConfigSweepPareto,
+        "ConfigSweepNoOptimal" | "config_sweep_no_optimal" => DrillMode::ConfigSweepNoOptimal,
         _ => {
             eprintln!("Unknown drill mode: {}", s);
             eprintln!("Use --list to see available modes");

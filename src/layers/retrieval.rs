@@ -968,3 +968,585 @@ fn average_trust(docs: &[RetrievedDocument]) -> f32 {
         docs.iter().map(|doc| doc.trust_score).sum::<f32>() / docs.len() as f32
     }
 }
+
+// ============================================================================
+// Phase 5.1: Multi-Engine Consensus Retrieval
+// ============================================================================
+
+use crate::config::MultiEngineConfig;
+
+/// Result from a single search engine
+#[derive(Debug, Clone)]
+pub struct EngineResult {
+    pub engine_name: String,
+    pub documents: Vec<RetrievedDocument>,
+    pub latency_ms: u64,
+    pub error: Option<String>,
+}
+
+/// Consensus-scored document from multiple engines
+#[derive(Debug, Clone)]
+pub struct ConsensusDocument {
+    pub document: RetrievedDocument,
+    /// Number of engines that returned this document (or similar)
+    pub agreement_count: usize,
+    /// Weighted consensus score
+    pub consensus_score: f32,
+    /// Unique engines that contributed
+    pub contributing_engines: Vec<String>,
+}
+
+/// Multi-engine aggregator for consensus retrieval
+pub struct MultiEngineAggregator {
+    config: MultiEngineConfig,
+    client: Client,
+}
+
+impl MultiEngineAggregator {
+    pub fn new(config: MultiEngineConfig) -> Self {
+        let client = Client::builder()
+            .user_agent("spse_engine/0.1")
+            .timeout(std::time::Duration::from_millis(config.engine_timeout_ms))
+            .build()
+            .expect("failed to build reqwest client for multi-engine");
+        
+        Self { config, client }
+    }
+    
+    /// Aggregate results from multiple search engines with consensus scoring
+    pub async fn aggregate(&self, query: &str, limit: usize) -> Vec<ConsensusDocument> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        
+        // Query all engines in parallel
+        let engine_results = self.query_all_engines(query, limit).await;
+        
+        // Apply consensus scoring
+        self.apply_consensus_scoring(engine_results)
+    }
+    
+    /// Query all configured engines in parallel
+    async fn query_all_engines(&self, query: &str, limit: usize) -> Vec<EngineResult> {
+        let mut results = Vec::new();
+        
+        // DuckDuckGo
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_duckduckgo(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "duckduckgo".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "duckduckgo".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        // Wikipedia
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_wikipedia(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "wikipedia".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "wikipedia".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        // Wikidata
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_wikidata(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "wikidata".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "wikidata".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        // PubMed Central
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_pubmed(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "pubmed".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "pubmed".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        // Nominatim (OpenStreetMap)
+        if results.len() < self.config.max_engines {
+            let start = Instant::now();
+            match self.query_nominatim(query, limit).await {
+                Ok(docs) => {
+                    results.push(EngineResult {
+                        engine_name: "nominatim".to_string(),
+                        documents: docs,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(EngineResult {
+                        engine_name: "nominatim".to_string(),
+                        documents: Vec::new(),
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        error: Some(e),
+                    });
+                }
+            }
+        }
+        
+        results
+    }
+    
+    /// Apply consensus scoring to aggregate results
+    fn apply_consensus_scoring(&self, engine_results: Vec<EngineResult>) -> Vec<ConsensusDocument> {
+        let mut consensus_docs: Vec<ConsensusDocument> = Vec::new();
+        
+        for result in &engine_results {
+            if result.error.is_some() {
+                continue;
+            }
+            
+            for doc in &result.documents {
+                // Find similar existing documents
+                let similar_idx = self.find_similar_document(&doc.normalized_content, &consensus_docs);
+                
+                if let Some(idx) = similar_idx {
+                    // Increment agreement for similar document
+                    consensus_docs[idx].agreement_count += 1;
+                    consensus_docs[idx].contributing_engines.push(result.engine_name.clone());
+                    
+                    // Update consensus score
+                    consensus_docs[idx].consensus_score = self.calculate_consensus_score(
+                        &consensus_docs[idx].document,
+                        consensus_docs[idx].agreement_count,
+                        &consensus_docs[idx].contributing_engines,
+                    );
+                } else {
+                    // New unique document
+                    consensus_docs.push(ConsensusDocument {
+                        document: doc.clone(),
+                        agreement_count: 1,
+                        consensus_score: self.calculate_consensus_score(doc, 1, &[result.engine_name.clone()]),
+                        contributing_engines: vec![result.engine_name.clone()],
+                    });
+                }
+            }
+        }
+        
+        // Sort by consensus score descending
+        consensus_docs.sort_by(|a, b| {
+            b.consensus_score.total_cmp(&a.consensus_score)
+        });
+        
+        consensus_docs
+    }
+    
+    /// Find similar document in consensus list
+    fn find_similar_document(&self, content: &str, docs: &[ConsensusDocument]) -> Option<usize> {
+        let content_lower = content.to_lowercase();
+        let content_words: Vec<&str> = content_lower.split_whitespace().take(20).collect();
+        
+        for (idx, cd) in docs.iter().enumerate() {
+            let doc_lower = cd.document.normalized_content.to_lowercase();
+            let doc_words: Vec<&str> = doc_lower.split_whitespace().take(20).collect();
+            
+            // Calculate word overlap
+            let overlap = content_words.iter()
+                .filter(|w| doc_words.contains(w))
+                .count();
+            
+            let similarity = overlap as f32 / content_words.len().max(1) as f32;
+            
+            if similarity >= self.config.consensus_threshold {
+                return Some(idx);
+            }
+        }
+        
+        None
+    }
+    
+    /// Calculate consensus score for a document
+    fn calculate_consensus_score(
+        &self,
+        doc: &RetrievedDocument,
+        agreement_count: usize,
+        engines: &[String],
+    ) -> f32 {
+        // Trust component
+        let trust_score = doc.trust_score * self.config.trust_weight;
+        
+        // Agreement component (normalized by max engines)
+        let agreement_score = (agreement_count as f32 / self.config.max_engines as f32)
+            * self.config.agreement_weight;
+        
+        // Diversity component (unique engines)
+        let unique_engines = engines.iter().collect::<std::collections::HashSet<_>>().len();
+        let diversity_score = (unique_engines as f32 / self.config.max_engines as f32)
+            * self.config.diversity_weight;
+        
+        (trust_score + agreement_score + diversity_score).clamp(0.0, 1.0)
+    }
+    
+    // Individual engine query methods (wrappers around existing fetch methods)
+    
+    async fn query_duckduckgo(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+        let url = format!(
+            "https://api.duckduckgo.com/?q={}&format=json&no_redirect=1&no_html=1",
+            query.replace(' ', "+")
+        );
+        let response = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|e| e.to_string())?;
+        
+        let mut docs = Vec::new();
+        if let Some(abstract_text) = value.get("AbstractText").and_then(Value::as_str) {
+            let normalized = input::normalize_text(abstract_text);
+            if !normalized.is_empty() {
+                docs.push(RetrievedDocument {
+                    source_url: value.get("AbstractURL").and_then(Value::as_str)
+                        .unwrap_or("https://duckduckgo.com/").to_string(),
+                    title: value.get("Heading").and_then(Value::as_str)
+                        .unwrap_or("DuckDuckGo Abstract").to_string(),
+                    raw_content: abstract_text.to_string(),
+                    normalized_content: normalized,
+                    retrieved_at: Utc::now(),
+                    trust_score: 0.5,
+                    cached: false,
+                });
+            }
+        }
+        Ok(docs)
+    }
+    
+    async fn query_wikipedia(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+        let limit_str = limit.to_string();
+        let url = reqwest::Url::parse_with_params(
+            "https://en.wikipedia.org/w/api.php",
+            &[
+                ("action", "query"),
+                ("list", "search"),
+                ("format", "json"),
+                ("utf8", "1"),
+                ("srlimit", limit_str.as_str()),
+                ("srsearch", query),
+            ],
+        ).map_err(|e| e.to_string())?;
+        
+        let response = self.client.get(url).send().await.map_err(|e| e.to_string())?;
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|e| e.to_string())?;
+        
+        let mut docs = Vec::new();
+        if let Some(results) = value.get("query").and_then(|q| q.get("search")).and_then(Value::as_array) {
+            for item in results.iter().take(limit) {
+                let title = item.get("title").and_then(Value::as_str).unwrap_or("");
+                let snippet = item.get("snippet").and_then(Value::as_str).unwrap_or("");
+                let normalized = input::normalize_text(snippet);
+                if !normalized.is_empty() {
+                    docs.push(RetrievedDocument {
+                        source_url: format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
+                        title: title.to_string(),
+                        raw_content: snippet.to_string(),
+                        normalized_content: normalized,
+                        retrieved_at: Utc::now(),
+                        trust_score: 0.6,
+                        cached: false,
+                    });
+                }
+            }
+        }
+        Ok(docs)
+    }
+    
+    async fn query_wikidata(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+        let limit_str = limit.to_string();
+        let url = reqwest::Url::parse_with_params(
+            "https://www.wikidata.org/w/api.php",
+            &[
+                ("action", "wbsearchentities"),
+                ("language", "en"),
+                ("format", "json"),
+                ("type", "item"),
+                ("limit", limit_str.as_str()),
+                ("search", query),
+            ],
+        ).map_err(|e| e.to_string())?;
+        
+        let response = self.client.get(url).send().await.map_err(|e| e.to_string())?;
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|e| e.to_string())?;
+        
+        let mut docs = Vec::new();
+        if let Some(items) = value.get("search").and_then(Value::as_array) {
+            for item in items.iter().take(limit) {
+                let label = item.get("label").and_then(Value::as_str).unwrap_or("");
+                let description = item.get("description").and_then(Value::as_str).unwrap_or("");
+                let entity_id = item.get("id").and_then(Value::as_str).unwrap_or("item");
+                let raw = if description.is_empty() {
+                    label.to_string()
+                } else {
+                    format!("{}: {}.", label, description)
+                };
+                let normalized = input::normalize_text(&raw);
+                if !normalized.is_empty() {
+                    docs.push(RetrievedDocument {
+                        source_url: format!("https://www.wikidata.org/wiki/{}", entity_id),
+                        title: label.to_string(),
+                        raw_content: raw,
+                        normalized_content: normalized,
+                        retrieved_at: Utc::now(),
+                        trust_score: 0.68,
+                        cached: false,
+                    });
+                }
+            }
+        }
+        Ok(docs)
+    }
+    
+    async fn query_pubmed(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+        let limit_str = limit.to_string();
+        let search_url = reqwest::Url::parse_with_params(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            &[
+                ("db", "pmc"),
+                ("retmode", "json"),
+                ("retmax", limit_str.as_str()),
+                ("term", query),
+            ],
+        ).map_err(|e| e.to_string())?;
+        
+        let search_body = self.client.get(search_url).send().await
+            .map_err(|e| e.to_string())?
+            .text().await.map_err(|e| e.to_string())?;
+        let search_value = serde_json::from_str::<Value>(&search_body).map_err(|e| e.to_string())?;
+        
+        let ids: Vec<String> = search_value.get("esearchresult")
+            .and_then(|r| r.get("idlist"))
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).take(limit).collect())
+            .unwrap_or_default();
+        
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let ids_csv = ids.join(",");
+        let summary_url = reqwest::Url::parse_with_params(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
+            &[("db", "pmc"), ("retmode", "json"), ("id", ids_csv.as_str())],
+        ).map_err(|e| e.to_string())?;
+        
+        let summary_body = self.client.get(summary_url).send().await
+            .map_err(|e| e.to_string())?
+            .text().await.map_err(|e| e.to_string())?;
+        let summary_value = serde_json::from_str::<Value>(&summary_body).map_err(|e| e.to_string())?;
+        let result = summary_value.get("result").and_then(Value::as_object)
+            .ok_or_else(|| "invalid pmc summary payload".to_string())?;
+        
+        let mut docs = Vec::new();
+        for id in ids {
+            if let Some(item) = result.get(&id) {
+                let title = item.get("title").and_then(Value::as_str).unwrap_or("");
+                let journal = item.get("fulljournalname").and_then(Value::as_str).unwrap_or("");
+                let raw = input::normalize_text(&format!("{}. Journal: {}.", title, journal));
+                if !raw.is_empty() {
+                    docs.push(RetrievedDocument {
+                        source_url: format!("https://pmc.ncbi.nlm.nih.gov/articles/PMC{}/", id),
+                        title: title.to_string(),
+                        raw_content: raw.clone(),
+                        normalized_content: raw,
+                        retrieved_at: Utc::now(),
+                        trust_score: 0.74,
+                        cached: false,
+                    });
+                }
+            }
+        }
+        Ok(docs)
+    }
+    
+    async fn query_nominatim(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+        let limit_str = limit.to_string();
+        let url = reqwest::Url::parse_with_params(
+            "https://nominatim.openstreetmap.org/search",
+            &[
+                ("format", "jsonv2"),
+                ("limit", limit_str.as_str()),
+                ("q", query),
+            ],
+        ).map_err(|e| e.to_string())?;
+        
+        let body = self.client.get(url).send().await
+            .map_err(|e| e.to_string())?
+            .text().await.map_err(|e| e.to_string())?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|e| e.to_string())?;
+        
+        let mut docs = Vec::new();
+        if let Some(items) = value.as_array() {
+            for item in items.iter().take(limit) {
+                let display_name = item.get("display_name").and_then(Value::as_str).unwrap_or("");
+                let lat = item.get("lat").and_then(Value::as_str).unwrap_or("");
+                let lon = item.get("lon").and_then(Value::as_str).unwrap_or("");
+                let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+                let raw = input::normalize_text(&format!("{}. Coordinates: {}, {}. Type: {}.", 
+                    display_name, lat, lon, kind));
+                if !raw.is_empty() {
+                    docs.push(RetrievedDocument {
+                        source_url: "https://nominatim.openstreetmap.org/".to_string(),
+                        title: display_name.to_string(),
+                        raw_content: raw.clone(),
+                        normalized_content: raw,
+                        retrieved_at: Utc::now(),
+                        trust_score: 0.7,
+                        cached: false,
+                    });
+                }
+            }
+        }
+        Ok(docs)
+    }
+}
+
+/// Structured parser for known formats (HuggingFace, Wikipedia, custom sources)
+pub struct StructuredParser;
+
+impl StructuredParser {
+    /// Parse HuggingFace dataset row format
+    pub fn parse_huggingface_row(row: &Value) -> Option<String> {
+        let mut parts = Vec::new();
+        
+        // Common HuggingFace fields
+        for field in ["text", "content", "question", "context", "instruction", "prompt", "input", "output"] {
+            if let Some(text) = row.get(field).and_then(Value::as_str) {
+                parts.push(text.to_string());
+            }
+        }
+        
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
+    }
+    
+    /// Parse Wikipedia XML format
+    pub fn parse_wikipedia_xml(text: &str) -> String {
+        // Extract article text from Wikipedia XML
+        let mut result = String::new();
+        let mut in_text = false;
+        
+        for line in text.lines() {
+            if line.contains("<text") {
+                in_text = true;
+            }
+            if in_text {
+                // Strip XML tags
+                let stripped = line.replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+                    .replace("&quot;", "\"");
+                result.push_str(&stripped);
+                result.push(' ');
+            }
+            if line.contains("</text>") {
+                in_text = false;
+            }
+        }
+        
+        input::normalize_text(&result)
+    }
+    
+    /// Parse Wikidata truthy format
+    pub fn parse_wikidata_truthy(entity: &Value) -> Option<String> {
+        let label = entity.get("labels").and_then(|l| l.get("en"))
+            .and_then(|e| e.get("value")).and_then(Value::as_str)?;
+        
+        let description = entity.get("descriptions").and_then(|d| d.get("en"))
+            .and_then(|e| e.get("value")).and_then(Value::as_str)
+            .unwrap_or("");
+        
+        let result = if description.is_empty() {
+            label.to_string()
+        } else {
+            format!("{}: {}.", label, description)
+        };
+        
+        Some(result)
+    }
+    
+    /// Parse custom JSON source with field extraction
+    pub fn parse_custom_json(value: &Value, fields: &[String]) -> String {
+        let mut parts = Vec::new();
+        
+        for field in fields {
+            if let Some(text) = value.get(field).and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                Value::Array(arr) => Some(arr.iter()
+                    .filter_map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")),
+                _ => None,
+            }) {
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+        }
+        
+        parts.join(" ")
+    }
+}

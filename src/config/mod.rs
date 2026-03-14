@@ -729,6 +729,86 @@ impl Default for DynamicMemoryConfig {
     }
 }
 
+/// Configuration for multi-engine consensus retrieval (Phase 5.1)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MultiEngineConfig {
+    /// Enable multi-engine aggregation
+    pub enabled: bool,
+    /// Minimum agreement ratio for consensus (0.0-1.0)
+    pub consensus_threshold: f32,
+    /// Weight for source trust in consensus scoring
+    pub trust_weight: f32,
+    /// Weight for agreement count in consensus scoring
+    pub agreement_weight: f32,
+    /// Weight for source diversity in consensus scoring
+    pub diversity_weight: f32,
+    /// Maximum engines to query in parallel
+    pub max_engines: usize,
+    /// Timeout for individual engine queries (ms)
+    pub engine_timeout_ms: u64,
+    /// Enable structured parsing for known formats
+    pub structured_parsing_enabled: bool,
+}
+
+impl Default for MultiEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            consensus_threshold: 0.60,
+            trust_weight: 0.40,
+            agreement_weight: 0.35,
+            diversity_weight: 0.25,
+            max_engines: 5,
+            engine_timeout_ms: 1500,
+            structured_parsing_enabled: true,
+        }
+    }
+}
+
+/// Configuration for parameter sweeping and benchmarking (Phase 5.2)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfigSweepConfig {
+    /// Enable config sweeping
+    pub enabled: bool,
+    /// Corpus size for benchmarking (MB)
+    pub corpus_size_mb: usize,
+    /// Reasoning trigger floor values to test
+    pub reasoning_trigger_floor_values: Vec<f32>,
+    /// Max internal steps values to test
+    pub max_internal_steps_values: Vec<usize>,
+    /// Global stochastic floor values to test
+    pub global_stochastic_floor_values: Vec<f32>,
+    /// Memory limit values to test (MB)
+    pub memory_limit_mb_values: Vec<usize>,
+    /// Latency target for optimization (ms)
+    pub latency_target_ms: u64,
+    /// Pollution ceiling target (%)
+    pub pollution_ceiling_percent: f32,
+    /// Number of iterations per config
+    pub iterations_per_config: usize,
+    /// Output path for Pareto frontier data
+    pub pareto_output_path: String,
+}
+
+impl Default for ConfigSweepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            corpus_size_mb: 7,
+            reasoning_trigger_floor_values: vec![0.30, 0.40, 0.50],
+            max_internal_steps_values: vec![2, 3, 5],
+            global_stochastic_floor_values: vec![0.10, 0.15, 0.20],
+            memory_limit_mb_values: vec![350, 450, 550],
+            latency_target_ms: 200,
+            pollution_ceiling_percent: 1.0,
+            iterations_per_config: 3,
+            pareto_output_path: "benchmarks/pareto_frontier.json".to_string(),
+        }
+    }
+}
+
 /// Wrapper for all auto-inference features (Phase 3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1923,6 +2003,12 @@ pub struct EngineConfig {
     /// GPU acceleration configuration
     #[serde(default)]
     pub gpu: GpuConfig,
+    /// Phase 5.1: Multi-engine consensus retrieval configuration
+    #[serde(default)]
+    pub multi_engine: MultiEngineConfig,
+    /// Phase 5.2: Config sweeping and benchmarking configuration
+    #[serde(default)]
+    pub config_sweep: ConfigSweepConfig,
 }
 
 impl Default for EngineConfig {
@@ -1951,6 +2037,8 @@ impl Default for EngineConfig {
             huggingface_streaming: HuggingFaceStreamingConfig::default(),
             auto_inference: AutoInferenceConfig::default(),
             gpu: GpuConfig::default(),
+            multi_engine: MultiEngineConfig::default(),
+            config_sweep: ConfigSweepConfig::default(),
         }
     }
 }
@@ -2449,6 +2537,46 @@ impl EngineConfig {
                 "auto_inference.dynamic_memory.max_memory_limit_mb must be >= base_memory_limit_mb"
                     .to_string(),
             );
+        }
+        // Phase 5: Multi-engine and config sweep validation
+        validate_range(
+            "multi_engine.consensus_threshold",
+            self.multi_engine.consensus_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "multi_engine.trust_weight",
+            self.multi_engine.trust_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "multi_engine.agreement_weight",
+            self.multi_engine.agreement_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "multi_engine.diversity_weight",
+            self.multi_engine.diversity_weight,
+            0.0,
+            1.0,
+        )?;
+        if self.multi_engine.max_engines == 0 {
+            return Err("multi_engine.max_engines must be >= 1".to_string());
+        }
+        validate_range(
+            "config_sweep.pollution_ceiling_percent",
+            self.config_sweep.pollution_ceiling_percent,
+            0.0,
+            100.0,
+        )?;
+        if self.config_sweep.corpus_size_mb == 0 {
+            return Err("config_sweep.corpus_size_mb must be >= 1".to_string());
+        }
+        if self.config_sweep.iterations_per_config == 0 {
+            return Err("config_sweep.iterations_per_config must be >= 1".to_string());
         }
         Ok(())
     }
