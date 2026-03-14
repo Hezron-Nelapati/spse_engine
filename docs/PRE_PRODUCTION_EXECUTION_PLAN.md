@@ -423,6 +423,48 @@ cargo test --lib output::tests::drift_detection
    fn feedback_controller_batch_learning(); // Stress
    ```
 
+8. **Phase 1 Feature Drills (Creative Mode, Hybrid Blend, Intent Channel) - NEW:**
+   
+   **Creative Mode Drills (L14-L17):**
+   ```rust
+   // Happy path: Brainstorm intent triggers exploratory resolver mode
+   fn creative_mode_brainstorm_exploratory();
+   // Happy path: Plan intent applies structured output profile
+   fn creative_mode_plan_structured();
+   // Edge case: Creative mode disabled for factual queries
+   fn creative_mode_factual_disabled();
+   // Edge case: Stochastic jump probability at boundary (0.0, 1.0)
+   fn creative_mode_stochastic_boundary();
+   // Failure: Profile missing for intent type
+   fn creative_mode_missing_profile();
+   // Stress: Rapid mode switching between creative/precise
+   fn creative_mode_rapid_switching();
+   ```
+   
+   **Hybrid Blend Drills (L7):**
+   ```rust
+   // Happy path: 0.6/0.4 blend produces correct score
+   fn hybrid_blend_weight_calculation();
+   // Edge case: Heuristic score NaN fallback
+   fn hybrid_blend_heuristic_nan();
+   // Edge case: Memory channel returns empty
+   fn hybrid_blend_memory_empty();
+   // Failure: Intent channel corrupted data
+   fn hybrid_blend_corrupted_memory();
+   ```
+   
+   **Intent Channel Isolation Drills (L4, L21):**
+   ```rust
+   // Happy path: Intent units stay in Intent channel
+   fn intent_channel_isolation_happy();
+   // Edge case: Intent unit at promotion boundary
+   fn intent_channel_promotion_boundary();
+   // Failure: Intent-to-Core promotion attempt blocked
+   fn intent_channel_core_promotion_blocked();
+   // Stress: High-volume intent signals
+   fn intent_channel_high_volume();
+   ```
+
 **Files to Create:**
 - `src/bin/drill_harness.rs`
 - `scripts/drill_corpus_generator.py`
@@ -550,6 +592,133 @@ cargo test --lib -- drill_
 - `src/engine.rs` (ArcSwap usage verification)
 - `tests/integration.rs` (crash tests)
 
+### 2.4 Cross-Layer Integration Drills - NEW
+
+**What to Implement:**
+- Validate data flow between adjacent layers
+- Test layer boundary contracts (input/output schemas)
+- Verify state consistency across layer transitions
+
+**How to Implement:**
+
+1. **Layer Boundary Contract Tests:**
+   ```rust
+   // L1→L2: InputPacket to Unit activation
+   fn l1_to_l2_input_packet_schema();
+   // L2→L3: Unit stream to Hierarchy grouping
+   fn l2_to_l3_unit_stream();
+   // L3→L4: Hierarchy to Memory ingestion
+   fn l3_to_l4_hierarchy_memory();
+   // L5→L6: Spatial routing to Context matrix
+   fn l5_to_l6_spatial_context();
+   // L6→L7: Context state to Intent detection
+   fn l6_to_l7_context_intent();
+   // L7→L9: Intent to Retrieval decision
+   fn l7_to_l9_intent_retrieval();
+   // L14→L16: Candidate scores to Resolver selection
+   fn l14_to_l16_candidate_resolver();
+   // L16→L17: Resolver output to Output decoder
+   fn l16_to_l17_resolver_output();
+   ```
+
+2. **State Consistency Drills:**
+   ```rust
+   // Happy path: Unit ID preserved across all layers
+   fn state_consistency_unit_id();
+   // Edge case: Context window overflow mid-pipeline
+   fn state_consistency_context_overflow();
+   // Failure: Unit dropped between layers
+   fn state_consistency_unit_dropped();
+   // Stress: High-throughput pipeline pressure
+   fn state_consistency_high_throughput();
+   ```
+
+3. **Pipeline Backpressure Drills:**
+   ```rust
+   // Happy path: Normal flow rate
+   fn backpressure_normal_flow();
+   // Edge case: L11 retrieval bottleneck
+   fn backpressure_retrieval_bottleneck();
+   // Failure: Queue overflow at L14
+   fn backpressure_queue_overflow();
+   // Stress: Sustained high input rate
+   fn backpressure_sustained_high_rate();
+   ```
+
+**Files to Create:**
+- `tests/layer_boundary_tests.rs`
+
+**Files to Modify:**
+- `tests/integration.rs` (cross-layer tests)
+
+---
+
+### 2.5 End-to-End Scenario Drills - NEW
+
+**What to Implement:**
+- Full query lifecycle from input to output
+- Real-world usage patterns and user scenarios
+- Multi-turn conversation flows
+
+**How to Implement:**
+
+1. **Single Query Lifecycle Drills:**
+   ```rust
+   // Happy path: Factual query complete lifecycle
+   fn e2e_factual_query_lifecycle();
+   // Happy path: Brainstorm query with creative mode
+   fn e2e_brainstorm_creative_lifecycle();
+   // Edge case: Query with retrieval triggered
+   fn e2e_retrieval_triggered_lifecycle();
+   // Failure: Query fails at specific layer
+   fn e2e_query_layer_failure();
+   // Stress: Concurrent query processing
+   fn e2e_concurrent_queries();
+   ```
+
+2. **Multi-Turn Conversation Drills:**
+   ```rust
+   // Happy path: Follow-up query with context
+   fn e2e_multi_turn_context_preserved();
+   // Edge case: Topic shift mid-conversation
+   fn e2e_multi_turn_topic_shift();
+   // Edge case: Intent change between turns
+   fn e2e_multi_turn_intent_change();
+   // Failure: Context loss between turns
+   fn e2e_multi_turn_context_loss();
+   // Stress: Long conversation (50+ turns)
+   fn e2e_multi_turn_long_conversation();
+   ```
+
+3. **Training Mode Scenario Drills:**
+   ```rust
+   // Happy path: Silent training ingestion
+   fn e2e_silent_training_ingestion();
+   // Happy path: Interactive training with feedback
+   fn e2e_interactive_training_feedback();
+   // Edge case: Training interrupted by inference
+   fn e2e_training_interrupted();
+   // Failure: Training data corruption
+   fn e2e_training_data_corruption();
+   // Stress: Large corpus training (100MB+)
+   fn e2e_large_corpus_training();
+   ```
+
+4. **Error Recovery Scenario Drills:**
+   ```rust
+   // Happy path: Graceful degradation on retrieval failure
+   fn e2e_graceful_degradation();
+   // Edge case: Partial output on resource exhaustion
+   fn e2e_partial_output();
+   // Failure: Complete pipeline failure recovery
+   fn e2e_pipeline_failure_recovery();
+   // Stress: Cascading failures
+   fn e2e_cascading_failures();
+   ```
+
+**Files to Modify:**
+- `tests/integration.rs` (scenario tests)
+
 ---
 
 ## Phase 3: Core Logic & Tests
@@ -609,6 +778,48 @@ cargo test --lib -- drill_
 - `src/engine.rs` (wire worker)
 - `config/config.yaml` (Layer 20 config expansion)
 
+**Drill Coverage for Layer 20 - NEW:**
+
+1. **Telemetry Worker Drills:**
+   ```rust
+   // Happy path: Event emitted at layer boundary
+   fn telemetry_event_emission();
+   // Happy path: Session/Trace ID propagation
+   fn telemetry_id_propagation();
+   // Edge case: High event rate (backpressure)
+   fn telemetry_high_event_rate();
+   // Failure: Worker channel full
+   fn telemetry_channel_full();
+   // Stress: 10,000 events/second sustained
+   fn telemetry_high_throughput();
+   ```
+
+2. **Hot/Cold Store Drills:**
+   ```rust
+   // Happy path: Event stored in hot SQLite
+   fn telemetry_hot_store_write();
+   // Happy path: Event archived to cold log
+   fn telemetry_cold_log_archive();
+   // Edge case: Hot store at capacity (10,000 events)
+   fn telemetry_hot_store_capacity();
+   // Failure: SQLite write failure
+   fn telemetry_sqlite_failure();
+   // Failure: Cold log disk full
+   fn telemetry_disk_full();
+   ```
+
+3. **Intent Label Capture Drills:**
+   ```rust
+   // Happy path: IntentLabel event captured
+   fn telemetry_intent_label_capture();
+   // Edge case: MemoryChannel::Intent in trace
+   fn telemetry_intent_channel_trace();
+   // Edge case: Hybrid blend breakdown in trace
+   fn telemetry_blend_breakdown_trace();
+   // Failure: Intent label missing in trace
+   fn telemetry_intent_label_missing();
+   ```
+
 ---
 
 ### 3.2 Multi-Engine Consensus & Structured Parsing
@@ -652,6 +863,50 @@ cargo test --lib -- drill_
 - `src/document.rs` (adapters)
 - `config/config.yaml` (source_policies expansion)
 
+**Drill Coverage for Multi-Engine Consensus - NEW:**
+
+1. **Multi-Engine Aggregation Drills:**
+   ```rust
+   // Happy path: Two engines agree on result
+   fn multi_engine_agreement();
+   // Happy path: Three engines with consensus
+   fn multi_engine_triple_consensus();
+   // Edge case: Engines disagree (conflict resolution)
+   fn multi_engine_disagreement();
+   // Edge case: One engine timeout
+   fn multi_engine_partial_timeout();
+   // Failure: All engines unavailable
+   fn multi_engine_all_unavailable();
+   // Stress: Rapid parallel queries to all engines
+   fn multi_engine_parallel_stress();
+   ```
+
+2. **Evidence Merge Drills:**
+   ```rust
+   // Happy path: Baseline policy (0.5·Trust + 0.3·Recency + 0.2·Agreement)
+   fn evidence_merge_baseline_policy();
+   // Edge case: Internal pseudo-source vs external web evidence
+   fn evidence_merge_internal_vs_external();
+   // Edge case: Conflict with equal scores
+   fn evidence_merge_equal_conflict();
+   // Failure: Empty evidence from all sources
+   fn evidence_merge_all_empty();
+   ```
+
+3. **Format Adapter Drills:**
+   ```rust
+   // Happy path: HuggingFace row parsing
+   fn adapter_huggingface_row();
+   // Happy path: Wikipedia XML section hierarchy
+   fn adapter_wikipedia_xml();
+   // Edge case: Malformed JSON row
+   fn adapter_malformed_json();
+   // Edge case: Missing required fields
+   fn adapter_missing_fields();
+   // Failure: Invalid XML structure
+   fn adapter_invalid_xml();
+   ```
+
 ---
 
 ### 3.3 Concurrency Stress Test (Three-Class Model)
@@ -690,6 +945,50 @@ cargo test --lib -- drill_
 **Files to Modify:**
 - `src/scheduler.rs` (extend)
 - `src/engine.rs` (priority enforcement)
+
+**Drill Coverage for Concurrency - NEW:**
+
+1. **Priority Scheduler Drills:**
+   ```rust
+   // Happy path: Inference preempts Silent Batch
+   fn scheduler_inference_preemption();
+   // Happy path: Interactive Training > Silent Batch
+   fn scheduler_interactive_priority();
+   // Edge case: Equal priority tasks
+   fn scheduler_equal_priority();
+   // Edge case: Priority inversion detection
+   fn scheduler_priority_inversion();
+   // Failure: Starvation of low-priority tasks
+   fn scheduler_starvation();
+   // Stress: All priority levels saturated
+   fn scheduler_all_saturated();
+   ```
+
+2. **Latency Drills:**
+   ```rust
+   // Happy path: p95 < 200ms under normal load
+   fn latency_normal_load();
+   // Edge case: Latency spike during maintenance
+   fn latency_maintenance_spike();
+   // Edge case: Latency during Silent Training
+   fn latency_silent_training_impact();
+   // Failure: Latency exceeds 200ms threshold
+   fn latency_threshold_exceeded();
+   // Stress: p99 measurement under sustained load
+   fn latency_sustained_load_p99();
+   ```
+
+3. **Queue Depth Drills:**
+   ```rust
+   // Happy path: Queue depth within limits
+   fn queue_depth_normal();
+   // Edge case: Queue approaching saturation
+   fn queue_depth_near_saturation();
+   // Failure: Queue overflow
+   fn queue_depth_overflow();
+   // Stress: Monitoring under burst traffic
+   fn queue_depth_burst_traffic();
+   ```
 
 ---
 
@@ -808,6 +1107,173 @@ cargo test --lib -- drill_
 
 ---
 
+### 4.3 OpenAI-Compatible API Layer
+
+**What to Implement:**
+- Full OpenAI Chat Completions API compatibility for LLM replacement
+- Model selection maps to SPSE profiles
+- System prompt handling via L6 Context Manager
+- Streaming SSE output for token-by-token responses
+
+**How to Implement:**
+
+1. **Create OpenAI API Adapter** (`src/api/openai_compat.rs`):
+   ```rust
+   // POST /v1/chat/completions
+   pub struct ChatCompletionRequest {
+       pub model: String,           // Maps to profile: "spse-creative", "spse-precise"
+       pub messages: Vec<Message>,
+       pub temperature: Option<f32>,
+       pub max_tokens: Option<usize>,
+       pub stop: Option<Vec<String>>,
+       pub stream: Option<bool>,
+   }
+   
+   pub struct ChatCompletionResponse {
+       pub id: String,
+       pub object: String,  // "chat.completion" or "chat.completion.chunk"
+       pub created: u64,
+       pub model: String,
+       pub choices: Vec<Choice>,
+       pub usage: Usage,
+   }
+   ```
+
+2. **Map OpenAI Params to SPSE Config:**
+   ```rust
+   fn map_model_to_profile(model: &str) -> &'static str {
+       match model {
+           "spse-creative" => "brainstorm",
+           "spse-precise" => "deterministic",
+           "spse-research" => "balanced",
+           _ => "balanced",
+       }
+   }
+   
+   fn map_temperature(temp: f32) -> ResolverMode {
+       if temp < 0.3 { ResolverMode::Deterministic }
+       else if temp < 0.7 { ResolverMode::Balanced }
+       else { ResolverMode::Exploratory }
+   }
+   ```
+
+3. **Handle System Prompts** (`src/layers/context.rs`):
+   - Inject system message as high-priority context unit
+   - Mark as anchor to prevent truncation
+   - Apply to all queries in session
+
+4. **Implement Streaming Output** (`src/api/streaming.rs`):
+   ```rust
+   pub struct StreamingResponse {
+       pub stream: bool,
+       pub stop_sequences: Vec<String>,
+   }
+   
+   impl StreamingResponse {
+       pub fn to_sse_chunk(&self, token: &str) -> String;
+       pub fn check_stop(&self, output: &str) -> bool;
+   }
+   ```
+
+**Files to Create:**
+- `src/api/openai_compat.rs`
+- `src/api/streaming.rs`
+
+**Files to Modify:**
+- `src/api.rs` (route registration)
+- `src/layers/context.rs` (system prompt handling)
+- `config/config.yaml` (model definitions)
+
+**Drill Coverage for OpenAI API - NEW:**
+
+1. **Chat Completions Drills:**
+   ```rust
+   // Happy path: Standard chat completion
+   fn openai_chat_completion();
+   // Happy path: Streaming response via SSE
+   fn openai_streaming_completion();
+   // Edge case: System prompt injection
+   fn openai_system_prompt();
+   // Edge case: Temperature mapping
+   fn openai_temperature_mapping();
+   // Failure: Invalid model name
+   fn openai_invalid_model();
+   // Failure: Max tokens exceeded
+   fn openai_max_tokens_exceeded();
+   ```
+
+2. **Stop Sequence Drills:**
+   ```rust
+   // Happy path: Stop sequence triggers
+   fn openai_stop_sequence();
+   // Edge case: Multiple stop sequences
+   fn openai_multiple_stop_sequences();
+   // Edge case: Stop sequence not found
+   fn openai_stop_not_found();
+   ```
+
+---
+
+### 4.4 Web UI Drill Coverage
+
+1. **Mode Toggle Drills:**
+   ```rust
+   // Happy path: Creative mode enables exploratory resolver
+   fn ui_mode_creative_exploratory();
+   // Happy path: Precise mode enables deterministic resolver
+   fn ui_mode_precise_deterministic();
+   // Happy path: Research mode enables balanced + retrieval-heavy
+   fn ui_mode_research_balanced();
+   // Edge case: Mode toggle during active query
+   fn ui_mode_toggle_mid_query();
+   // Failure: Invalid mode parameter
+   fn ui_mode_invalid();
+   ```
+
+2. **Trace Visualization Drills:**
+   ```rust
+   // Happy path: WebSocket connects and receives events
+   fn ui_trace_websocket_connect();
+   // Happy path: Layer-by-layer timing displayed
+   fn ui_trace_layer_timing();
+   // Edge case: WebSocket reconnection on disconnect
+   fn ui_trace_reconnection();
+   // Failure: WebSocket timeout
+   fn ui_trace_timeout();
+   // Stress: High-frequency trace events
+   fn ui_trace_high_frequency();
+   ```
+
+3. **Intent Breakdown Display Drills:**
+   ```rust
+   // Happy path: Heuristic/memory scores displayed
+   fn ui_intent_breakdown_scores();
+   // Happy path: Active channel indicator shown
+   fn ui_intent_active_channel();
+   // Edge case: Missing memory-backed score (N/A display)
+   fn ui_intent_missing_memory_score();
+   // Failure: Intent blend report unavailable
+   fn ui_intent_report_unavailable();
+   ```
+
+4. **API Endpoint Drills:**
+   ```rust
+   // Happy path: /query returns valid response
+   fn api_query_success();
+   // Happy path: /telemetry/stream WebSocket upgrade
+   fn api_telemetry_stream_upgrade();
+   // Edge case: /query with malformed request
+   fn api_query_malformed();
+   // Edge case: Rate limiting triggered
+   fn api_rate_limit();
+   // Failure: Internal server error handling
+   fn api_internal_error();
+   // Stress: Concurrent API requests
+   fn api_concurrent_requests();
+   ```
+
+---
+
 ## Execution Timeline
 
 | Phase | Duration | Start | Dependencies |
@@ -815,9 +1281,9 @@ cargo test --lib -- drill_
 | Phase 1: Creative Mode | 2-3 weeks | Week 1 | None |
 | Phase 2: Drill Suite | 3-4 weeks | Week 4 | Phase 1 |
 | Phase 3: Core Logic | 4-5 weeks | Week 8 | Phase 2 |
-| Phase 4: Web UI | 3-4 weeks | Week 13 | Phase 3 |
+| Phase 4: Web UI & API | 3-4 weeks | Week 13 | Phase 3 |
 
-**Total Estimated Duration:** 12-16 weeks
+**Total Estimated Duration:** 13-17 weeks
 
 ---
 
@@ -833,6 +1299,10 @@ cargo test --lib -- drill_
 - [ ] SpatialGrid neighborhood search accurate without halo regions
 - [ ] Crash recovery preserves snapshot consistency
 - [ ] Heterogeneous ingestion handles all source types
+- [ ] **Phase 1 Feature Drills pass:**
+  - [ ] Creative mode drills: brainstorm/plan profiles, factual disabled, stochastic boundary, missing profile, rapid switching
+  - [ ] Hybrid blend drills: weight calculation, heuristic NaN, memory empty, corrupted memory
+  - [ ] Intent channel isolation drills: isolation happy, promotion boundary, core promotion blocked, high volume
 - [ ] **Intent-driven input drills (L7, L9) pass all categories:**
   - [ ] Intent classification: happy path, edge cases (ambiguous, entropy trap), failure (empty input)
   - [ ] Hybrid blend: agreement, conflict resolution, memory missing fallback
@@ -851,17 +1321,49 @@ cargo test --lib -- drill_
   - [ ] Layer 14: Candidate scorer 7D features, weight application, NaN handling
   - [ ] Layer 16: Fine resolver top-k, temperature sampling, empty pool
   - [ ] Layer 18: Feedback controller learning, impact scoring, batch
+- [ ] **Cross-layer integration drills pass:**
+  - [ ] Layer boundary contracts: L1→L2, L2→L3, L3→L4, L5→L6, L6→L7, L7→L9, L14→L16, L16→L17
+  - [ ] State consistency: unit ID preserved, context overflow, unit dropped, high throughput
+  - [ ] Pipeline backpressure: normal flow, retrieval bottleneck, queue overflow, sustained rate
+- [ ] **End-to-end scenario drills pass:**
+  - [ ] Single query lifecycle: factual, brainstorm creative, retrieval triggered, layer failure, concurrent
+  - [ ] Multi-turn conversation: context preserved, topic shift, intent change, context loss, long conversation
+  - [ ] Training mode: silent training, interactive training, interrupted, data corruption, large corpus
+  - [ ] Error recovery: graceful degradation, partial output, pipeline recovery, cascading failures
 
 ### Phase 3
 - [ ] Layer 20 telemetry captures all calculations with Session/Trace IDs
 - [ ] Multi-engine consensus improves retrieval quality
 - [ ] Inference latency <200ms under concurrent Silent Training load
 - [ ] Pareto frontier identifies optimal config
+- [ ] **Layer 20 telemetry drills pass:**
+  - [ ] Telemetry worker: event emission, ID propagation, high event rate, channel full, high throughput
+  - [ ] Hot/cold store: hot store write, cold log archive, hot store capacity, SQLite failure, disk full
+  - [ ] Intent label capture: intent label capture, intent channel trace, blend breakdown trace, label missing
+- [ ] **Multi-engine consensus drills pass:**
+  - [ ] Multi-engine aggregation: agreement, triple consensus, disagreement, partial timeout, all unavailable, parallel stress
+  - [ ] Evidence merge: baseline policy, internal vs external, equal conflict, all empty
+  - [ ] Format adapters: HuggingFace row, Wikipedia XML, malformed JSON, missing fields, invalid XML
+- [ ] **Concurrency drills pass:**
+  - [ ] Priority scheduler: inference preemption, interactive priority, equal priority, priority inversion, starvation, all saturated
+  - [ ] Latency: normal load, maintenance spike, silent training impact, threshold exceeded, sustained load p99
+  - [ ] Queue depth: normal, near saturation, overflow, burst traffic
 
 ### Phase 4
 - [ ] Web UI displays real-time trace visualization
 - [ ] Mode toggles correctly affect engine behavior
 - [ ] Intent breakdown visible to user
+- [ ] **OpenAI API compatibility:** chat completions work with existing LLM clients
+- [ ] **Streaming output:** token-by-token SSE, stop sequences
+- [ ] **System prompt handling:** injected as anchor context unit
+- [ ] **Web UI drills pass:**
+  - [ ] Mode toggle: creative exploratory, precise deterministic, research balanced, toggle mid query, invalid mode
+  - [ ] Trace visualization: websocket connect, layer timing, reconnection, timeout, high frequency
+  - [ ] Intent breakdown: scores displayed, active channel, missing memory score, report unavailable
+  - [ ] API endpoints: query success, telemetry stream upgrade, malformed query, rate limit, internal error, concurrent requests
+- [ ] **OpenAI API drills pass:**
+  - [ ] Chat completions: standard completion, streaming, system prompt, temperature mapping, invalid model, max tokens
+  - [ ] Stop sequences: single, multiple, not found
 
 ---
 
@@ -882,3 +1384,43 @@ cargo test --lib -- drill_
 4. **Concurrency Deadlock**
    - Mitigation: Priority queue with timeout
    - Fallback: Emergency maintenance pause under high inference load
+
+5. **Intent Blend Conflict - NEW**
+   - Risk: Heuristic and memory-backed scores diverge significantly
+   - Mitigation: Confidence interval check before blending
+   - Fallback: Use higher-confidence source exclusively
+
+6. **Intent Channel Memory Leak - NEW**
+   - Risk: Intent channel accumulates low-quality signals
+   - Mitigation: Intent-specific pruning thresholds in L21 governance
+   - Fallback: Periodic intent channel flush
+
+7. **Multi-Engine Consensus Failure - NEW**
+   - Risk: All external engines unavailable or disagree
+   - Mitigation: Internal pseudo-sources as fallback
+   - Fallback: Return cached results with staleness warning
+
+8. **Pipeline Backpressure - NEW**
+   - Risk: L11 retrieval creates bottleneck starving downstream layers
+   - Mitigation: Queue depth monitoring with early warning
+   - Fallback: Skip retrieval for low-priority queries
+
+9. **Cross-Layer State Corruption - NEW**
+   - Risk: Unit dropped or corrupted between layer transitions
+   - Mitigation: Unit ID checksum validation at each layer boundary
+   - Fallback: Re-ingest from last known good state
+
+10. **WebSocket Trace Flooding**
+    - Risk: High-frequency telemetry events overwhelm UI clients
+    - Mitigation: Event throttling and aggregation in telemetry worker
+    - Fallback: Client-side buffering with backpressure signal
+
+11. **OpenAI API Incompatibility**
+    - Risk: Subtle differences in API behavior break existing LLM integrations
+    - Mitigation: Comprehensive API compatibility test suite against OpenAI spec
+    - Fallback: Compatibility shims that emulate missing behaviors
+
+12. **Streaming Token Latency**
+    - Risk: Token streaming slower than user expectation (vs LLM token rates)
+    - Mitigation: Pre-compute candidate tokens, pipeline generation with emission
+    - Fallback: Batch streaming (emit chunks instead of single tokens)
