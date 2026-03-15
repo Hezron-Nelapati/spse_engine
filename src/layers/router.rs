@@ -178,6 +178,8 @@ mod tests {
     use uuid::Uuid;
 
     fn unit(content: &str, utility: f32) -> Unit {
+        let content_lower = content.to_lowercase();
+        let content_fingerprint = crate::types::text_fingerprint(&content_lower);
         Unit {
             id: Uuid::new_v4(),
             content: content.to_string(),
@@ -198,6 +200,8 @@ mod tests {
             last_seen_at: Utc::now(),
             trust_score: utility,
             is_process_unit: false,
+            content_lower,
+            content_fingerprint,
         }
     }
 

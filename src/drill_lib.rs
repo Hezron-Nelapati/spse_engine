@@ -1147,9 +1147,12 @@ fn run_anchor_validation_drill(category: &DrillCategory) -> (bool, String, Strin
         DrillCategory::HappyPath => {
             // Create anchor unit with high trust
             let anchor_id = Uuid::new_v4();
+            let content = "2 + 2 = 4".to_string();
+            let content_lower = content.to_lowercase();
+            let content_fingerprint = crate::types::text_fingerprint(&content_lower);
             let anchor = Unit {
                 id: anchor_id,
-                content: "2 + 2 = 4".to_string(),
+                content,
                 normalized: "2 + 2 = 4".to_string(),
                 level: crate::types::UnitLevel::Phrase,
                 frequency: 1,
@@ -1167,6 +1170,8 @@ fn run_anchor_validation_drill(category: &DrillCategory) -> (bool, String, Strin
                 last_seen_at: chrono::Utc::now(),
                 trust_score: 0.98,
                 is_process_unit: false,
+                content_lower,
+                content_fingerprint,
             };
             
             // Create candidate that contradicts anchor

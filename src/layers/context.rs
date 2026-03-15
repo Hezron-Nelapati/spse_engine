@@ -81,8 +81,10 @@ impl ContextManager {
         }
         task_entities.truncate(10);
 
+        let mut context = ContextMatrix { cells, summary, ..Default::default() };
+        context.precompute();
         (
-            ContextMatrix { cells, summary },
+            context,
             SequenceState {
                 recent_unit_ids,
                 anchor_ids,

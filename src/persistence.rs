@@ -518,9 +518,12 @@ fn hydrate_unit_from_row(row: &Row<'_>) -> SqlResult<Unit> {
     let last_seen_text: String = row.get(13)?;
     let memory_channels_json: String = row.get(11)?;
 
+    let content: String = row.get(1)?;
+    let content_lower = content.to_lowercase();
+    let content_fingerprint = crate::types::text_fingerprint(&content_lower);
     Ok(Unit {
         id: uuid::Uuid::parse_str(&id_text).unwrap_or_else(|_| uuid::Uuid::nil()),
-        content: row.get(1)?,
+        content,
         normalized: row.get(2)?,
         level: level_from_str(&row.get::<_, String>(3)?),
         frequency: row.get::<_, i64>(4)? as u64,
@@ -541,7 +544,9 @@ fn hydrate_unit_from_row(row: &Row<'_>) -> SqlResult<Unit> {
         corroboration_count: row.get::<_, i64>(17)? as u32,
         links: serde_json::from_str(&links_json).unwrap_or_default(),
         contexts: serde_json::from_str(&contexts_json).unwrap_or_default(),
-        is_process_unit: false, // Default to false for legacy data, can be migrated later if needed
+        is_process_unit: false,
+        content_lower,
+        content_fingerprint,
     })
 }
 

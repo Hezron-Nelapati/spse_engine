@@ -392,10 +392,22 @@ fn prepare_gpu_candidates(
     let recent_unit_ids: HashSet<_> = sequence.recent_unit_ids.iter().copied().collect();
     let task_entities: Vec<_> = sequence.task_entities.iter().map(|e| e.to_lowercase()).collect();
 
+    // Pre-compute summary_lower once
+    let summary_lower = if !context.summary_lower.is_empty() {
+        &context.summary_lower
+    } else {
+        &context.summary
+    };
+
     candidates
         .iter()
         .map(|unit| {
-            let lowered = unit.content.to_lowercase();
+            // Use pre-computed content_lower with fallback
+            let lowered: std::borrow::Cow<str> = if !unit.content_lower.is_empty() {
+                std::borrow::Cow::Borrowed(&unit.content_lower)
+            } else {
+                std::borrow::Cow::Owned(unit.content.to_lowercase())
+            };
             
             let spatial_fit = if merged_candidate_ids.contains(&unit.id) {
                 0.9
@@ -404,11 +416,11 @@ fn prepare_gpu_candidates(
             };
 
             let level_mult = level_multiplier(unit.level);
-            let context_fit = context_match(&lowered, context) * level_mult;
+            let context_fit = context_match(&lowered, summary_lower) * level_mult;
             
             let sequence_fit = if recent_unit_ids.contains(&unit.id) {
                 0.95 * level_mult
-            } else if task_entities.iter().any(|e| lowered.contains(e)) {
+            } else if task_entities.iter().any(|e| lowered.contains(e.as_str())) {
                 0.65 * level_mult
             } else {
                 0.25 * level_mult
@@ -451,8 +463,8 @@ fn level_multiplier(level: crate::types::UnitLevel) -> f32 {
     }
 }
 
-fn context_match(lowered: &str, context: &ContextMatrix) -> f32 {
-    if context.summary.contains(lowered) {
+fn context_match(lowered: &str, summary_lower: &str) -> f32 {
+    if summary_lower.contains(lowered) {
         0.9
     } else {
         0.3

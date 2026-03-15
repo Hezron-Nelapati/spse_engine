@@ -1,6 +1,7 @@
 use crate::config::ScoringWeights;
 use crate::types::{
     ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit, UnitLevel,
+    text_fingerprint,
 };
 use nalgebra::SVector;
 use rayon::prelude::*;
@@ -82,13 +83,19 @@ impl CandidateScorer {
             .map(|entity| entity.to_lowercase())
             .collect::<Vec<_>>();
         
-        // Extract query terms from context summary first (trained/dynamic intent resolution)
-        // Fallback to original query for untrained cases
-        let query_terms: Vec<String> = if !context.summary.is_empty() {
-            context.summary
+        // Pre-compute summary_lower once (use cached if available)
+        let summary_lower = if !context.summary_lower.is_empty() {
+            context.summary_lower.clone()
+        } else {
+            context.summary.to_lowercase()
+        };
+
+        // Extract query terms from summary_lower (already lowercase, no extra alloc)
+        let query_terms: Vec<String> = if !summary_lower.is_empty() && summary_lower != "no active context" {
+            summary_lower
                 .split_whitespace()
                 .take(10)
-                .map(|s| s.to_lowercase())
+                .map(|s| s.to_string())
                 .collect()
         } else {
             original_query
@@ -96,18 +103,51 @@ impl CandidateScorer {
                 .unwrap_or_default()
         };
 
+        // Pre-compute evidence document lowercase strings once for all candidates
+        let evidence_lower: Vec<String> = merged.evidence.documents.iter()
+            .map(|doc| doc.normalized_content.to_lowercase())
+            .collect();
+        let evidence_trust = merged.evidence.average_trust;
+        let evidence_support_base = merged.evidence_support;
+
+        // Pre-compute cell fingerprints once (use cached if available)
+        let cell_fingerprints: &[u64] = if !context.cell_fingerprints.is_empty() {
+            &context.cell_fingerprints
+        } else {
+            &[]
+        };
+        let cell_content_lower: Vec<String> = if !context.cell_content_lower.is_empty() {
+            context.cell_content_lower.clone()
+        } else {
+            context.cells.iter().map(|c| c.content.to_lowercase()).collect()
+        };
+
         let score_one = |unit: &Unit| -> ScoredCandidate {
-            let lowered = unit.content.to_lowercase();
+            // Use pre-computed content_lower; fallback for units without it
+            let lowered: std::borrow::Cow<str> = if !unit.content_lower.is_empty() {
+                std::borrow::Cow::Borrowed(&unit.content_lower)
+            } else {
+                std::borrow::Cow::Owned(unit.content.to_lowercase())
+            };
+            let fp = if unit.content_fingerprint != 0 {
+                unit.content_fingerprint
+            } else {
+                text_fingerprint(&lowered)
+            };
+
             let spatial_fit = if merged_candidate_ids.contains(&unit.id) {
                 0.9
             } else {
                 0.35
             };
             let level_multiplier = level_multiplier(unit.level);
-            let context_fit = context_match(&lowered, context) * level_multiplier;
+
+            // Context match using pre-computed fingerprints (O(1) per cell instead of string cmp)
+            let context_fit = context_match_precomputed(&lowered, fp, cell_fingerprints, &cell_content_lower, &summary_lower) * level_multiplier;
+
             let sequence_fit = if recent_unit_ids.contains(&unit.id) {
                 0.95 * level_multiplier
-            } else if task_entities.iter().any(|entity| lowered.contains(entity)) {
+            } else if task_entities.iter().any(|entity| lowered.contains(entity.as_str())) {
                 0.65 * level_multiplier
             } else {
                 0.25 * level_multiplier
@@ -116,7 +156,9 @@ impl CandidateScorer {
                 ((unit.links.len() as f32 / 5.0).clamp(0.0, 1.0)) * level_multiplier;
             let utility_fit = unit.utility_score.clamp(0.0, 1.0) * level_multiplier;
             let confidence_fit = ((unit.confidence + unit.trust_score) / 2.0).clamp(0.0, 1.0);
-            let evidence_support = evidence_match(&lowered, merged) * level_multiplier;
+
+            // Evidence match using pre-computed lowercase strings
+            let evidence_support = evidence_match_precomputed(&lowered, &evidence_lower, evidence_trust, evidence_support_base) * level_multiplier;
 
             // Exact match bonus: prioritize candidates that exactly match query terms
             // This helps disambiguate "Donald Trump" from "Donald Trump Jr."
@@ -203,31 +245,41 @@ fn scoring_weight_vector(weights: &ScoringWeights) -> SVector<f32, 7> {
     ])
 }
 
-fn context_match(lowered: &str, context: &ContextMatrix) -> f32 {
-    if context
-        .cells
-        .iter()
-        .any(|cell| cell.content.to_lowercase() == lowered)
-    {
+/// Context match using pre-computed fingerprints and lowercase strings.
+/// Fingerprint equality is checked first (O(1) integer cmp), with string fallback for contains.
+fn context_match_precomputed(
+    lowered: &str,
+    fp: u64,
+    cell_fingerprints: &[u64],
+    cell_content_lower: &[String],
+    summary_lower: &str,
+) -> f32 {
+    // O(1) integer equality check per cell via fingerprints
+    if !cell_fingerprints.is_empty() {
+        if cell_fingerprints.iter().any(|&cfp| cfp == fp) {
+            return 1.0;
+        }
+    } else if cell_content_lower.iter().any(|cl| cl == lowered) {
         return 1.0;
     }
-    if context.summary.to_lowercase().contains(lowered) {
+    if summary_lower.contains(lowered) {
         return 0.75;
     }
     0.3
 }
 
-fn evidence_match(lowered: &str, merged: &MergedState) -> f32 {
-    let mentioned = merged
-        .evidence
-        .documents
-        .iter()
-        .any(|doc| doc.normalized_content.to_lowercase().contains(lowered));
-
+/// Evidence match using pre-computed lowercase document strings.
+fn evidence_match_precomputed(
+    lowered: &str,
+    evidence_lower: &[String],
+    average_trust: f32,
+    evidence_support_base: f32,
+) -> f32 {
+    let mentioned = evidence_lower.iter().any(|doc| doc.contains(lowered));
     let corroboration_bonus = if mentioned {
-        0.45 + (merged.evidence.average_trust * 0.4)
+        0.45 + (average_trust * 0.4)
     } else {
-        merged.evidence_support * 0.2
+        evidence_support_base * 0.2
     };
     corroboration_bonus.clamp(0.0, 1.0)
 }

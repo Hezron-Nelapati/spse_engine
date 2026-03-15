@@ -3,6 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// FxHash-style fingerprint for fast text equality checks.
+/// Converts text to a u64 hash suitable for O(1) comparisons.
+pub fn text_fingerprint(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for byte in s.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
@@ -268,6 +279,12 @@ pub struct Unit {
     /// Default: false (content unit)
     #[serde(default)]
     pub is_process_unit: bool,
+    /// Pre-computed lowercase content for hot-path scoring (avoids repeated to_lowercase)
+    #[serde(skip)]
+    pub content_lower: String,
+    /// Pre-computed FNV fingerprint of content_lower for O(1) equality checks
+    #[serde(skip)]
+    pub content_fingerprint: u64,
 }
 
 impl Unit {
@@ -280,6 +297,8 @@ impl Unit {
         semantic_position: [f32; 3],
     ) -> Self {
         let now = Utc::now();
+        let content_lower = content.to_lowercase();
+        let content_fingerprint = text_fingerprint(&content_lower);
         Self {
             id: Uuid::new_v4(),
             content,
@@ -300,6 +319,16 @@ impl Unit {
             links: Vec::new(),
             contexts: Vec::new(),
             is_process_unit: false,
+            content_lower,
+            content_fingerprint,
+        }
+    }
+
+    /// Ensure pre-computed fields are populated (call after deserialization or struct literal construction)
+    pub fn ensure_precomputed(&mut self) {
+        if self.content_lower.is_empty() && !self.content.is_empty() {
+            self.content_lower = self.content.to_lowercase();
+            self.content_fingerprint = text_fingerprint(&self.content_lower);
         }
     }
 }
@@ -327,6 +356,8 @@ impl Default for Unit {
             links: Vec::new(),
             contexts: Vec::new(),
             is_process_unit: false,
+            content_lower: String::new(),
+            content_fingerprint: 0,
         }
     }
 }
@@ -377,6 +408,24 @@ pub struct ContextCell {
 pub struct ContextMatrix {
     pub cells: Vec<ContextCell>,
     pub summary: String,
+    /// Pre-computed lowercase of summary (avoids repeated to_lowercase in scoring)
+    #[serde(skip)]
+    pub summary_lower: String,
+    /// Pre-computed lowercase of each cell's content (parallel to cells vec)
+    #[serde(skip)]
+    pub cell_content_lower: Vec<String>,
+    /// Pre-computed fingerprints of each cell's lowered content for O(1) equality checks
+    #[serde(skip)]
+    pub cell_fingerprints: Vec<u64>,
+}
+
+impl ContextMatrix {
+    /// Populate pre-computed lowercase and fingerprint fields. Call after construction.
+    pub fn precompute(&mut self) {
+        self.summary_lower = self.summary.to_lowercase();
+        self.cell_content_lower = self.cells.iter().map(|c| c.content.to_lowercase()).collect();
+        self.cell_fingerprints = self.cell_content_lower.iter().map(|s| text_fingerprint(s)).collect();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
