@@ -1,8 +1,174 @@
 use crate::config::EngineConfig;
 use crate::open_sources;
-use crate::types::{TrainingExecutionMode, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, MemoryType, MemoryChannel, SourceKind};
+use crate::types::{TrainingExecutionMode, TrainingJobStatus, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, MemoryType, MemoryChannel, SourceKind};
 use crate::memory::store::MemoryStore;
+use chrono::Utc;
+use serde::Serialize;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 use uuid::Uuid;
+
+/// Per-run training logger that writes structured output to a dedicated folder.
+///
+/// Folder structure:
+/// ```text
+/// training_jobs/
+///   <job_id>/
+///     status.json       - current/final job status
+///     progress.log      - human-readable timestamped progress
+///     telemetry.jsonl   - per-batch metrics as JSON lines
+/// ```
+pub struct TrainingRunLogger {
+    run_dir: PathBuf,
+    progress_file: Option<std::fs::File>,
+    telemetry_file: Option<std::fs::File>,
+    run_start: Instant,
+    last_print: Instant,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchTelemetry {
+    pub timestamp: String,
+    pub source: String,
+    pub phase: String,
+    pub batch_index: u64,
+    pub examples_ingested: u64,
+    pub units_created: u64,
+    pub bytes_read: u64,
+    pub batch_duration_ms: u64,
+    pub examples_per_sec: f64,
+    pub units_per_sec: f64,
+    pub cumulative_examples: u64,
+    pub cumulative_units: u64,
+    pub elapsed_sec: f64,
+}
+
+impl TrainingRunLogger {
+    /// Create a new logger for a training run. Creates the folder structure immediately.
+    pub fn new(base_dir: &Path, job_id: &str) -> Self {
+        let run_dir = base_dir.join("training_jobs").join(job_id);
+        let _ = fs::create_dir_all(&run_dir);
+
+        let progress_file = fs::File::create(run_dir.join("progress.log")).ok();
+        let telemetry_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(run_dir.join("telemetry.jsonl"))
+            .ok();
+
+        let now = Instant::now();
+        let mut logger = Self {
+            run_dir,
+            progress_file,
+            telemetry_file,
+            run_start: now,
+            last_print: now,
+        };
+        logger.log_progress(&format!(
+            "[{}] Training run started: {}",
+            Utc::now().format("%H:%M:%S"),
+            job_id,
+        ));
+        logger
+    }
+
+    /// Write the current job status to status.json in the run folder.
+    pub fn write_status(&self, status: &TrainingJobStatus) {
+        let path = self.run_dir.join("status.json");
+        if let Ok(json) = serde_json::to_string_pretty(status) {
+            let tmp = path.with_extension("json.tmp");
+            if let Ok(mut f) = fs::File::create(&tmp) {
+                let _ = f.write_all(json.as_bytes());
+                let _ = f.sync_all();
+                let _ = fs::rename(&tmp, &path);
+            }
+        }
+    }
+
+    /// Log a human-readable progress line to both stderr and progress.log.
+    pub fn log_progress(&mut self, msg: &str) {
+        eprintln!("{}", msg);
+        if let Some(ref mut f) = self.progress_file {
+            let _ = writeln!(f, "{}", msg);
+            let _ = f.flush();
+        }
+    }
+
+    /// Log a batch telemetry record to telemetry.jsonl.
+    pub fn log_telemetry(&mut self, record: &BatchTelemetry) {
+        if let Some(ref mut f) = self.telemetry_file {
+            if let Ok(json) = serde_json::to_string(record) {
+                let _ = writeln!(f, "{}", json);
+                let _ = f.flush();
+            }
+        }
+    }
+
+    /// Log batch progress with rate metrics. Prints every 2 seconds or on force.
+    pub fn log_batch_progress(
+        &mut self,
+        source_name: &str,
+        phase: &str,
+        batch_index: u64,
+        examples_ingested: u64,
+        units_created: u64,
+        bytes_read: u64,
+        batch_duration: std::time::Duration,
+        force: bool,
+    ) {
+        let elapsed = self.run_start.elapsed();
+        let since_print = self.last_print.elapsed();
+
+        // Write telemetry for every batch
+        let batch_ms = batch_duration.as_millis() as u64;
+        let record = BatchTelemetry {
+            timestamp: Utc::now().to_rfc3339(),
+            source: source_name.to_string(),
+            phase: phase.to_string(),
+            batch_index,
+            examples_ingested,
+            units_created,
+            bytes_read,
+            batch_duration_ms: batch_ms,
+            examples_per_sec: examples_ingested as f64 / elapsed.as_secs_f64().max(0.001),
+            units_per_sec: units_created as f64 / elapsed.as_secs_f64().max(0.001),
+            cumulative_examples: examples_ingested,
+            cumulative_units: units_created,
+            elapsed_sec: elapsed.as_secs_f64(),
+        };
+        self.log_telemetry(&record);
+
+        // Print human-readable progress every 2 seconds or when forced
+        if force || since_print.as_secs() >= 2 {
+            let rate = examples_ingested as f64 / elapsed.as_secs_f64().max(0.001);
+            let mb = bytes_read as f64 / 1_048_576.0;
+            let msg = format!(
+                "[{}] [{}] {} examples, {} units, {:.1} MB, {:.0} ex/s, {:.1}s elapsed",
+                Utc::now().format("%H:%M:%S"),
+                source_name,
+                examples_ingested,
+                units_created,
+                mb,
+                rate,
+                elapsed.as_secs_f64(),
+            );
+            self.log_progress(&msg);
+            self.last_print = Instant::now();
+        }
+    }
+
+    /// Return the run directory path.
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    /// Total elapsed time since run start.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.run_start.elapsed()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingScope {

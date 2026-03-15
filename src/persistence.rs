@@ -33,6 +33,7 @@ pub struct Db {
     snapshot_path: PathBuf,
     legacy_snapshot_path: PathBuf,
     jobs_path: PathBuf,
+    jobs_dir: PathBuf,
 }
 
 impl Db {
@@ -148,6 +149,7 @@ impl Db {
             snapshot_path: parent.join("memory_snapshot.msgpack"),
             legacy_snapshot_path: parent.join("memory_snapshot.json"),
             jobs_path: parent.join("training_jobs.json"),
+            jobs_dir: parent.join("training_jobs"),
         })
     }
 
@@ -322,21 +324,56 @@ impl Db {
     }
 
     pub fn save_training_jobs(&self, jobs: &[TrainingJobStatus]) -> std::io::Result<PathBuf> {
-        let json = serde_json::to_string_pretty(jobs).unwrap_or_else(|_| "[]".to_string());
-        let tmp_path = self.jobs_path.with_extension("json.tmp");
-        let mut file = File::create(&tmp_path)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp_path, &self.jobs_path)?;
-        Ok(self.jobs_path.clone())
+        // Write per-job status.json into training_jobs/<job_id>/
+        let _ = fs::create_dir_all(&self.jobs_dir);
+        for job in jobs {
+            let job_dir = self.jobs_dir.join(&job.job_id);
+            let _ = fs::create_dir_all(&job_dir);
+            let status_path = job_dir.join("status.json");
+            let tmp = status_path.with_extension("json.tmp");
+            let mut file = File::create(&tmp)?;
+            let json = serde_json::to_string_pretty(job).unwrap_or_else(|_| "{}".to_string());
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&tmp, &status_path)?;
+        }
+        Ok(self.jobs_dir.clone())
     }
 
     pub fn load_training_jobs(&self) -> std::io::Result<Vec<TrainingJobStatus>> {
-        if !self.jobs_path.exists() {
-            return Ok(Vec::new());
+        let mut jobs = Vec::new();
+
+        // Load from folder-based structure
+        if self.jobs_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&self.jobs_dir) {
+                for entry in entries.flatten() {
+                    let status_path = entry.path().join("status.json");
+                    if status_path.exists() {
+                        if let Ok(raw) = fs::read_to_string(&status_path) {
+                            if let Ok(job) = serde_json::from_str::<TrainingJobStatus>(&raw) {
+                                jobs.push(job);
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let raw = fs::read_to_string(&self.jobs_path)?;
-        serde_json::from_str::<Vec<TrainingJobStatus>>(&raw).map_err(io::Error::other)
+
+        // Backward compat: also load from legacy training_jobs.json
+        if jobs.is_empty() && self.jobs_path.exists() {
+            if let Ok(raw) = fs::read_to_string(&self.jobs_path) {
+                if let Ok(legacy) = serde_json::from_str::<Vec<TrainingJobStatus>>(&raw) {
+                    jobs = legacy;
+                }
+            }
+        }
+
+        Ok(jobs)
+    }
+
+    /// Return the base directory (parent of db file) for training run logger.
+    pub fn base_dir(&self) -> &Path {
+        self.jobs_dir.parent().unwrap_or_else(|| Path::new("."))
     }
 
     pub fn snapshot_path(&self) -> PathBuf {

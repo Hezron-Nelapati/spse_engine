@@ -770,6 +770,13 @@ impl Engine {
             warnings: Vec::new(),
         };
 
+        // Initialize per-run logger: creates training_jobs/<job_id>/ folder
+        let base_dir = {
+            let memory = self.memory.lock().expect("memory mutex poisoned");
+            memory.db().base_dir().to_path_buf()
+        };
+        let mut run_logger = training::TrainingRunLogger::new(&base_dir, &job_id);
+        run_logger.write_status(&status);
         self.store_job(status.clone());
 
         let plan_start = Instant::now();
@@ -782,15 +789,23 @@ impl Engine {
                 ps.status = JobState::Processing;
             }
             status.active_phase = Some(phase.phase);
+            run_logger.write_status(&status);
             self.store_job(status.clone());
 
-            eprintln!("[training] phase {:?} — {} sources", phase.phase, phase.sources.len());
+            let phase_label = format!("{:?}", phase.phase);
+            run_logger.log_progress(&format!(
+                "[training] phase {} — {} sources",
+                phase_label,
+                phase.sources.len()
+            ));
 
             for (src_idx, source) in phase.sources.iter().enumerate() {
                 let resolved = match crate::open_sources::resolve_training_source(source) {
                     Ok(r) => r,
                     Err(e) => {
-                        status.warnings.push(format!("source resolve error: {e}"));
+                        let msg = format!("source resolve error: {e}");
+                        run_logger.log_progress(&format!("  WARNING: {}", msg));
+                        status.warnings.push(msg);
                         continue;
                     }
                 };
@@ -798,19 +813,17 @@ impl Engine {
                 let file_path = match resolved.value.as_deref() {
                     Some(p) => std::path::PathBuf::from(p),
                     None => {
-                        status.warnings.push(format!(
-                            "source {:?} has no file path",
-                            resolved.name
-                        ));
+                        let msg = format!("source {:?} has no file path", resolved.name);
+                        run_logger.log_progress(&format!("  WARNING: {}", msg));
+                        status.warnings.push(msg);
                         continue;
                     }
                 };
 
                 if !file_path.exists() {
-                    status.warnings.push(format!(
-                        "source file not found: {}",
-                        file_path.display()
-                    ));
+                    let msg = format!("source file not found: {}", file_path.display());
+                    run_logger.log_progress(&format!("  WARNING: {}", msg));
+                    status.warnings.push(msg);
                     continue;
                 }
 
@@ -819,18 +832,20 @@ impl Engine {
                 let channels = resolved.memory_channels.clone().unwrap_or_else(|| vec![MemoryChannel::Main]);
                 let source_name = resolved.name.clone().unwrap_or_default();
 
-                eprintln!(
+                run_logger.log_progress(&format!(
                     "  [{}] reading {} (limit={}, memory={:?})",
                     source_name,
                     file_path.display(),
                     item_limit,
                     target_memory
-                );
+                ));
 
                 let file = match std::fs::File::open(&file_path) {
                     Ok(f) => f,
                     Err(e) => {
-                        status.warnings.push(format!("failed to open {}: {e}", file_path.display()));
+                        let msg = format!("failed to open {}: {e}", file_path.display());
+                        run_logger.log_progress(&format!("  ERROR: {}", msg));
+                        status.warnings.push(msg);
                         continue;
                     }
                 };
@@ -840,6 +855,7 @@ impl Engine {
                 let mut examples_ingested: u64 = 0;
                 let mut units_created: u64 = 0;
                 let mut bytes_read: u64 = 0;
+                let mut batch_index: u64 = 0;
                 let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
                 let training_batch_size: usize = self.config.builder.training_batch_size.unwrap_or(500) as usize;
 
@@ -872,6 +888,8 @@ impl Engine {
                     line_batch.push(line);
 
                     if line_batch.len() >= training_batch_size || done {
+                        let batch_start = Instant::now();
+
                         // Parallel: parse JSON + build units for this batch
                         let config_ref = &self.config.builder;
                         let source_name_ref = &source_name;
@@ -939,15 +957,19 @@ impl Engine {
 
                         examples_ingested += prepared.len() as u64;
                         line_batch.clear();
+                        batch_index += 1;
 
-                        if examples_ingested % 10_000 < training_batch_size as u64 {
-                            eprintln!(
-                                "    {} examples, {} units, {:.1} MB",
-                                examples_ingested,
-                                units_created,
-                                bytes_read as f64 / 1_048_576.0,
-                            );
-                        }
+                        // Log progress with telemetry for every batch
+                        run_logger.log_batch_progress(
+                            &source_name,
+                            &phase_label,
+                            batch_index,
+                            examples_ingested,
+                            units_created,
+                            bytes_read,
+                            batch_start.elapsed(),
+                            done, // force print on last batch
+                        );
 
                         if done {
                             break;
@@ -964,10 +986,13 @@ impl Engine {
                 total_examples += examples_ingested;
                 total_units += units_created;
 
-                eprintln!(
-                    "  [{}] done: {} examples, {} units",
-                    source_name, examples_ingested, units_created
-                );
+                run_logger.log_progress(&format!(
+                    "  [{}] done: {} examples, {} units in {:.1}s",
+                    source_name,
+                    examples_ingested,
+                    units_created,
+                    run_logger.elapsed().as_secs_f64(),
+                ));
 
                 if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
                     ps.sources_processed = src_idx + 1;
@@ -976,6 +1001,7 @@ impl Engine {
                 }
                 status.progress.sources_total = plan.phases.iter().map(|p| p.sources.len()).sum();
                 status.progress.sources_processed += 1;
+                run_logger.write_status(&status);
                 self.store_job(status.clone());
             }
 
@@ -985,14 +1011,15 @@ impl Engine {
                 let report = memory.prune_to_memory_budget(
                     (phase.options.max_memory_delta_mb * 1024.0) as i64,
                 );
-                eprintln!(
+                run_logger.log_progress(&format!(
                     "  [governance] pruned {} units, {} candidates",
                     report.pruned_units, report.pruned_candidates
-                );
+                ));
             }
 
             // Rebuild spatial index
             {
+                run_logger.log_progress("  [spatial] rebuilding index...");
                 let memory = self.memory.lock().expect("memory mutex poisoned");
                 let all_units = memory.all_units();
                 let routing = route_units(
@@ -1012,11 +1039,12 @@ impl Engine {
             }
 
             let phase_elapsed = phase_start.elapsed();
-            eprintln!(
-                "[training] phase {:?} complete in {:.1}s",
-                phase.phase,
+            run_logger.log_progress(&format!(
+                "[training] phase {} complete in {:.1}s",
+                phase_label,
                 phase_elapsed.as_secs_f64()
-            );
+            ));
+            run_logger.write_status(&status);
         }
 
         let total_elapsed = plan_start.elapsed();
@@ -1029,12 +1057,17 @@ impl Engine {
         } else {
             0
         };
+        run_logger.write_status(&status);
         self.store_job(status.clone());
 
-        eprintln!(
+        run_logger.log_progress(&format!(
             "[training] complete: {} examples, {} units in {:.1}s",
             total_examples, total_units, total_elapsed.as_secs_f64()
-        );
+        ));
+        run_logger.log_progress(&format!(
+            "[training] output: {}",
+            run_logger.run_dir().display()
+        ));
 
         status
     }
