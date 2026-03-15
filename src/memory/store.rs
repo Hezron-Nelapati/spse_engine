@@ -1119,7 +1119,6 @@ impl MemoryStore {
         {
             let anchor_reuse_threshold = self.anchor_reuse_threshold;
             let anchor_salience_threshold = self.anchor_salience_threshold;
-            let mut persisted = None;
             if let Some(existing) = self.cache.get_mut(&id) {
                 existing.frequency += activation.frequency.max(1);
                 existing.utility_score =
@@ -1142,11 +1141,15 @@ impl MemoryStore {
                     anchor_reuse_threshold,
                     anchor_salience_threshold,
                 );
-                persisted = Some(existing.clone());
-            }
-            if let Some(unit) = persisted.as_ref() {
-                self.reindex_channels(unit);
-                self.persist(unit);
+                // In training mode: skip clone + reindex + persist.
+                // All updates are already in cache (source of truth).
+                // Channels don't change within a source, so reindex is no-op.
+                if !self.training_mode {
+                    let unit_clone = existing.clone();
+                    let _ = existing;
+                    self.reindex_channels(&unit_clone);
+                    self.persist(&unit_clone);
+                }
             }
             return ActivationOutcome::Active { id, is_new: false };
         } else if bloom_maybe {
@@ -1220,7 +1223,6 @@ impl MemoryStore {
         {
             let anchor_reuse_threshold = self.anchor_reuse_threshold;
             let anchor_salience_threshold = self.anchor_salience_threshold;
-            let mut persisted = None;
             if let Some(existing) = self.cache.get_mut(&id) {
                 existing.frequency += activation.frequency.max(1);
                 // Apply utility boost for StagingEpisodic units
@@ -1243,11 +1245,12 @@ impl MemoryStore {
                     anchor_reuse_threshold,
                     anchor_salience_threshold,
                 );
-                persisted = Some(existing.clone());
-            }
-            if let Some(unit) = persisted.as_ref() {
-                self.reindex_channels(unit);
-                self.persist(unit);
+                if !self.training_mode {
+                    let unit_clone = existing.clone();
+                    let _ = existing;
+                    self.reindex_channels(&unit_clone);
+                    self.persist(&unit_clone);
+                }
             }
             return ActivationOutcome::Active { id, is_new: false };
         } else if bloom_maybe {
