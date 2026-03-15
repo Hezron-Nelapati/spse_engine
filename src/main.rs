@@ -475,6 +475,8 @@ fn print_dry_run_report(report: &DryRunReport) {
         report.map_stable,
         report.inference_ok,
         report.inference_latency_ms,
+        report.latency_per_token_ms,
+    );
 }
 
 fn parse_execution_mode(value: &str) -> TrainingExecutionMode {

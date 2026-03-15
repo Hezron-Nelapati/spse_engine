@@ -541,6 +541,7 @@ fn hydrate_unit_from_row(row: &Row<'_>) -> SqlResult<Unit> {
         corroboration_count: row.get::<_, i64>(17)? as u32,
         links: serde_json::from_str(&links_json).unwrap_or_default(),
         contexts: serde_json::from_str(&contexts_json).unwrap_or_default(),
+        is_process_unit: false, // Default to false for legacy data, can be migrated later if needed
     })
 }
 

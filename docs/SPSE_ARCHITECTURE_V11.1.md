@@ -17,13 +17,16 @@
 5. [Core Data Structures](#5-core-data-structures)
 6. [Configuration System](#6-configuration-system)
 7. [Memory Architecture](#7-memory-architecture)
-8. [API Specifications](#8-api-specifications)
-9. [Telemetry & Observability](#9-telemetry--observability)
-10. [Deployment Architecture](#10-deployment-architecture)
-11. [Security Considerations](#11-security-considerations)
-12. [Performance Targets](#12-performance-targets)
-13. [Implementation Roadmap](#13-implementation-roadmap)
-14. [Risk Mitigation](#14-risk-mitigation)
+8. [Classification System](#8-classification-system)
+9. [GPU Acceleration](#9-gpu-acceleration)
+10. [Unified Training Pipeline](#10-unified-training-pipeline)
+11. [API Specifications](#11-api-specifications)
+12. [Telemetry & Observability](#12-telemetry--observability)
+13. [Deployment Architecture](#13-deployment-architecture)
+14. [Security Considerations](#14-security-considerations)
+15. [Performance Targets](#15-performance-targets)
+16. [Implementation Roadmap](#16-implementation-roadmap)
+17. [Risk Mitigation](#17-risk-mitigation)
 
 ---
 
@@ -210,26 +213,32 @@ pub struct UnitBuilderConfig {
 **Responsibility:** Group units into hierarchy levels, extract anchors and entities.
 
 ```rust
-pub struct HierarchyLevel {
-    pub level: usize,
-    pub units: Vec<Unit>,
-    pub anchors: Vec<Anchor>,
-    pub entities: Vec<Entity>,
+pub struct UnitHierarchy {
+    pub levels: BTreeMap<String, Vec<ActivatedUnit>>,
+    pub anchors: Vec<String>,
+    pub entities: Vec<String>,
 }
 
-pub struct Anchor {
-    pub unit_id: Uuid,
-    pub anchor_type: AnchorType,
-    pub trust_score: f32,
+pub struct ActivatedUnit {
+    pub content: String,
+    pub normalized: String,
+    pub level: UnitLevel,
+    pub utility_score: f32,
+    pub frequency: u64,
+    pub salience: f32,
+    pub confidence: f32,
+    pub context_hint: String,
 }
 
-pub enum AnchorType {
-    MathematicalConstant,
-    UserIdentity,
-    VerifiedCodeSyntax,
-    FactualStatement,
+pub enum UnitLevel {
+    Word,
+    Phrase,
+    Sentence,
+    Paragraph,
 }
 ```
+
+Note: Anchors are tracked as strings (content) in the hierarchy, not as separate structs. Units with `anchor_status: true` are protected from creative drift.
 
 ---
 
@@ -239,22 +248,29 @@ pub enum AnchorType {
 
 ```rust
 pub struct MemoryStore {
-    core_units: HashMap<Uuid, Unit>,
-    working_units: HashMap<Uuid, Unit>,
-    intent_channel: HashMap<Uuid, Unit>,
-    governance: GovernanceConfig,
+    cache: HashMap<Uuid, Unit>,
+    content_index: HashMap<String, Uuid>,
+    channel_index: HashMap<MemoryChannel, HashSet<Uuid>>,
+    candidate_cache: HashMap<String, UnitCandidate>,
+    sequence_state: SequenceState,
+    anchor_reuse_threshold: u64,
+    core_promotion_threshold: u64,
+    promotion_min_corroborations: u32,
+    prune_utility_threshold: f32,
+    episodic_decay_days: u64,
+    // ... additional config fields
 }
 
 pub enum MemoryChannel {
-    Core,      // High-trust, persistent
-    Working,   // Session-scoped
-    Intent,    // Intent-specific, isolated
+    #[default]
+    Main,      // Standard memory path
+    Intent,    // Intent-specific, isolated from Core promotion
+    Reasoning, // Internal reasoning loop, isolated
 }
 
 pub enum MemoryType {
-    Core,
-    Working,
-    Ephemeral,
+    Episodic,  // Session-scoped, decayed over time
+    Core,      // High-trust, persistent
 }
 ```
 
@@ -297,15 +313,20 @@ pub enum TraversalMode {
 **Responsibility:** Maintain context matrix, sequence state, task entities.
 
 ```rust
-pub struct ContextManager {
-    context_matrix: Vec<Vec<f32>>,
-    sequence_state: SequenceState,
-    task_entities: Vec<Entity>,
-    style_state: SessionStyleState,
+pub struct ContextMatrix {
+    pub cells: Vec<ContextCell>,
+    pub summary: String,
+}
+
+pub struct SequenceState {
+    pub recent_unit_ids: Vec<Uuid>,
+    pub anchor_ids: Vec<Uuid>,
+    pub task_entities: Vec<String>,
+    pub turn_index: u64,
 }
 
 pub struct SessionStyleState {
-    pub active_style_anchor_id: Option<Uuid>,
+    pub active_style_anchor: Option<StyleAnchor>,
     pub decay_rate: f32,  // 0.0 = permanent for session
 }
 ```
@@ -323,13 +344,31 @@ pub struct IntentDetector {
 }
 
 pub enum IntentKind {
-    Factual,
-    Creative,
-    Brainstorm,
+    Greeting,
+    Gratitude,
+    Farewell,
+    Help,
+    Clarify,
+    Rewrite,
+    Verify,
+    Continue,
+    Forget,
+    Question,
+    Summarize,
+    Explain,
+    Compare,
+    Extract,
+    Analyze,
     Plan,
     Act,
+    Recommend,
+    Classify,
+    Translate,
+    Debug,
     Critique,
-    ComplexLogic,
+    Brainstorm,
+    #[default]
+    Unknown,
 }
 
 pub struct ToneInferrer {
@@ -338,11 +377,13 @@ pub struct ToneInferrer {
 }
 
 pub enum ToneKind {
+    #[default]
+    NeutralProfessional,
     Empathetic,
     Direct,
-    Exploratory,
     Technical,
-    NeutralProfessional,
+    Casual,
+    Formal,
 }
 ```
 
@@ -394,13 +435,13 @@ pub struct CandidateScorer {
 }
 
 pub struct ScoringWeights {
-    pub w_spatial: f32,
-    pub w_context: f32,
-    pub w_sequence: f32,
-    pub w_transition: f32,
-    pub w_utility: f32,
-    pub w_confidence: f32,
-    pub w_evidence: f32,
+    pub spatial: f32,
+    pub context: f32,
+    pub sequence: f32,
+    pub transition: f32,
+    pub utility: f32,
+    pub confidence: f32,
+    pub evidence: f32,
 }
 
 // Scoring Note:
@@ -458,24 +499,30 @@ pub struct FineResolver {
     config: FineResolverConfig,
 }
 
-pub struct ResolutionResult {
-    pub candidates: Vec<Candidate>,
-    pub confidence_score: f32,
-    pub needs_reasoning: bool,  // NEW: Signal to orchestrator
+pub struct ScoredCandidate {
+    pub unit_id: Uuid,
+    pub content: String,
+    pub score: f32,
+    pub breakdown: ScoreBreakdown,
+    pub memory_type: MemoryType,
 }
 
-// NEW: Anchor Validation Gate
-fn validate_against_anchors(&self, candidate: &Candidate, anchors: &[Anchor]) -> bool {
-    for anchor in anchors {
-        if anchor.trust_score > self.config.anchor_protection_strictness {
-            if candidate.contradicts(anchor) {
-                return false;  // Reject creative drift on high-trust anchors
-            }
-        }
-    }
-    true
+pub struct ResolvedCandidate {
+    pub unit_id: Uuid,
+    pub content: String,
+    pub score: f32,
+    pub mode: ResolverMode,
+    pub used_escape: bool,
+}
+
+pub enum ResolverMode {
+    Deterministic,
+    Balanced,
+    Exploratory,
 }
 ```
+
+**Anchor Validation:** Units with `anchor_status: true` are protected from creative drift. The resolver checks for contradictions against high-trust anchors before accepting creative candidates.
 
 ---
 
@@ -484,15 +531,17 @@ fn validate_against_anchors(&self, candidate: &Candidate, anchors: &[Anchor]) ->
 **Responsibility:** Finalize answer, **emit SilentThought for reasoning loop**.
 
 ```rust
-pub enum OutputType {
-    FinalAnswer(String),
-    SilentThought(String),  // Internal reasoning step
+pub struct DecodedOutput {
+    pub text: String,
+    pub grounded: bool,
 }
 
 pub struct ThoughtUnit {
     pub content: String,
     pub step: usize,
     pub internal_only: bool,  // true = hidden from user
+    pub confidence: f32,
+    pub created_at: DateTime<Utc>,
 }
 ```
 
@@ -504,11 +553,60 @@ pub struct ThoughtUnit {
 
 ```rust
 pub enum TelemetryEvent {
-    Calculation { layer: u8, operation: String, duration_ms: u64 },
-    DbPush { unit_id: Uuid, memory_type: MemoryType },
-    Retrieval { source: String, results: usize },
-    ReasoningStep { step: usize, thought: String, confidence: f32 },  // NEW
-    ConfidenceTrajectory { steps: Vec<f32> },  // NEW
+    /// Calculation event at layer boundary
+    Calculation {
+        layer: u8,
+        operation: String,
+        duration_ms: u64,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Database push event
+    DbPush {
+        unit_id: Uuid,
+        memory_type: MemoryType,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Retrieval event
+    Retrieval {
+        source: String,
+        results: usize,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Intent label event with channel tracking
+    IntentLabel {
+        label: IntentKind,
+        channel: MemoryChannel,
+        score: f32,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Reasoning step event
+    ReasoningStep {
+        step: usize,
+        thought: String,
+        confidence: f32,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Latency spike event
+    LatencySpike {
+        layer: u8,
+        latency_ms: u64,
+        threshold_ms: u64,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
+    /// Memory allocation event
+    MemoryAllocation {
+        allocated_kb: usize,
+        total_kb: usize,
+        limit_kb: usize,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
 }
 ```
 
@@ -645,28 +743,52 @@ impl Engine {
 pub struct Unit {
     pub id: Uuid,
     pub content: String,
-    pub embedding: Vec<f32>,
-    pub position: Vec3,
+    pub normalized: String,
+    pub level: UnitLevel,
+    pub frequency: u64,
+    pub utility_score: f32,
+    pub semantic_position: [f32; 3],
+    pub anchor_status: bool,
     pub memory_type: MemoryType,
     pub memory_channels: Vec<MemoryChannel>,
-    pub frequency: f32,
-    pub salience: f32,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub salience_score: f32,
+    pub confidence: f32,
     pub trust_score: f32,
-    pub created_at: u64,
-    pub last_accessed: u64,
-    pub metadata: HashMap<String, String>,
+    pub corroboration_count: u32,
+    pub links: Vec<Link>,
+    pub contexts: Vec<String>,
+    /// Process units are reasoning steps isolated from Core semantic space
+    /// GPU shaders confine these to Z = -1.0 subspace with 3x repulsion from content units
+    pub is_process_unit: bool,
+}
+
+pub enum UnitLevel {
+    Word,
+    Phrase,
+    Sentence,
+    Paragraph,
 }
 
 pub enum MemoryType {
-    Core,       // High-trust, persistent
-    Working,    // Session-scoped
-    Ephemeral,  // Temporary
+    Episodic,  // Session-scoped, decayed over time
+    Core,      // High-trust, persistent
 }
 
 pub enum MemoryChannel {
-    Core,
-    Working,
-    Intent,     // Isolated from Core promotion
+    #[default]
+    Main,      // Standard memory path
+    Intent,    // Intent-specific, isolated from Core promotion
+    Reasoning, // Internal reasoning loop, isolated
+}
+
+/// Memory target for training/ingestion (separate from MemoryType)
+pub enum MemoryTarget {
+    #[default]
+    StagingEpisodic,  // High utility, requires corroboration for Core promotion
+    Core,             // Direct to Core (only via consolidate_immediately)
+    Episodic,         // Standard episodic memory
 }
 ```
 
@@ -674,19 +796,11 @@ pub enum MemoryChannel {
 
 ```rust
 pub struct InputPacket {
-    pub raw_text: String,
+    pub original_text: String,
     pub normalized_text: String,
-    pub timestamp: u64,
-    pub source: InputSource,
-    pub session_id: Uuid,
-    pub trace_id: Uuid,
-}
-
-pub enum InputSource {
-    UserQuery,
-    SilentThought,
-    TrainingData,
-    ExternalRetrieval,
+    pub bytes: Vec<u8>,
+    pub training_mode: bool,
+    pub timestamp: DateTime<Utc>,
 }
 ```
 
@@ -694,11 +808,16 @@ pub enum InputSource {
 
 ```rust
 pub struct ThoughtUnit {
+    /// The thought content
     pub content: String,
+    /// Step number in reasoning loop (0-indexed)
     pub step: usize,
-    pub internal_only: bool,  // true = hidden from user
-    pub confidence_before: f32,
-    pub confidence_after: f32,
+    /// Whether this thought is internal-only (not shown to user)
+    pub internal_only: bool,
+    /// Confidence after this thought step
+    pub confidence: f32,
+    /// Timestamp when thought was generated
+    pub created_at: DateTime<Utc>,
 }
 ```
 
@@ -706,31 +825,120 @@ pub struct ThoughtUnit {
 
 ```rust
 pub struct StyleAnchor {
-    pub id: Uuid,
-    pub name: String,           // "Empathetic", "Direct", "Technical"
-    pub tone_kind: ToneKind,
-    pub exemplar_text: String,
-    pub style_vector: Vec<f32>,  // Semantic embedding of style
+    /// Tone kind this anchor represents
+    pub tone: ToneKind,
+    /// Semantic position in embedding space
+    pub embedding: [f32; 3],
+    /// Keywords associated with this style
+    pub keywords: Vec<String>,
+    /// Decay rate for session persistence (0.0 = persist for session)
+    pub decay_rate: f32,
 }
 ```
 
-### 5.5 Anchor
+### 5.5 Link
 
 ```rust
-pub struct Anchor {
-    pub unit_id: Uuid,
-    pub anchor_type: AnchorType,
-    pub trust_score: f32,
-    pub content: String,
+pub struct Link {
+    pub target_id: Uuid,
+    pub edge_type: EdgeType,
+    pub weight: f32,
 }
 
-pub enum AnchorType {
-    MathematicalConstant,   // Never drift (e.g., "2+2=4")
-    UserIdentity,           // Never drift (e.g., user's name)
-    VerifiedCodeSyntax,     // Never drift
-    FactualStatement,       // High trust, limited drift
+pub enum EdgeType {
+    Semantic,
+    Parent,
+    Child,
+    Sequence,
+    SourceEvidence,
 }
 ```
+
+Note: Units use `anchor_status: bool` flag rather than a separate Anchor struct. High-trust units with `anchor_status: true` are protected from creative drift.
+
+### 5.6 Reasoning Pattern System
+
+The engine implements a reasoning pattern system that isolates process units from core semantic space, enabling iterative reasoning without polluting the knowledge base.
+
+#### Process Units
+
+Process units are reasoning steps stored in the `Reasoning` memory channel, isolated from `Core`:
+
+- **Flag**: `is_process_unit: bool` on `Unit` struct
+- **Spatial Isolation**: GPU shaders confine process units to Z = -1.0 subspace
+- **Repulsion**: 3x repulsion multiplier between process and content units prevents drift
+- **Pruning Protection**: Process anchors registered via `register_process_anchor()` are never pruned
+
+#### Reasoning Types
+
+```rust
+pub enum ReasoningType {
+    #[default]
+    General,        // Step-by-step reasoning
+    Mathematical,   // Calculation (GSM8K style)
+    Logical,        // Deductive inference (ProofWriter style)
+    Explanatory,    // Why/how causal chains
+    Planning,       // Multi-step action sequences
+    Verification,   // Fact-checking with source tracing
+    Debugging,      // Error isolation and hypothesis testing
+    MultiHop,       // Multi-hop deduction across entities
+}
+```
+
+#### Reasoning Trace
+
+```rust
+pub struct ReasoningTrace {
+    pub steps: Vec<ReasoningStep>,
+    pub reasoning_type: ReasoningType,
+    pub confidence_trajectory: Vec<f32>,
+    pub entities: Vec<String>,
+    pub structure_hash: Option<u64>,
+}
+
+pub struct ReasoningStep {
+    pub content: String,
+    pub step_type: ReasoningStepType,
+    pub anchor_step: bool,
+    pub dependencies: Vec<usize>,
+    pub structure_hash: Option<u64>,
+}
+```
+
+#### Key Functions
+
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `reasoning_patterns_for_query()` | `memory/store.rs` | Retrieve matching patterns from memory |
+| `register_reasoning_pattern()` | `memory/store.rs` | Index a unit as a reasoning pattern |
+| `should_prune_unit()` | `memory/store.rs` | Pruning decision with anchor protection |
+| `adapt_reasoning_pattern()` | `engine.rs` | Adapt retrieved pattern to current context |
+| `ingest_reasoning_trace()` | `training.rs` | Convert trace to process units in memory |
+
+#### GPU Force Layout Integration
+
+The GPU-accelerated force layout handles process units:
+
+1. `GpuPosition` struct includes `is_process_unit: u32` field
+2. Shader applies 3x repulsion between process/content unit pairs
+3. Process units are constrained to Z = -1.0 subspace after each iteration
+4. Anchors (`is_anchor: u32`) remain fixed regardless of type
+
+#### Memory Channel Isolation
+
+Process units are ingested via `MemoryChannel::Reasoning`, not `MemoryChannel::Core`:
+
+```rust
+memory.ingest_hierarchy_with_channels(
+    &hierarchy,
+    SourceKind::UserInput,
+    &context,
+    MemoryType::Episodic,
+    &[MemoryChannel::Reasoning],  // Reasoning channel only
+);
+```
+
+This prevents reasoning artifacts from polluting the core knowledge base.
 
 ---
 
@@ -751,6 +959,7 @@ auto_inference:
     trigger_confidence_floor: 0.40  # Below this, system starts "thinking"
     max_internal_steps: 3           # Cap loops to save CPU on low-spec
     exit_confidence_threshold: 0.60
+    enable_thought_buffer_on_demand: true
     
   tone_inference:
     enabled: true
@@ -760,28 +969,51 @@ auto_inference:
     global_stochastic_floor: 0.15   # Enforce 15% drift
     anchor_protection_strictness: 0.95  # Never drift on high-trust anchors
 
-# Memory Configuration
-memory:
-  dynamic_allocation:
-    enable_thought_buffer_on_demand: true
+  dynamic_memory:
+    enabled: true
     base_memory_limit_mb: 350
     max_memory_limit_mb: 550
+    thought_buffer_size_kb: 64
 
 # Layer-Specific Configurations
 layer_2_unit_builder:
-  min_frequency_threshold: 0.01
-  max_unit_length: 100
-  salience_weight: 0.5
+  min_frequency_threshold: 2  # u64 - minimum frequency for unit activation
+  initial_utility_score: 0.50
+  edit_distance_cluster_threshold: 1
+  rolling_hash_window_sizes: [2, 3, 4, 5, 6, 7, 8]
+  max_activated_units: 96
+  punctuation_ratio_limit: 0.55
+  hash_base: 257
+  min_fragment_length: 4
+  utility_compression_gain_cap: 1.2
+  utility_span_weight: 0.45
+  utility_frequency_weight: 0.30
+  salience_base: 0.18
+  confidence_base: 0.22
 
 layer_5_semantic_map:
-  cell_size: 4.0
-  neighbor_limit: 50
-  escape_threshold: 0.3
+  preferred_spacing_k: 1.0
+  max_displacement_per_iteration: 1.75
+  convergence_tolerance: 0.001
+  max_layout_iterations: 24
+  energy_rollback_threshold: 3
+  attractive_force_coefficient: 1.0
+  repulsive_force_coefficient: 1.0
+  layout_boundary: 128.0
+  max_layout_units: 256
+  spatial_cell_size: 4.0
+  neighbor_radius: 6.0
 
 layer_9_retrieval_gating:
+  w_entropy: 0.35
+  w_recency: 0.25
+  w_disagreement: 0.20
+  w_cost: 0.20
   entropy_threshold: 0.72
   freshness_threshold: 0.65
-  cost_threshold: 0.5
+  disagreement_threshold: 0.30
+  decision_threshold: 0.50
+  cost_penalty: 0.10
 
 layer_14_candidate_scoring:
   w_spatial: 0.15
@@ -795,7 +1027,10 @@ layer_14_candidate_scoring:
 layer_16_fine_resolver:
   evidence_answer_confidence_threshold: 0.22
   min_confidence_floor: 0.22
-  top_k: 10
+  selection_temperature: 0.7
+  creative_drift_tolerance: 0.25
+  factual_corruption_threshold: 0.15
+  factual_intent_retrieval_threshold: 0.65
 
 layer_20_telemetry:
   enabled: true
@@ -846,23 +1081,33 @@ adaptive_behavior:
 | Tier | Type | Persistence | Trust Score | Use Case |
 |------|------|-------------|-------------|----------|
 | Core | Persistent | SQLite | > 0.8 | High-trust facts, anchors |
-| Working | Session | In-memory | 0.3-0.8 | Context, recent queries |
-| Ephemeral | Temporary | In-memory | < 0.3 | Temporary processing |
-| Intent | Isolated | In-memory | Variable | Intent-specific data |
+| Episodic | Session-scoped | SQLite + decay | Variable | Context, recent queries |
 
 ### 7.2 Memory Channels
 
 ```rust
 pub enum MemoryChannel {
-    Core,      // Standard Core memory path
-    Working,   // Session-scoped working memory
+    #[default]
+    Main,      // Standard memory path
     Intent,    // Intent-specific, isolated from Core promotion
+    Reasoning, // Internal reasoning loop, isolated from Core
+}
+```
+
+### 7.3 Memory Targets (Training/Ingestion)
+
+```rust
+pub enum MemoryTarget {
+    #[default]
+    StagingEpisodic,  // High utility, requires corroboration for Core promotion
+    Core,             // Direct to Core (only via consolidate_immediately)
+    Episodic,         // Standard episodic memory
 }
 ```
 
 **Intent Channel Isolation:** Units in the Intent channel are blocked from promotion to Core memory to prevent pollution.
 
-### 7.3 Dynamic Memory Allocation
+### 7.4 Dynamic Memory Allocation
 
 ```rust
 pub struct DynamicMemoryAllocator {
@@ -891,9 +1136,344 @@ impl DynamicMemoryAllocator {
 
 ---
 
-## 8. API Specifications
+## 8. Classification System
 
-### 8.1 REST API
+### 8.1 Overview
+
+The classification system provides hybrid retrieval-augmented classification for intent, tone, and resolver mode inference. It combines lightweight feature signatures with spatial pattern retrieval.
+
+### 8.2 Architecture Alignment
+
+| Layer | Classification Component |
+|-------|-------------------------|
+| L2 | ClassificationSignature as specialized Unit feature |
+| L4 | ClassificationPattern storage in Intent memory channel |
+| L6 | Spatial query for O(log N) pattern retrieval |
+| L14 | Similarity scoring and candidate aggregation |
+| L18 | Feedback-driven learning and spatial adjustment |
+
+### 8.3 Core Components
+
+```rust
+// src/classification/mod.rs
+
+/// Semantic hash generator for classification signatures
+pub struct SemanticHasher;
+
+/// Feature signature for classification queries
+pub struct ClassificationSignature {
+    pub semantic_hash: u64,
+    pub feature_vector: Vec<f32>,
+    pub token_count: usize,
+}
+
+/// Stored pattern with label for retrieval
+pub struct ClassificationPattern {
+    pub id: Uuid,
+    pub signature: ClassificationSignature,
+    pub label: ClassificationLabel,
+    pub position: Vec3,
+    pub vote_count: u32,
+    pub confidence: f32,
+}
+
+/// Main classifier using spatial retrieval
+pub struct ClassificationCalculator {
+    config: ClassificationConfig,
+    spatial_index: SpatialIndex,
+}
+
+pub enum ClassificationLabel {
+    Intent(IntentKind),
+    Tone(ToneKind),
+    ResolverMode(ResolverMode),
+}
+
+pub struct ClassificationResult {
+    pub label: ClassificationLabel,
+    pub confidence: f32,
+    pub method: CalculationMethod,
+    pub nearby_patterns: usize,
+}
+```
+
+### 8.4 Classification Flow
+
+```
+Input Text
+    │
+    ▼
+┌─────────────────────────┐
+│ SemanticHasher          │
+│ - Token normalization   │
+│ - Feature extraction    │
+│ - Hash generation       │
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│ Spatial Query (L6)      │
+│ - k-NN lookup           │
+│ - Radius search         │
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│ Vote Aggregation        │
+│ - Weighted voting       │
+│ - Confidence scaling    │
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│ ClassificationResult    │
+│ - Intent/Tone/Mode      │
+│ - Confidence score      │
+└─────────────────────────┘
+```
+
+### 8.5 Training Integration
+
+```rust
+pub struct ClassificationTrainer {
+    config: TrainerConfig,
+    patterns: Vec<ClassificationPattern>,
+}
+
+pub struct LabeledDialogue {
+    pub turns: Vec<LabeledTurn>,
+    pub metadata: DialogueMetadata,
+}
+
+pub struct TrainingOutcome {
+    pub patterns_added: usize,
+    pub patterns_updated: usize,
+    pub spatial_adjustments: usize,
+}
+```
+
+---
+
+## 9. GPU Acceleration
+
+### 9.1 Overview
+
+The engine supports optional GPU acceleration via `wgpu` for compute-intensive operations. GPU acceleration is automatically used when available and falls back to CPU when disabled or unavailable.
+
+### 9.2 Feature Flag
+
+```toml
+# Cargo.toml
+[features]
+default = []
+gpu = ["wgpu"]
+```
+
+### 9.3 GPU-Accelerated Operations
+
+| Operation | Module | Speedup |
+|-----------|--------|---------|
+| Candidate Scoring | `gpu/compute/candidate_scorer.rs` | 10-50x |
+| Intent Scoring | `gpu/compute/intent_scorer.rs` | 5-20x |
+| Distance Calculation | `gpu/compute/distance.rs` | 20-100x |
+| Force-Directed Layout | `gpu/compute/force_layout.rs` | 10-30x |
+| Tone Detection | `gpu/compute/tone_detector.rs` | 5-15x |
+| Evidence Merging | `gpu/compute/evidence_merger.rs` | 3-10x |
+
+### 9.4 GPU Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     GPU COMPUTE MODULE                       │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │                    Device Manager                        │ │
+│  │  - Device selection (discrete/integrated)               │ │
+│  │  - Memory allocation                                     │ │
+│  │  - Shader compilation                                    │ │
+│  └─────────────────────────────────────────────────────────┘ │
+│                              │                               │
+│              ┌───────────────┼───────────────┐              │
+│              ▼               ▼               ▼              │
+│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐      │
+│  │ Candidate     │ │ Intent        │ │ Distance      │      │
+│  │ Scorer        │ │ Scorer        │ │ Calculator    │      │
+│  │               │ │               │ │               │      │
+│  │ - 7-dim score │ │ - Multi-class │ │ - Euclidean   │      │
+│  │ - Batch proc  │ │ - Batch proc  │ │ - Batch proc  │      │
+│  └───────────────┘ └───────────────┘ └───────────────┘      │
+│                              │                               │
+│                              ▼                               │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │                    Shader Pipeline                       │ │
+│  │  - WGSL compute shaders                                  │ │
+│  │  - Bind groups for input/output                          │ │
+│  │  - Dispatch orchestration                                │ │
+│  └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.5 CPU Fallback Pattern
+
+```rust
+pub fn score_candidates_gpu_accelerated(
+    candidates: &[Unit],
+    context: &ContextMatrix,
+    // ...
+) -> Vec<ScoredCandidate> {
+    #[cfg(feature = "gpu")]
+    {
+        use crate::gpu::compute::candidate_scorer::score_candidates;
+        let mut scored = score_candidates(candidates, context, /* ... */);
+        
+        // Post-processing (GPU doesn't handle this)
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        return scored;
+    }
+    
+    // CPU fallback when GPU feature is disabled
+    #[cfg(not(feature = "gpu"))]
+    {
+        CandidateScorer::score(candidates, context, /* ... */)
+    }
+}
+```
+
+### 9.6 GPU Configuration
+
+```yaml
+# config/config.yaml
+gpu:
+  enabled: true
+  preferred_device: "discrete"  # or "integrated"
+  max_memory_mb: 512
+  batch_size: 256
+  timeout_ms: 100
+```
+
+---
+
+## 10. Unified Training Pipeline
+
+### 10.1 Overview
+
+The training pipeline provides unified system training through seed data ingestion, pattern learning, and spatial adjustment. Training runs as a background task with progress tracking.
+
+### 10.2 Training Phases
+
+| Phase | Description | Duration |
+|-------|-------------|----------|
+| Cold Start | Initial pattern seeding | 1-2 min |
+| Growth | Active learning from feedback | Ongoing |
+| Stable | Maintenance and pruning | Ongoing |
+
+### 10.3 Training Configuration
+
+```yaml
+# config/config.yaml
+training:
+  phases:
+    cold_start:
+      batch_size: 100
+      max_iterations: 10
+    growth:
+      batch_size: 50
+      feedback_threshold: 0.7
+    stable:
+      prune_threshold: 0.1
+      consolidate_interval: 3600  # seconds
+
+  execution_modes:
+    - silent_batch    # Background, low priority
+    - interactive     # User-initiated, high priority
+    - drill           # Stress testing mode
+```
+
+### 10.4 Training Data Format
+
+```rust
+pub struct LabeledDialogue {
+    pub turns: Vec<LabeledTurn>,
+    pub metadata: DialogueMetadata,
+}
+
+pub struct LabeledTurn {
+    pub role: String,
+    pub content: String,
+    pub expected_entities: Vec<String>,
+    pub expected_anchors: Vec<String>,
+    pub expected_unit_count: ExpectedUnitCount,
+    pub source_quality: Option<f32>,
+}
+
+pub struct DialogueMetadata {
+    pub domain: Option<String>,
+    pub complexity: String,
+    pub memory_target: MemoryTarget,
+    pub channels: Vec<MemoryChannel>,
+    pub corroboration_threshold: f32,
+}
+
+pub struct ExpectedUnitCount {
+    pub phrase: usize,
+    pub sentence: usize,
+    pub word: usize,
+}
+```
+
+### 10.5 Training API
+
+```rust
+impl Engine {
+    /// Start training with execution mode
+    pub fn start_train(&self, mode: TrainingExecutionMode) -> String;
+    
+    /// Get training job status
+    pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus>;
+    
+    /// Run training plan with job ID
+    pub async fn run_training_plan_with_id(
+        &self,
+        job_id: String,
+        plan: TrainingPlan,
+    ) -> TrainingJobStatus;
+    
+    /// Train with specific scope
+    pub async fn train_with_scope(
+        &self,
+        execution_mode: TrainingExecutionMode,
+        scope: TrainingScope,
+    ) -> TrainingJobStatus;
+}
+```
+
+### 10.6 Training Progress Tracking
+
+```rust
+pub struct TrainingJobStatus {
+    pub job_id: String,
+    pub status: JobState,
+    pub active_phase: Option<TrainingPhaseKind>,
+    pub phase_statuses: Vec<TrainingPhaseStatus>,
+    pub progress: TrainingProgress,
+    pub learning_metrics: LearningMetrics,
+    pub performance: PerformanceMetrics,
+    pub intent_distribution: BTreeMap<String, u64>,
+    pub warnings: Vec<String>,
+}
+
+pub enum JobState {
+    Queued,
+    Processing,
+    Completed,
+    Failed,
+}
+```
+
+---
+
+## 11. API Specifications
+
+### 11.1 REST API
 
 **Base URL:** `http://localhost:8080/api/v1`
 

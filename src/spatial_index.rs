@@ -158,12 +158,14 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
     let mut node_lookup = HashMap::new();
     let mut initial_positions = Vec::with_capacity(selected.len());
     let mut anchor_locks = Vec::with_capacity(selected.len());
+    let mut process_flags = Vec::with_capacity(selected.len());
 
     for unit in &selected {
         let node = graph.add_node(unit.id);
         node_lookup.insert(unit.id, node);
         initial_positions.push(unit.semantic_position);
         anchor_locks.push(unit.anchor_status);
+        process_flags.push(unit.is_process_unit);
     }
 
     for (index, unit) in selected.iter().enumerate() {
@@ -203,8 +205,16 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
                 let delta = subtract(positions[lhs], positions[rhs]);
                 let distance = magnitude(delta).max(0.05);
                 let direction = scale(delta, 1.0 / distance);
+                
+                // Process units vs Content units get 3x repulsion to prevent drift
+                let multiplier = if process_flags[lhs] != process_flags[rhs] {
+                    3.0
+                } else {
+                    1.0
+                };
+                
                 let repulsive_force =
-                    ((k * k) / distance) * config.repulsive_force_coefficient.max(0.0);
+                    ((k * k) / distance) * config.repulsive_force_coefficient.max(0.0) * multiplier;
                 let adjustment = scale(direction, repulsive_force);
                 displacements[lhs] = add(displacements[lhs], adjustment);
                 displacements[rhs] = subtract(displacements[rhs], adjustment);
@@ -236,6 +246,11 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
             let capped = scale(displacement, (temperature / distance).min(1.0));
             positions[index] =
                 clamp_position(add(positions[index], capped), config.layout_boundary);
+                
+            // Confine process units to Z = -1.0 subspace
+            if process_flags[index] {
+                positions[index][2] = -1.0;
+            }
         }
 
         let energy = layout_energy(&graph, &positions);

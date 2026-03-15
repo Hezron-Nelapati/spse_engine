@@ -8,6 +8,10 @@ struct Position {
     y: f32,
     z: f32,
     is_anchor: u32,
+    is_process_unit: u32,
+    _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
 }
 
 struct Force {
@@ -70,7 +74,7 @@ fn main(
         if (tile_idx < node_count) {
             shared_pos[local_id.x] = positions[tile_idx];
         } else {
-            shared_pos[local_id.x] = Position(0.0, 0.0, 0.0, 1u); // anchor, skip
+            shared_pos[local_id.x] = Position(0.0, 0.0, 0.0, 1u, 0u, 0u, 0u, 0u); // anchor, skip
         }
         
         workgroupBarrier();
@@ -98,7 +102,14 @@ fn main(
             
             // Fruchterman-Reingold repulsive force: (k² / d)
             let k = config.k;
-            let force_mag = (k * k / dist) * config.repulsive_coeff;
+            
+            // Process units vs Content units get 3x repulsion to prevent drift
+            var multiplier = 1.0;
+            if (my_pos.is_process_unit != other_pos.is_process_unit) {
+                multiplier = 3.0;
+            }
+            
+            let force_mag = (k * k / dist) * config.repulsive_coeff * multiplier;
             
             // Direction (normalized)
             let dir = vec3<f32>(dx, dy, dz) / dist;
@@ -125,7 +136,12 @@ fn main(
             let boundary = config.boundary;
             new_pos = clamp(new_pos, vec3<f32>(-boundary), vec3<f32>(boundary));
             
-            positions[my_idx] = Position(new_pos.x, new_pos.y, new_pos.z, 0u);
+            // Confine process units to Z = -1.0 subspace
+            if (my_pos.is_process_unit == 1u) {
+                new_pos.z = -1.0;
+            }
+            
+            positions[my_idx] = Position(new_pos.x, new_pos.y, new_pos.z, 0u, my_pos.is_process_unit, 0u, 0u, 0u);
         }
     }
     

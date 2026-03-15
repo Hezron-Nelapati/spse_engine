@@ -117,6 +117,39 @@ impl IntentDetector {
             IntentKind::Plan | IntentKind::Analyze | IntentKind::Compare | IntentKind::Critique
         )
     }
+
+    /// Assess if reasoning pattern retrieval is needed
+    pub fn assess_structural_uncertainty(
+        intent: &IntentProfile,
+        confidence_stats: &ConfidenceStats,
+        _context: &ContextMatrix,
+    ) -> crate::types::ReasoningGateDecision {
+        // Check if facts are known but logic is complex
+        let has_factual_knowledge = confidence_stats.mean_confidence > 0.5;
+        let has_logical_complexity = matches!(
+            intent.primary,
+            IntentKind::Analyze | IntentKind::Plan | IntentKind::Debug | IntentKind::Explain
+        );
+        let has_low_structural_confidence = confidence_stats.disagreement > 0.4;
+        
+        crate::types::ReasoningGateDecision {
+            should_retrieve_reasoning: has_factual_knowledge 
+                && has_logical_complexity 
+                && has_low_structural_confidence,
+            reasoning_type_hint: Self::infer_reasoning_type(intent),
+        }
+    }
+    
+    fn infer_reasoning_type(intent: &IntentProfile) -> crate::types::ReasoningType {
+        match intent.primary {
+            IntentKind::Analyze => crate::types::ReasoningType::Logical,
+            IntentKind::Plan => crate::types::ReasoningType::Planning,
+            IntentKind::Debug => crate::types::ReasoningType::Debugging,
+            IntentKind::Explain => crate::types::ReasoningType::Explanatory,
+            IntentKind::Verify => crate::types::ReasoningType::Verification,
+            _ => crate::types::ReasoningType::General,
+        }
+    }
 }
 
 fn normalize(text: &str) -> String {
@@ -428,12 +461,14 @@ mod tests {
         let scored = vec![
             ScoredCandidate {
                 unit_id: Uuid::new_v4(),
+                content: "test candidate".to_string(),
                 score: 0.3,
                 breakdown: ScoreBreakdown::default(),
                 memory_type: MemoryType::Episodic,
             },
             ScoredCandidate {
                 unit_id: Uuid::new_v4(),
+                content: "another candidate".to_string(),
                 score: 0.3,
                 breakdown: ScoreBreakdown::default(),
                 memory_type: MemoryType::Episodic,

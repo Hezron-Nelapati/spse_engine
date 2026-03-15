@@ -77,6 +77,14 @@ pub enum TelemetryEvent {
         session_id: Uuid,
         trace_id: Uuid,
     },
+    /// Process anchor protected from pruning (Phase 5)
+    ProcessAnchorProtected {
+        unit_id: Uuid,
+        structure_hash: u64,
+        utility_score: f32,
+        session_id: Uuid,
+        trace_id: Uuid,
+    },
 }
 
 /// Configuration for telemetry worker
@@ -174,6 +182,7 @@ impl SqliteHotStore {
             TelemetryEvent::ReasoningStep { session_id, trace_id, .. } => ("reasoning_step", *session_id, *trace_id),
             TelemetryEvent::LatencySpike { session_id, trace_id, .. } => ("latency_spike", *session_id, *trace_id),
             TelemetryEvent::MemoryAllocation { session_id, trace_id, .. } => ("memory_allocation", *session_id, *trace_id),
+            TelemetryEvent::ProcessAnchorProtected { session_id, trace_id, .. } => ("process_anchor_protected", *session_id, *trace_id),
         };
 
         let event_data = serde_json::to_string(event)

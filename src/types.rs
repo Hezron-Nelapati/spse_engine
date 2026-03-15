@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
+    #[default]
     Episodic,
     Core,
 }
@@ -92,9 +93,10 @@ pub enum TrainingExecutionMode {
     Development,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingPhaseKind {
+    #[default]
     DryRun,
     Bootstrap,
     Validation,
@@ -161,6 +163,69 @@ pub enum TrainingSourceType {
     QaJson,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningType {
+    #[default]
+    General,
+    Mathematical,      // Step-by-step calculation (GSM8K style)
+    Logical,           // Deductive inference chains (ProofWriter style)
+    Explanatory,       // Why/how causal chains
+    Planning,          // Multi-step action sequences
+    Verification,      // Fact-checking with source tracing
+    Debugging,         // Error isolation and hypothesis testing
+    MultiHop,          // Multi-hop deduction across entities
+}
+
+/// Type of individual reasoning step
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningStepType {
+    #[default]
+    Premise,           // Starting fact or assumption
+    Inference,         // Deduced conclusion from premises
+    Calculation,       // Numeric or symbolic operation
+    Verification,      // Checking a claim against evidence
+    Hypothesis,        // Tentative explanation
+    Conclusion,        // Final answer or result
+}
+
+/// Single step in a reasoning trace
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReasoningStep {
+    /// The thought content for this step
+    pub content: String,
+    /// Type of reasoning step
+    pub step_type: ReasoningStepType,
+    /// Whether this step is an anchor (never pruned)
+    #[serde(default)]
+    pub anchor_step: bool,
+    /// Indices of previous steps this builds on (for dependency tracking)
+    #[serde(default)]
+    pub dependencies: Vec<usize>,
+    /// Abstracted structure hash (for pattern matching)
+    #[serde(default)]
+    pub structure_hash: Option<u64>,
+}
+
+/// Complete reasoning trace for a training example
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ReasoningTrace {
+    /// All steps in the reasoning chain
+    pub steps: Vec<ReasoningStep>,
+    /// Classification of reasoning type
+    pub reasoning_type: ReasoningType,
+    /// Confidence progression across steps (learned from data)
+    #[serde(default)]
+    pub confidence_trajectory: Vec<f32>,
+    /// Entities involved in this reasoning
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Abstracted structure hash for the entire trace
+    #[serde(default)]
+    pub structure_hash: Option<u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Link {
     pub target_id: Uuid,
@@ -199,6 +264,10 @@ pub struct Unit {
     pub corroboration_count: u32,
     pub links: Vec<Link>,
     pub contexts: Vec<String>,
+    /// Process units are reasoning steps isolated from Core semantic space
+    /// Default: false (content unit)
+    #[serde(default)]
+    pub is_process_unit: bool,
 }
 
 impl Unit {
@@ -230,6 +299,7 @@ impl Unit {
             corroboration_count: 0,
             links: Vec::new(),
             contexts: Vec::new(),
+            is_process_unit: false,
         }
     }
 }
@@ -256,6 +326,7 @@ impl Default for Unit {
             corroboration_count: 0,
             links: Vec::new(),
             contexts: Vec::new(),
+            is_process_unit: false,
         }
     }
 }
@@ -332,6 +403,21 @@ pub struct SearchDecision {
     pub disagreement: f32,
     pub cost_penalty: f32,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReasoningGateDecision {
+    pub should_retrieve_reasoning: bool,
+    pub reasoning_type_hint: ReasoningType,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReasoningPatternMatch {
+    pub unit_id: Uuid,
+    pub content: String,
+    pub similarity: f32,
+    pub reasoning_type: ReasoningType,
+    pub is_anchor: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

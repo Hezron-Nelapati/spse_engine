@@ -19,12 +19,26 @@ impl SemanticRouter {
     }
 
     pub fn route(&mut self, active_units: &[Unit], all_units: &[Unit]) -> RoutingResult {
-        self.grid.rebuild(all_units);
+        // Filter out process units from semantic routing
+        let content_units: Vec<Unit> = all_units
+            .iter()
+            .filter(|u| !u.is_process_unit)
+            .cloned()
+            .collect();
+            
+        self.grid.rebuild(&content_units);
         let positions = active_units
             .iter()
+            .filter(|u| !u.is_process_unit)
             .map(|unit| unit.semantic_position)
             .collect::<Vec<_>>();
-        let center = centroid(&positions);
+            
+        let center = if positions.is_empty() {
+            [0.5, 0.5, 0.5]
+        } else {
+            centroid(&positions)
+        };
+        
         let mut neighbor_ids = self.grid.nearby(center, self.neighbor_radius);
         
         // Use HashSet for O(1) lookup instead of O(n*m) nested iteration
@@ -60,7 +74,12 @@ impl SemanticRouter {
             && rand::thread_rng().gen::<f32>() < escape.stochastic_jump_prob;
 
         if candidate_ids.len() < target_candidates / 2 || stochastic_escape {
-            let mut global = all_units.to_vec();
+            let mut global: Vec<Unit> = all_units
+                .iter()
+                .filter(|u| !u.is_process_unit)
+                .cloned()
+                .collect();
+                
             global.sort_by(|a, b| {
                 b.utility_score
                     .partial_cmp(&a.utility_score)
@@ -178,6 +197,7 @@ mod tests {
             created_at: Utc::now(),
             last_seen_at: Utc::now(),
             trust_score: utility,
+            is_process_unit: false,
         }
     }
 

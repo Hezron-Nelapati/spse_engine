@@ -7,11 +7,13 @@ use std::sync::Arc;
 use wgpu::{Device, Queue, Buffer, BindGroupLayout, BindGroupDescriptor, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
 
 use crate::types::{IntentKind, ToneKind, ResolverMode, ClassificationResult, CalculationMethod};
-use crate::classification::{ClassificationSignature, ClassificationPattern, ClassificationConfig};
+use crate::classification::{ClassificationSignature, ClassificationPattern};
+use crate::config::ClassificationConfig;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
 use once_cell::sync::Lazy;
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashMap;
 
 /// Global cached GPU classification calculator (lazy initialized)
 static GPU_CLASSIFIER: Lazy<Option<Arc<GpuClassificationCalculator>>> = Lazy::new(|| {
@@ -34,7 +36,7 @@ pub fn get_gpu_classifier() -> Option<Arc<GpuClassificationCalculator>> {
     GPU_CLASSIFIER.clone()
 }
 
-/// GPU data for classification signature (14 floats packed)
+/// GPU data for classification signature (16 floats = 64 bytes, aligned)
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuSignature {
@@ -42,19 +44,42 @@ pub struct GpuSignature {
     structure_scores: [f32; 4],
     /// Punctuation scores (4 floats)
     punctuation_scores: [f32; 4],
-    /// Semantic centroid (3 floats)
+    /// Semantic centroid (3 floats) + 1 padding
     semantic_centroid: [f32; 3],
-    /// Derived scores (3 floats)
+    /// Padding for alignment
+    _pad0: f32,
+    /// Derived scores (3 floats) + 1 padding
     derived_scores: [f32; 3],
+    /// Padding for 16-byte alignment
+    _pad1: f32,
 }
 
 impl From<&ClassificationSignature> for GpuSignature {
     fn from(sig: &ClassificationSignature) -> Self {
         Self {
-            structure_scores: sig.structure_scores,
-            punctuation_scores: sig.punctuation_scores,
+            // Map structure fields to array
+            structure_scores: [
+                sig.byte_length_norm,
+                sig.sentence_entropy,
+                sig.token_count_norm,
+                0.0, // padding
+            ],
+            // Map punctuation vector + padding
+            punctuation_scores: [
+                sig.punct_vector[0],
+                sig.punct_vector[1],
+                sig.punct_vector[2],
+                0.0, // padding
+            ],
             semantic_centroid: sig.semantic_centroid,
-            derived_scores: sig.derived_scores,
+            _pad0: 0.0,
+            // Map derived scores
+            derived_scores: [
+                sig.urgency_score,
+                sig.formality_score,
+                sig.technical_score,
+            ],
+            _pad1: 0.0,
         }
     }
 }
@@ -97,20 +122,20 @@ pub struct GpuSimilarityResult {
     tone_index: u32,
     /// Resolver index
     resolver_index: u32,
-    /// Padding
-    _padding: [u32; 1],
+    /// Padding for 16-byte alignment (6 u32s = 24 bytes, need 8 more for 32)
+    _padding: [u32; 2],
 }
 
-/// GPU data for aggregated votes
+/// GPU data for aggregated votes (160 bytes, 16-byte aligned)
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuVoteAggregation {
-    /// Intent scores (23 intents)
-    intent_scores: [f32; 23],
+    /// Intent scores (24 slots for alignment, only 23 used)
+    intent_scores: [f32; 24],
     /// Tone scores (8 tones)
     tone_scores: [f32; 8],
-    /// Resolver scores (3 modes)
-    resolver_scores: [f32; 3],
+    /// Resolver scores (4 slots for alignment, only 3 used)
+    resolver_scores: [f32; 4],
     /// Best intent index
     best_intent: u32,
     /// Best tone index
@@ -121,6 +146,8 @@ pub struct GpuVoteAggregation {
     confidence: f32,
     /// Candidate count
     candidate_count: u32,
+    /// Padding for 16-byte alignment
+    _padding: [u32; 3],
 }
 
 /// Minimum pattern count to justify GPU dispatch overhead
@@ -246,8 +273,8 @@ impl GpuClassificationCalculator {
         });
         
         Ok(Self {
-            device,
-            queue,
+            device: device.clone(),
+            queue: queue.clone(),
             similarity_pipeline,
             aggregation_pipeline,
             bind_group_layout,
@@ -345,8 +372,8 @@ impl GpuClassificationCalculator {
                 tone_index: p.tone_kind as u32,
                 resolver_index: p.resolver_mode as u32,
                 confidence: p.confidence(),
-                success_count: p.success_count,
-                failure_count: p.failure_count,
+                success_count: p.success_count as u32,
+                failure_count: p.failure_count as u32,
                 _padding: [0; 2],
             });
         }
@@ -388,6 +415,7 @@ impl GpuClassificationCalculator {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ClassificationSimilarityPass"),
+                timestamp_writes: None,
             });
             pass.set_pipeline(&self.similarity_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
@@ -488,12 +516,16 @@ impl GpuClassificationCalculator {
         } else if confidence > config.high_confidence_threshold && best_resolver == 1 {
             ResolverMode::Deterministic
         } else {
-            ResolverMode::from_repr(best_resolver as usize).unwrap_or(ResolverMode::Balanced)
+            match best_resolver {
+                0 => ResolverMode::Deterministic,
+                1 => ResolverMode::Balanced,
+                _ => ResolverMode::Exploratory,
+            }
         };
         
         Some(ClassificationResult {
-            intent: IntentKind::from_repr(best_intent as usize).unwrap_or(IntentKind::Unknown),
-            tone: ToneKind::from_repr(best_tone as usize).unwrap_or(ToneKind::NeutralProfessional),
+            intent: intent_from_index(best_intent),
+            tone: tone_from_index(best_tone),
             resolver_mode: final_resolver,
             confidence,
             method: CalculationMethod::MemoryLookup,
@@ -505,4 +537,47 @@ impl GpuClassificationCalculator {
 /// Check if GPU classification is available
 pub fn is_gpu_classification_available() -> bool {
     is_gpu_available() && GPU_CLASSIFIER.is_some()
+}
+
+/// Convert intent index to IntentKind
+fn intent_from_index(index: u32) -> IntentKind {
+    match index {
+        0 => IntentKind::Greeting,
+        1 => IntentKind::Gratitude,
+        2 => IntentKind::Farewell,
+        3 => IntentKind::Help,
+        4 => IntentKind::Clarify,
+        5 => IntentKind::Rewrite,
+        6 => IntentKind::Verify,
+        7 => IntentKind::Continue,
+        8 => IntentKind::Forget,
+        9 => IntentKind::Question,
+        10 => IntentKind::Summarize,
+        11 => IntentKind::Explain,
+        12 => IntentKind::Compare,
+        13 => IntentKind::Extract,
+        14 => IntentKind::Analyze,
+        15 => IntentKind::Plan,
+        16 => IntentKind::Act,
+        17 => IntentKind::Recommend,
+        18 => IntentKind::Classify,
+        19 => IntentKind::Translate,
+        20 => IntentKind::Debug,
+        21 => IntentKind::Critique,
+        22 => IntentKind::Brainstorm,
+        _ => IntentKind::Unknown,
+    }
+}
+
+/// Convert tone index to ToneKind
+fn tone_from_index(index: u32) -> ToneKind {
+    match index {
+        0 => ToneKind::NeutralProfessional,
+        1 => ToneKind::Empathetic,
+        2 => ToneKind::Direct,
+        3 => ToneKind::Technical,
+        4 => ToneKind::Casual,
+        5 => ToneKind::Formal,
+        _ => ToneKind::NeutralProfessional,
+    }
 }

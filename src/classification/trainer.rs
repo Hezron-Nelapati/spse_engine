@@ -465,7 +465,7 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
                 crate::seed::SeedMemoryTarget::Core => MemoryTarget::Core,
                 crate::seed::SeedMemoryTarget::Episodic => MemoryTarget::Episodic,
             },
-            channels: dialogue.metadata.memory_channels.clone(),
+            channels: dialogue.metadata.memory_channels.iter().map(|c| format!("{:?}", c)).collect(),
             corroboration_threshold: dialogue.metadata.corroboration_threshold,
         };
         

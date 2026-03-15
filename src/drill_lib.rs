@@ -1166,6 +1166,7 @@ fn run_anchor_validation_drill(category: &DrillCategory) -> (bool, String, Strin
                 created_at: chrono::Utc::now(),
                 last_seen_at: chrono::Utc::now(),
                 trust_score: 0.98,
+                is_process_unit: false,
             };
             
             // Create candidate that contradicts anchor

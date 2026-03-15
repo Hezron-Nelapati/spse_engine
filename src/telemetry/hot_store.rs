@@ -148,6 +148,9 @@ impl HotStore {
             TelemetryEvent::MemoryAllocation { session_id, trace_id, .. } => {
                 ("memory_allocation", None, *session_id, *trace_id)
             }
+            TelemetryEvent::ProcessAnchorProtected { session_id, trace_id, .. } => {
+                ("process_anchor_protected", Some(21), *session_id, *trace_id)
+            }
         }
     }
 

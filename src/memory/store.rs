@@ -81,12 +81,17 @@ pub struct MemoryStore {
     pollution_detection_enabled: bool,
     pollution_min_length: usize,
     pollution_edge_trim_limit: usize,
+    pollution_similarity_threshold: f32,
+    pollution_penalty_factor: f32,
     pollution_overlap_threshold: f32,
     pollution_quality_margin: f32,
     pollution_audit_limit: usize,
-    /// Whether to block Intent-channel units from Core memory promotion
     intent_channel_core_promotion_blocked: bool,
     semantic_map: SemanticMapConfig,
+    /// Process anchors: reasoning patterns that should never be pruned
+    process_anchors: HashMap<u64, Uuid>,  // structure_hash -> unit_id
+    /// Reasoning pattern index for retrieval
+    reasoning_index: HashMap<crate::types::ReasoningType, HashSet<Uuid>>,
     bloom_filter: UnitBloomFilter,
     pruned_units_total: u64,
     pruned_candidates_total: u64,
@@ -355,11 +360,15 @@ impl MemoryStore {
             pollution_detection_enabled: governance.pollution_detection_enabled,
             pollution_min_length: governance.pollution_min_length,
             pollution_edge_trim_limit: governance.pollution_edge_trim_limit,
+            pollution_similarity_threshold: governance.pollution_similarity_threshold,
+            pollution_penalty_factor: governance.pollution_penalty_factor,
             pollution_overlap_threshold: governance.pollution_overlap_threshold,
             pollution_quality_margin: governance.pollution_quality_margin,
             pollution_audit_limit: governance.pollution_audit_limit,
             intent_channel_core_promotion_blocked: governance.intent_channel_core_promotion_blocked,
             semantic_map: semantic_map.clone(),
+            process_anchors: HashMap::new(),
+            reasoning_index: HashMap::new(),
             bloom_filter,
             pruned_units_total: 0,
             pruned_candidates_total: 0,
@@ -546,6 +555,125 @@ impl MemoryStore {
         ids.iter()
             .filter_map(|id| self.cache.get(id).cloned())
             .collect()
+    }
+
+    /// Register a process anchor (never-pruned reasoning pattern)
+    pub fn register_process_anchor(&mut self, structure_hash: u64, unit_id: Uuid) {
+        self.process_anchors.insert(structure_hash, unit_id);
+    }
+    
+    /// Check if a structure hash is a process anchor
+    pub fn is_process_anchor(&self, structure_hash: u64) -> bool {
+        self.process_anchors.contains_key(&structure_hash)
+    }
+
+    /// Check if a unit should be pruned based on utility, staleness, and anchor status.
+    /// Process anchors are never pruned.
+    pub fn should_prune_unit(
+        &self,
+        unit: &Unit,
+        prune_utility_threshold: f32,
+        stale_hours: f32,
+        anchor_grace_active: bool,
+    ) -> bool {
+        // Process anchors are never pruned
+        if self.process_anchors.values().any(|&id| id == unit.id) {
+            return false;
+        }
+        // Anchors are never pruned
+        if unit.anchor_status {
+            return false;
+        }
+        // Grace period for new anchors
+        if anchor_grace_active {
+            return false;
+        }
+        // Only prune Episodic memory
+        if unit.memory_type != MemoryType::Episodic {
+            return false;
+        }
+        // Must be low utility and stale
+        unit.utility_score < prune_utility_threshold && stale_hours > 24.0
+    }
+
+    /// Retrieve reasoning patterns matching a query, optionally filtered by reasoning type.
+    /// Returns process units (is_process_unit=true) sorted by similarity to the query.
+    pub fn reasoning_patterns_for_query(
+        &self,
+        query: &str,
+        reasoning_type_hint: Option<crate::types::ReasoningType>,
+        limit: usize,
+    ) -> Vec<crate::types::ReasoningPatternMatch> {
+        use crate::types::ReasoningPatternMatch;
+
+        let query_terms = normalized_terms(query);
+        if query_terms.is_empty() {
+            return Vec::new();
+        }
+
+        // Get candidate unit IDs from reasoning index if type hint provided
+        let type_filtered_ids: Option<HashSet<Uuid>> = reasoning_type_hint
+            .and_then(|rt| self.reasoning_index.get(&rt).cloned());
+
+        // Score process units
+        let mut scored: Vec<(Uuid, String, f32, crate::types::ReasoningType, bool)> = self
+            .cache
+            .values()
+            .filter(|unit| unit.is_process_unit)
+            .filter(|unit| {
+                type_filtered_ids
+                    .as_ref()
+                    .map(|ids| ids.contains(&unit.id))
+                    .unwrap_or(true)
+            })
+            .filter_map(|unit| {
+                let overlap = lexical_overlap_score(&query_terms, &normalized_terms(&unit.content));
+                let substring = if query.contains(&unit.normalized) || unit.normalized.contains(query) {
+                    0.3
+                } else {
+                    0.0
+                };
+                let score = (0.5 * overlap) + substring + (0.2 * unit.salience_score);
+                if score > 0.1 {
+                    // Infer reasoning type from content heuristics (simplified)
+                    let reasoning_type = self
+                        .reasoning_index
+                        .iter()
+                        .find(|(_, ids)| ids.contains(&unit.id))
+                        .map(|(rt, _)| *rt)
+                        .unwrap_or_default();
+                    Some((unit.id, unit.content.clone(), score, reasoning_type, unit.anchor_status))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        scored
+            .into_iter()
+            .map(|(unit_id, content, similarity, reasoning_type, is_anchor)| ReasoningPatternMatch {
+                unit_id,
+                content,
+                similarity,
+                reasoning_type,
+                is_anchor,
+            })
+            .collect()
+    }
+
+    /// Register a reasoning pattern unit in the reasoning index
+    pub fn register_reasoning_pattern(
+        &mut self,
+        reasoning_type: crate::types::ReasoningType,
+        unit_id: Uuid,
+    ) {
+        self.reasoning_index
+            .entry(reasoning_type)
+            .or_insert_with(HashSet::new)
+            .insert(unit_id);
     }
 
     pub fn top_units(&self, limit: usize) -> Vec<Unit> {
@@ -1258,7 +1386,18 @@ impl MemoryStore {
             let anchor_grace_active =
                 (Utc::now() - unit.created_at).num_hours().max(0) < anchor_grace_hours;
 
+            // Never prune process anchors
+            let is_process_anchor = if let Some(hash) = unit.is_process_unit.then(|| unit.content.as_str()).and_then(|_| {
+                // For simplicity here, we assume any process_unit in the process_anchors by ID is protected
+                Some(unit.id)
+            }) {
+                self.process_anchors.values().any(|&id| id == unit.id)
+            } else {
+                false
+            };
+
             if !unit.anchor_status
+                && !is_process_anchor
                 && unit.memory_type == MemoryType::Episodic
                 && !anchor_grace_active
                 && unit.utility_score < prune_utility_threshold
@@ -1369,7 +1508,10 @@ impl MemoryStore {
         let mut candidates = self
             .cache
             .values()
-            .filter(|unit| !unit.anchor_status && unit.memory_type == MemoryType::Episodic)
+            .filter(|unit| {
+                let is_process_anchor = self.process_anchors.values().any(|&id| id == unit.id);
+                !unit.anchor_status && !is_process_anchor && unit.memory_type == MemoryType::Episodic
+            })
             .map(|unit| {
                 (
                     unit.id,
@@ -3001,8 +3143,9 @@ mod tests {
     use crate::layers::input;
     use crate::types::{
         ActivatedUnit, DatabaseMaturityStage, FeedbackEvent, MemoryChannel, MemoryType, SourceKind,
-        UnitHierarchy, UnitLevel,
+        Unit, UnitHierarchy, UnitLevel,
     };
+    use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -3193,5 +3336,138 @@ mod tests {
         let findings = pollution_findings_for_records(&records, 3, 3, 0.65, 0.05);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].canonical_normalized, "kraemer");
+    }
+
+    #[test]
+    fn should_prune_unit_protects_process_anchors() {
+        let db_path = std::env::temp_dir().join(format!("spse_process_anchor_{}.db", Uuid::new_v4()));
+        let governance = GovernanceConfig::default();
+        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+
+        // Create a process unit
+        let unit_id = Uuid::new_v4();
+        let structure_hash = 12345u64;
+        store.register_process_anchor(structure_hash, unit_id);
+
+        // Create a unit that would normally be pruned
+        let unit = Unit {
+            id: unit_id,
+            content: "test reasoning pattern".to_string(),
+            normalized: "test reasoning pattern".to_string(),
+            level: UnitLevel::Phrase,
+            utility_score: 0.1, // Low utility
+            salience_score: 0.3,
+            confidence: 0.5,
+            trust_score: 0.5,
+            frequency: 1,
+            memory_type: MemoryType::Episodic,
+            anchor_status: false,
+            created_at: Utc::now() - chrono::Duration::hours(48), // Old
+            last_seen_at: Utc::now() - chrono::Duration::hours(48), // Stale
+            is_process_unit: true,
+            ..Default::default()
+        };
+        store.cache.insert(unit_id, unit.clone());
+
+        // Should NOT prune because it's a process anchor
+        let should_prune = store.should_prune_unit(&unit, 0.2, 48.0, false);
+        assert!(!should_prune, "Process anchor should not be pruned");
+    }
+
+    #[test]
+    fn should_prune_unit_allows_normal_pruning() {
+        let db_path = std::env::temp_dir().join(format!("spse_normal_prune_{}.db", Uuid::new_v4()));
+        let governance = GovernanceConfig::default();
+        let store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+
+        // Create a normal unit that should be pruned
+        let unit = Unit {
+            id: Uuid::new_v4(),
+            content: "test content".to_string(),
+            normalized: "test content".to_string(),
+            level: UnitLevel::Phrase,
+            utility_score: 0.1, // Low utility
+            salience_score: 0.3,
+            confidence: 0.5,
+            trust_score: 0.5,
+            frequency: 1,
+            memory_type: MemoryType::Episodic,
+            anchor_status: false,
+            created_at: Utc::now() - chrono::Duration::hours(48),
+            last_seen_at: Utc::now() - chrono::Duration::hours(48),
+            is_process_unit: false,
+            ..Default::default()
+        };
+
+        // Should prune because it's low utility, stale, and not protected
+        let should_prune = store.should_prune_unit(&unit, 0.2, 48.0, false);
+        assert!(should_prune, "Normal low-utility unit should be pruned");
+    }
+
+    #[test]
+    fn reasoning_patterns_for_query_returns_matching_patterns() {
+        let db_path = std::env::temp_dir().join(format!("spse_reasoning_pattern_{}.db", Uuid::new_v4()));
+        let governance = GovernanceConfig::default();
+        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+
+        // Create and register a reasoning pattern
+        let pattern_id = Uuid::new_v4();
+        let pattern = Unit {
+            id: pattern_id,
+            content: "Step 1: Analyze the problem. Step 2: Break it down.".to_string(),
+            normalized: "step 1 analyze the problem step 2 break it down".to_string(),
+            level: UnitLevel::Phrase,
+            utility_score: 0.8,
+            salience_score: 0.7,
+            confidence: 0.9,
+            trust_score: 0.8,
+            frequency: 5,
+            memory_type: MemoryType::Episodic,
+            anchor_status: true,
+            is_process_unit: true,
+            ..Default::default()
+        };
+        store.cache.insert(pattern_id, pattern);
+        store.register_reasoning_pattern(crate::types::ReasoningType::General, pattern_id);
+
+        // Query for patterns
+        let matches = store.reasoning_patterns_for_query("analyze the problem", None, 5);
+        assert!(!matches.is_empty(), "Should find matching reasoning pattern");
+        assert_eq!(matches[0].unit_id, pattern_id);
+        assert!(matches[0].similarity > 0.0);
+    }
+
+    #[test]
+    fn register_reasoning_pattern_indexes_by_type() {
+        let db_path = std::env::temp_dir().join(format!("spse_reasoning_index_{}.db", Uuid::new_v4()));
+        let governance = GovernanceConfig::default();
+        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+
+        let pattern_id = Uuid::new_v4();
+        store.register_reasoning_pattern(crate::types::ReasoningType::Mathematical, pattern_id);
+
+        // Query with type hint should filter correctly
+        let unit = Unit {
+            id: pattern_id,
+            content: "Calculate x + y = z".to_string(),
+            normalized: "calculate x y z".to_string(),
+            level: UnitLevel::Phrase,
+            utility_score: 0.7,
+            salience_score: 0.5,
+            confidence: 0.8,
+            trust_score: 0.6,
+            frequency: 2,
+            memory_type: MemoryType::Episodic,
+            is_process_unit: true,
+            ..Default::default()
+        };
+        store.cache.insert(pattern_id, unit);
+
+        let matches = store.reasoning_patterns_for_query(
+            "calculate",
+            Some(crate::types::ReasoningType::Mathematical),
+            5,
+        );
+        assert!(!matches.is_empty(), "Should find pattern with type hint");
     }
 }

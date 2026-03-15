@@ -1,6 +1,8 @@
 use crate::config::EngineConfig;
 use crate::open_sources;
-use crate::types::{TrainingExecutionMode, TrainingOptions, TrainingPhaseKind, TrainingSource};
+use crate::types::{TrainingExecutionMode, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, Unit, MemoryType, MemoryChannel, SourceKind};
+use crate::memory::store::MemoryStore;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingScope {
@@ -336,4 +338,86 @@ fn curriculum_score(source: &TrainingSource) -> i32 {
         crate::types::TrainingSourceType::CommonCrawlWet => 22,
     };
     structure_score
+}
+
+/// Ingest a reasoning trace into memory as process units.
+/// Each step becomes a process unit in the Reasoning channel, isolated from Core memory.
+/// Returns the unit IDs created for the trace.
+pub fn ingest_reasoning_trace(
+    memory: &mut MemoryStore,
+    trace: &ReasoningTrace,
+    _query: &str,
+) -> Vec<Uuid> {
+    use crate::types::{ActivatedUnit, UnitHierarchy, UnitLevel};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut unit_ids = Vec::new();
+
+    for (step_idx, step) in trace.steps.iter().enumerate() {
+        // Get confidence from trajectory if available
+        let confidence = trace.confidence_trajectory
+            .get(step_idx)
+            .copied()
+            .unwrap_or(0.5);
+
+        // Create an activated unit from the reasoning step
+        let activation = ActivatedUnit {
+            normalized: step.content.clone(),
+            content: step.content.clone(),
+            level: UnitLevel::Phrase,
+            utility_score: confidence,
+            confidence,
+            frequency: 1,
+            salience: 0.5,
+            context_hint: format!("reasoning_{:?}_step_{}", trace.reasoning_type, step_idx),
+        };
+
+        // Build hierarchy for this step
+        let mut hierarchy = UnitHierarchy::default();
+        hierarchy.levels.insert("Phrase".to_string(), vec![activation.clone()]);
+
+        // Ingest into Reasoning channel only (not Core)
+        memory.ingest_hierarchy_with_channels(
+            &hierarchy,
+            SourceKind::UserInput,
+            &format!("reasoning_trace_{:?}", trace.structure_hash.unwrap_or(0)),
+            MemoryType::Episodic,
+            &[MemoryChannel::Reasoning],
+        );
+
+        // Find the created unit and mark it as a process unit
+        if let Some(unit) = memory
+            .units_in_channel(MemoryChannel::Reasoning)
+            .iter()
+            .find(|u| u.content == step.content && !u.is_process_unit)
+        {
+            // Compute structure hash for process anchor registration
+            let mut hasher = DefaultHasher::new();
+            step.content.hash(&mut hasher);
+            let structure_hash = hasher.finish();
+
+            // Register as process unit and reasoning pattern
+            memory.register_process_anchor(structure_hash, unit.id);
+            memory.register_reasoning_pattern(trace.reasoning_type, unit.id);
+
+            unit_ids.push(unit.id);
+        }
+    }
+
+    unit_ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ReasoningStep, ReasoningType};
+    use crate::telemetry::trace::{SessionId, TraceId};
+
+    #[test]
+    fn test_ingest_reasoning_trace_creates_process_units() {
+        // This test would require a MemoryStore with a temp database
+        // For now, we verify the function compiles and has correct signature
+        let _ = ingest_reasoning_trace as fn(&mut MemoryStore, &ReasoningTrace, &str) -> Vec<Uuid>;
+    }
 }

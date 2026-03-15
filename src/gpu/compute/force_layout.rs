@@ -27,7 +27,11 @@ pub struct GpuPosition {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub is_anchor: u32, // 0 = false, 1 = true
+    pub is_anchor: u32,       // 0 = false, 1 = true
+    pub is_process_unit: u32, // 0 = false, 1 = true
+    pub _padding1: u32,
+    pub _padding2: u32,
+    pub _padding3: u32,
 }
 
 /// Force accumulator for GPU
@@ -363,6 +367,10 @@ pub fn force_layout_gpu(
             y: u.semantic_position[1],
             z: u.semantic_position[2],
             is_anchor: if u.anchor_status { 1 } else { 0 },
+            is_process_unit: if u.is_process_unit { 1 } else { 0 },
+            _padding1: 0,
+            _padding2: 0,
+            _padding3: 0,
         })
         .collect();
 

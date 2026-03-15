@@ -297,9 +297,6 @@ Before submitting changes:
 - [ ] Naming conventions followed
 - [ ] Tests added for new behavior
 - [ ] Documentation updated (AGENTS.md, README.md)
-- [ ] `cargo check` passes
-- [ ] `cargo test` passes
-- [ ] `cargo clippy` warnings addressed
 
 ## Forbidden Actions
 

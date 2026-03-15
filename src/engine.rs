@@ -698,9 +698,35 @@ impl Engine {
         job_id
     }
 
+    pub fn start_train_with_scope(&self, _execution_mode: TrainingExecutionMode, _scope: TrainingScope) -> String {
+        let job_id = format!("train_{}", Uuid::new_v4().simple());
+        // Spawn happens in api.rs handler to avoid lifetime issues
+        job_id
+    }
+
     pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus> {
         let jobs = self.jobs.lock().expect("jobs mutex poisoned");
         jobs.get(job_id).cloned()
+    }
+
+    /// Train with a batch request (used by test harness and API)
+    pub async fn train_batch(&self, request: TrainBatchRequest) -> TrainingJobStatus {
+        let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
+        let job_id = format!("train_batch_{}", Uuid::new_v4().simple());
+        
+        // Build a minimal training plan from the batch request
+        let plan = training::TrainingPlan {
+            phases: vec![training::TrainingPhasePlan {
+                phase: TrainingPhaseKind::Bootstrap,
+                batches_target: 1,
+                sources: request.sources.clone(),
+                options: request.options.clone(),
+                min_unit_discovery_efficiency: None,
+                min_semantic_routing_accuracy: None,
+            }],
+        };
+        
+        self.run_training_plan_with_id(job_id, plan).await
     }
 
     pub async fn run_training_plan_with_id(
@@ -1348,7 +1374,12 @@ impl Engine {
     /// This is a placeholder implementation - actual thought generation would use
     /// the candidate pool and context to generate internal reasoning steps.
     fn generate_thought_unit(&self, query: &str, step: usize, state: &ReasoningState) -> ThoughtUnit {
-        // Calculate confidence improvement based on step and query complexity
+        // First, try to adapt an existing reasoning pattern
+        if let Some(pattern) = self.adapt_reasoning_pattern(query, step, state) {
+            return pattern;
+        }
+
+        // Fallback: Calculate confidence improvement based on step and query complexity
         let previous_confidence = state.confidence_trajectory.last().copied().unwrap_or(0.0);
         let improvement = 0.1 * (1.0 - previous_confidence).min(0.3);
         let new_confidence = (previous_confidence + improvement).clamp(0.0, 1.0);
@@ -1362,6 +1393,42 @@ impl Engine {
         );
 
         ThoughtUnit::new(content, step, new_confidence)
+    }
+
+    /// Adapt a reasoning pattern from memory to the current query context.
+    /// Returns a ThoughtUnit if a suitable pattern is found, None otherwise.
+    fn adapt_reasoning_pattern(&self, query: &str, step: usize, state: &ReasoningState) -> Option<ThoughtUnit> {
+        let memory = self.memory.lock().expect("memory mutex poisoned");
+
+        // Get reasoning patterns matching the query
+        let patterns = memory.reasoning_patterns_for_query(
+            query,
+            None, // No type hint - let similarity determine
+            5,    // Top 5 patterns
+        );
+
+        if patterns.is_empty() {
+            return None;
+        }
+
+        // Find the best matching pattern
+        let best = patterns.into_iter().next()?;
+
+        // Adapt the pattern content to current context
+        let adapted_content = format!(
+            "[Adapted from pattern] Step {}: {} (similarity: {:.2})",
+            step + 1,
+            best.content,
+            best.similarity
+        );
+
+        // Adjust confidence based on pattern similarity and anchor status
+        let base_confidence = state.confidence_trajectory.last().copied().unwrap_or(0.0);
+        let pattern_boost = if best.is_anchor { 0.15 } else { 0.1 };
+        let similarity_factor = best.similarity * 0.2;
+        let new_confidence = (base_confidence + pattern_boost + similarity_factor).clamp(0.0, 1.0);
+
+        Some(ThoughtUnit::new(adapted_content, step, new_confidence))
     }
 
     /// Ingest a silent thought into memory using the Reasoning channel.

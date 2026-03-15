@@ -8,6 +8,10 @@ struct Position {
     y: f32,
     z: f32,
     is_anchor: u32,
+    is_process_unit: u32,
+    _padding1: u32,
+    _padding2: u32,
+    _padding3: u32,
 }
 
 struct Force {
@@ -87,7 +91,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             source_pos.z + dir.z * displacement
         );
         new_pos = clamp(new_pos, vec3<f32>(-boundary), vec3<f32>(boundary));
-        positions[source_idx] = Position(new_pos.x, new_pos.y, new_pos.z, 0u);
+        
+        if (source_pos.is_process_unit == 1u) {
+            new_pos.z = -1.0;
+        }
+        
+        positions[source_idx] = Position(new_pos.x, new_pos.y, new_pos.z, 0u, source_pos.is_process_unit, 0u, 0u, 0u);
     }
     
     // Target moves towards source
@@ -99,6 +108,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             target_pos_val.z - dir.z * displacement
         );
         new_pos = clamp(new_pos, vec3<f32>(-boundary), vec3<f32>(boundary));
-        positions[target_idx_val] = Position(new_pos.x, new_pos.y, new_pos.z, 0u);
+        
+        if (target_pos_val.is_process_unit == 1u) {
+            new_pos.z = -1.0;
+        }
+        
+        positions[target_idx_val] = Position(new_pos.x, new_pos.y, new_pos.z, 0u, target_pos_val.is_process_unit, 0u, 0u, 0u);
     }
 }

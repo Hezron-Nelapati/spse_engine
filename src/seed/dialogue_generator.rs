@@ -1,10 +1,81 @@
 //! DialogueJson dataset generator for intent classification training.
 //! Includes combinations of IntentKind, ToneKind, and ResolverMode for comprehensive coverage.
 
-use crate::seed::{DatasetMetadata, QualityMetrics};
-use crate::types::{IntentKind, ToneKind, ResolverMode};
+use crate::seed::{DatasetMetadata, QualityMetrics, CurriculumMetadata, QualityGates};
+use crate::types::{IntentKind, ToneKind, ResolverMode, MemoryChannel, MemoryType, TrainingOptions, TrainingPhaseKind, TrainingExecutionMode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::types::{ReasoningTrace, ReasoningStep, ReasoningType, ReasoningStepType};
+
+/// Hash the logical structure of a reasoning trace
+/// Returns a hash that identifies the pattern, not the specific content
+pub fn hash_trace_structure(trace: &ReasoningTrace) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let mut hasher = DefaultHasher::new();
+    
+    // Hash the sequence of step types (the logical structure)
+    for step in &trace.steps {
+        step.step_type.hash(&mut hasher);
+        step.dependencies.hash(&mut hasher);
+    }
+    trace.reasoning_type.hash(&mut hasher);
+    
+    hasher.finish()
+}
+
+/// Abstract a raw reasoning trace into a generalized pattern
+/// Replaces specific entities with placeholders
+pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningTrace {
+    let mut abstracted = trace.clone();
+    
+    for step in &mut abstracted.steps {
+        // Replace specific entities with placeholders
+        for (i, entity) in entities.iter().enumerate() {
+            step.content = step.content.replace(entity, &format!("{{entity_{}}}", i));
+        }
+        step.structure_hash = Some(hash_trace_structure(trace));
+    }
+    
+    abstracted.structure_hash = Some(hash_trace_structure(trace));
+    abstracted.entities = Vec::new(); // No specific entities in abstract
+    abstracted
+}
+
+/// Generate a mathematical reasoning trace for a word problem
+pub fn generate_math_reasoning_trace(
+    problem: &str,
+    steps: &[(&str, ReasoningStepType)],  // (content, step_type) pairs
+    entities: &[String],
+) -> ReasoningTrace {
+    let reasoning_steps: Vec<ReasoningStep> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, (content, step_type))| ReasoningStep {
+            content: content.to_string(),
+            step_type: *step_type,
+            anchor_step: i == 0 || *step_type == ReasoningStepType::Conclusion,
+            dependencies: if i > 0 { vec![i - 1] } else { vec![] },
+            structure_hash: None,
+        })
+        .collect();
+    
+    ReasoningTrace {
+        steps: reasoning_steps,
+        reasoning_type: ReasoningType::Mathematical,
+        confidence_trajectory: generate_confidence_trajectory(steps.len()),
+        entities: entities.to_vec(),
+        structure_hash: None,
+    }
+}
+
+/// Generate confidence trajectory (progressive improvement)
+fn generate_confidence_trajectory(step_count: usize) -> Vec<f32> {
+    (0..step_count)
+        .map(|i| 0.3 + (i as f32 * 0.15).min(0.6))
+        .collect()
+}
 
 /// Dialogue turn (user or assistant)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +96,10 @@ pub struct DialogueTurn {
     /// Source quality hint for trust scoring (assistant turns)
     #[serde(default)]
     pub source_quality: Option<f32>,
+    /// Optional reasoning trace for this turn
+    /// When present, steps are ingested into MemoryChannel::Reasoning
+    #[serde(default)]
+    pub reasoning_trace: Option<crate::types::ReasoningTrace>,
 }
 
 /// Expected unit counts per level for validation
@@ -66,16 +141,16 @@ pub enum MemoryTarget {
     Episodic,
 }
 
-/// Metadata for dialogue
+/// Metadata for dialogue (aligned with unified training system)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogueMetadata {
     pub domain: String,
     pub complexity: String,
     #[serde(default)]
     pub entities_referenced: Vec<String>,
-    /// Memory channels this dialogue should route to
-    #[serde(default)]
-    pub memory_channels: Vec<String>,
+    /// Memory channels this dialogue should route to (typed enum)
+    #[serde(default = "default_dialogue_memory_channels")]
+    pub memory_channels: Vec<MemoryChannel>,
     /// Unit levels expected in processing
     #[serde(default)]
     pub expected_unit_levels: Vec<String>,
@@ -85,10 +160,23 @@ pub struct DialogueMetadata {
     /// Minimum corroboration count for Core promotion (default 2 per Appendix B5)
     #[serde(default = "default_corroboration_threshold")]
     pub corroboration_threshold: u32,
+    /// Curriculum metadata for training ordering
+    #[serde(default)]
+    pub curriculum: CurriculumMetadata,
+    /// Quality gates for this dialogue
+    #[serde(default)]
+    pub quality_gates: QualityGates,
+    /// Training options for processing
+    #[serde(default)]
+    pub training_options: TrainingOptions,
 }
 
 fn default_corroboration_threshold() -> u32 {
     2
+}
+
+fn default_dialogue_memory_channels() -> Vec<MemoryChannel> {
+    vec![MemoryChannel::Main]
 }
 
 /// Complete DialogueJson dataset
@@ -131,7 +219,34 @@ impl DialogueGenerator {
         domain: &str,
         complexity: &str,
         entities: Vec<String>,
-        memory_channels: Vec<String>,
+        memory_channels: Vec<MemoryChannel>,
+        expected_unit_levels: Vec<String>,
+    ) -> Dialogue {
+        let turns_with_none = turns.into_iter().map(|(r, c)| (r, c, None)).collect();
+        self.create_dialogue_with_reasoning(
+            intent,
+            expected_tone,
+            resolver_mode,
+            turns_with_none,
+            domain,
+            complexity,
+            entities,
+            memory_channels,
+            expected_unit_levels,
+        )
+    }
+
+    /// Create a dialogue with embedded reasoning traces (unified training system aligned)
+    pub fn create_dialogue_with_reasoning(
+        &mut self,
+        intent: IntentKind,
+        expected_tone: Option<ToneKind>,
+        resolver_mode: Option<ResolverMode>,
+        turns: Vec<(String, String, Option<ReasoningTrace>)>, // (role, content, trace)
+        domain: &str,
+        complexity: &str,
+        entities: Vec<String>,
+        memory_channels: Vec<MemoryChannel>,
         expected_unit_levels: Vec<String>,
     ) -> Dialogue {
         let intent_str = format!("{:?}", intent);
@@ -145,7 +260,7 @@ impl DialogueGenerator {
         
         let dialogue_turns: Vec<DialogueTurn> = turns
             .into_iter()
-            .map(|(role, content)| DialogueTurn {
+            .map(|(role, content, trace)| DialogueTurn {
                 role,
                 content,
                 context: None,
@@ -153,11 +268,50 @@ impl DialogueGenerator {
                 expected_anchors: Vec::new(),
                 expected_unit_count: ExpectedUnitCount::default(),
                 source_quality: None,
+                reasoning_trace: trace,
             })
             .collect();
         
         // Track intent distribution
         *self.intent_distribution.entry(intent_str.clone()).or_insert(0) += 1;
+        
+        // Build training-aligned curriculum metadata
+        let curriculum = CurriculumMetadata {
+            curriculum_score: Self::compute_curriculum_score(intent, &complexity),
+            phase_hint: TrainingPhaseKind::DryRun,
+            target_memory: MemoryType::Episodic,
+            memory_channels: memory_channels.clone(),
+            suggested_batch_size: 500,
+            max_chunk_chars: 8000,
+        };
+        
+        // Quality gates based on complexity
+        let quality_gates = QualityGates {
+            min_unit_discovery_efficiency: Some(match complexity {
+                "complex" | "highly_complex" | "expert" => 0.70,
+                "moderate" | "advanced" => 0.65,
+                _ => 0.60,
+            }),
+            min_semantic_routing_accuracy: Some(match complexity {
+                "complex" | "highly_complex" | "expert" => 0.80,
+                "moderate" | "advanced" => 0.75,
+                _ => 0.70,
+            }),
+            min_corroboration_count: default_corroboration_threshold(),
+        };
+        
+        // Training options based on intent type
+        let training_options = TrainingOptions {
+            consolidate_immediately: true,
+            max_memory_delta_mb: 50.0,
+            progress_interval_sec: 10,
+            tag_intent: true,
+            merge_to_core: matches!(intent, IntentKind::Question | IntentKind::Explain | IntentKind::Verify),
+            bypass_retrieval_gate: true,
+            bypass_generation: true,
+            daily_growth_limit_mb: Some(100.0),
+            execution_mode: TrainingExecutionMode::Development,
+        };
         
         Dialogue {
             id,
@@ -173,8 +327,42 @@ impl DialogueGenerator {
                 expected_unit_levels,
                 memory_target: MemoryTarget::Episodic,
                 corroboration_threshold: default_corroboration_threshold(),
+                curriculum,
+                quality_gates,
+                training_options,
             },
         }
+    }
+    
+    /// Compute curriculum score for training ordering (higher = earlier)
+    fn compute_curriculum_score(intent: IntentKind, complexity: &str) -> i32 {
+        let base_score = match intent {
+            // Factual intents get highest priority
+            IntentKind::Question | IntentKind::Verify | IntentKind::Extract => 110,
+            // Explanatory intents
+            IntentKind::Explain | IntentKind::Summarize | IntentKind::Compare => 105,
+            // Action intents
+            IntentKind::Plan | IntentKind::Analyze | IntentKind::Debug => 100,
+            // Social intents
+            IntentKind::Greeting | IntentKind::Gratitude | IntentKind::Farewell => 95,
+            // Assistance intents
+            IntentKind::Help | IntentKind::Clarify | IntentKind::Rewrite => 90,
+            // Creative intents (lower priority for core training)
+            IntentKind::Brainstorm | IntentKind::Critique => 85,
+            // Other intents
+            _ => 80,
+        };
+        
+        // Adjust by complexity (simpler examples earlier)
+        let complexity_adjustment = match complexity {
+            "simple" => 5,
+            "moderate" => 0,
+            "complex" => -5,
+            "highly_complex" | "expert" => -10,
+            _ => 0,
+        };
+        
+        base_score + complexity_adjustment
     }
 
     /// Create a simple dialogue (backward compatible)
@@ -242,16 +430,16 @@ impl DialogueGenerator {
         }
     }
 
-    /// Infer memory channels from intent
-    fn infer_memory_channels(intent: IntentKind) -> Vec<String> {
+    /// Infer memory channels from intent (aligned with unified training system)
+    fn infer_memory_channels(intent: IntentKind) -> Vec<MemoryChannel> {
         match intent {
             IntentKind::Question | IntentKind::Explain | IntentKind::Help | IntentKind::Clarify => {
-                vec!["Main".to_string(), "Intent".to_string()]
+                vec![MemoryChannel::Main, MemoryChannel::Intent]
             }
             IntentKind::Plan | IntentKind::Analyze | IntentKind::Debug => {
-                vec!["Main".to_string(), "Reasoning".to_string()]
+                vec![MemoryChannel::Main, MemoryChannel::Reasoning]
             }
-            _ => vec!["Main".to_string()]
+            _ => vec![MemoryChannel::Main]
         }
     }
 
@@ -377,6 +565,8 @@ pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetric
         link_coverage,
         noise_ratio,
         intent_balance,
+        estimated_unit_discovery_efficiency: 0.75, // Dialogue datasets support high unit discovery
+        estimated_semantic_routing_accuracy: 0.80, // Good accuracy for intent-tagged dialogues
     }
 }
 
@@ -469,7 +659,7 @@ pub mod templates {
         pub domain: &'static str,
         pub complexity: &'static str,
         pub entities: Vec<String>,
-        pub memory_channels: Vec<String>,
+        pub memory_channels: Vec<MemoryChannel>,
         pub unit_levels: Vec<String>,
     }
     
@@ -480,7 +670,7 @@ pub mod templates {
                 domain: "general",
                 complexity: "simple",
                 entities: Vec::new(),
-                memory_channels: vec!["Main".to_string()],
+                memory_channels: vec![MemoryChannel::Main],
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string()],
             }
         }
@@ -526,7 +716,7 @@ pub mod templates {
                     ],
                     domain: "business_operations",
                     entities: vec!["approval_workflow".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                     ..Default::default()
                 },
                 DialogueTemplate {
@@ -536,7 +726,7 @@ pub mod templates {
                     ],
                     domain: "hr",
                     entities: vec!["time_off_request".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                     ..Default::default()
                 },
             ],
@@ -549,7 +739,7 @@ pub mod templates {
                     domain: "operations",
                     complexity: "moderate",
                     entities: vec!["process_efficiency".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                     ..Default::default()
                 },
             ],
@@ -561,7 +751,7 @@ pub mod templates {
                     ],
                     domain: "finance",
                     entities: vec!["expense_reporting".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                     ..Default::default()
                 },
             ],
@@ -586,7 +776,7 @@ pub mod templates {
                     domain: "product",
                     complexity: "complex",
                     entities: vec!["product_launch".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Reasoning".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning],
                     ..Default::default()
                 },
             ],
@@ -599,7 +789,7 @@ pub mod templates {
                     domain: "analytics",
                     complexity: "complex",
                     entities: vec!["customer_feedback".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Reasoning".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning],
                     ..Default::default()
                 },
             ],
@@ -636,7 +826,7 @@ pub mod templates {
                     domain: "technical",
                     complexity: "moderate",
                     entities: vec!["approval_workflow".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Reasoning".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning],
                     ..Default::default()
                 },
             ],
@@ -660,7 +850,7 @@ pub mod templates {
                     ],
                     domain: "business",
                     entities: vec!["stakeholder".to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                     ..Default::default()
                 },
             ],
@@ -839,7 +1029,7 @@ pub mod templates {
                     domain,
                     complexity,
                     entities: vec![entity.to_string()],
-                    memory_channels: vec!["Main".to_string(), "Intent".to_string(), "Reasoning".to_string()],
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
                     unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string()],
                 }
             }).collect::<Vec<_>>()
@@ -857,7 +1047,7 @@ pub mod templates {
                 domain: "general",
                 complexity: "moderate",
                 entities: vec![],
-                memory_channels: vec!["Main".to_string(), "Intent".to_string()],
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string()],
             });
         }
@@ -869,7 +1059,7 @@ pub mod templates {
                 domain: "general",
                 complexity: "complex",
                 entities: vec![],
-                memory_channels: vec!["Main".to_string(), "Intent".to_string(), "Reasoning".to_string()],
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string()],
             });
         }
@@ -881,7 +1071,7 @@ pub mod templates {
                 domain: "expert",
                 complexity: "highly_complex",
                 entities: vec![],
-                memory_channels: vec!["Main".to_string(), "Intent".to_string(), "Reasoning".to_string(), "Analysis".to_string()],
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string()],
             });
         }
@@ -893,7 +1083,7 @@ pub mod templates {
                 domain: "expert",
                 complexity: "expert",
                 entities: vec![],
-                memory_channels: vec!["Main".to_string(), "Intent".to_string(), "Reasoning".to_string(), "Analysis".to_string(), "Context".to_string()],
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string(), "Document".to_string()],
             });
         }
@@ -1125,14 +1315,14 @@ mod tests {
             "technical",
             "moderate",
             vec!["workflow".to_string()],
-            vec!["Main".to_string(), "Intent".to_string()],
+            vec![MemoryChannel::Main, MemoryChannel::Intent],
             vec!["Word".to_string(), "Phrase".to_string()],
         );
         
         assert_eq!(d.intent, "Explain");
         assert_eq!(d.expected_tone, Some("Technical".to_string()));
         assert_eq!(d.resolver_mode, Some("Balanced".to_string()));
-        assert_eq!(d.metadata.memory_channels, vec!["Main", "Intent"]);
+        assert_eq!(d.metadata.memory_channels, vec![MemoryChannel::Main, MemoryChannel::Intent]);
     }
 
     #[test]

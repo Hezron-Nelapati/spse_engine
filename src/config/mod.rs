@@ -1051,6 +1051,10 @@ pub struct GovernanceConfig {
     pub pollution_detection_enabled: bool,
     pub pollution_min_length: usize,
     pub pollution_edge_trim_limit: usize,
+    /// Threshold for pollution similarity detection
+    pub pollution_similarity_threshold: f32,
+    /// Penalty factor for polluted units
+    pub pollution_penalty_factor: f32,
     pub pollution_overlap_threshold: f32,
     pub pollution_quality_margin: f32,
     pub pollution_audit_limit: usize,
@@ -2040,6 +2044,8 @@ impl Default for GovernanceConfig {
             pollution_detection_enabled: true,
             pollution_min_length: 4,
             pollution_edge_trim_limit: 3,
+            pollution_similarity_threshold: 0.65,
+            pollution_penalty_factor: 0.25,
             pollution_overlap_threshold: 0.70,
             pollution_quality_margin: 0.08,
             pollution_audit_limit: 64,

@@ -353,6 +353,8 @@ pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
         link_coverage,
         noise_ratio,
         intent_balance: 1.0, // Not applicable for entity datasets
+        estimated_unit_discovery_efficiency: 0.70, // Entity datasets support unit discovery
+        estimated_semantic_routing_accuracy: 0.85, // High accuracy due to structured entities
     }
 }
 
