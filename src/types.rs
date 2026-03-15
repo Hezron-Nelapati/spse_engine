@@ -67,7 +67,7 @@ pub enum SourceKind {
     TrainingUrl,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolverMode {
     Deterministic,
@@ -226,6 +226,32 @@ impl Unit {
             last_seen_at: now,
             salience_score: 0.0,
             confidence,
+            trust_score: 0.5,
+            corroboration_count: 0,
+            links: Vec::new(),
+            contexts: Vec::new(),
+        }
+    }
+}
+
+impl Default for Unit {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::nil(),
+            content: String::new(),
+            normalized: String::new(),
+            level: UnitLevel::Phrase,
+            frequency: 0,
+            utility_score: 0.0,
+            semantic_position: [0.5; 3],
+            anchor_status: false,
+            memory_type: MemoryType::Episodic,
+            memory_channels: default_memory_channels(),
+            created_at: now,
+            last_seen_at: now,
+            salience_score: 0.0,
+            confidence: 0.0,
             trust_score: 0.5,
             corroboration_count: 0,
             links: Vec::new(),
@@ -994,6 +1020,79 @@ pub enum ToneKind {
     Technical,
     Casual,
     Formal,
+}
+
+/// Method used for classification calculation
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalculationMethod {
+    /// Memory lookup via spatial index
+    MemoryLookup,
+}
+
+/// Result of classification calculation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClassificationResult {
+    /// Classified intent kind
+    pub intent: IntentKind,
+    /// Classified tone kind
+    pub tone: ToneKind,
+    /// Resolver mode for this classification
+    pub resolver_mode: ResolverMode,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f32,
+    /// Method used for calculation
+    pub method: CalculationMethod,
+    /// Number of candidate patterns considered
+    pub candidate_count: usize,
+}
+
+impl Default for ClassificationResult {
+    fn default() -> Self {
+        Self {
+            intent: IntentKind::Unknown,
+            tone: ToneKind::NeutralProfessional,
+            resolver_mode: ResolverMode::Balanced,
+            confidence: 0.0,
+            method: CalculationMethod::MemoryLookup,
+            candidate_count: 0,
+        }
+    }
+}
+
+/// Ground truth for training classification
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GroundTruth {
+    /// Expected intent
+    pub intent: IntentKind,
+    /// Expected tone
+    pub tone: ToneKind,
+    /// Expected resolver mode
+    pub resolver_mode: ResolverMode,
+    /// Optional domain context
+    pub domain: Option<String>,
+}
+
+impl Default for GroundTruth {
+    fn default() -> Self {
+        Self {
+            intent: IntentKind::Unknown,
+            tone: ToneKind::NeutralProfessional,
+            resolver_mode: ResolverMode::Balanced,
+            domain: None,
+        }
+    }
+}
+
+impl From<&crate::classification::trainer::LabeledDialogue> for GroundTruth {
+    fn from(dialogue: &crate::classification::trainer::LabeledDialogue) -> Self {
+        Self {
+            intent: dialogue.intent,
+            tone: dialogue.expected_tone,
+            resolver_mode: dialogue.resolver_mode,
+            domain: dialogue.metadata.domain.clone(),
+        }
+    }
 }
 
 /// Style anchor for tone inference - represents a reference style unit

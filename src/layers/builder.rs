@@ -252,6 +252,12 @@ fn normalize_window(window: &str, config: &UnitBuilderConfig) -> Option<(String,
 
     let normalized = condensed.to_lowercase();
 
+    // Reject classification pattern markers (pattern:intent:tone:hash)
+    // These are special units that should never merge with raw text units
+    if normalized.starts_with("pattern:") {
+        return None;
+    }
+
     // Reject unicode escape sequences (\\uXXXX or uXXXX patterns from JSON)
     // These appear when JSON escape sequences leak into text processing
     if looks_like_unicode_escape(&normalized) {

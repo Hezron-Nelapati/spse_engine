@@ -1,5 +1,6 @@
 pub mod api;
 pub mod bloom_filter;
+pub mod classification;
 pub mod common;
 pub mod config;
 pub mod datasets;
@@ -14,6 +15,7 @@ pub mod persistence;
 pub mod proto;
 pub mod region_index;
 pub mod scheduler;
+pub mod seed;
 pub mod spatial_index;
 pub mod stress_drill_lib;
 pub mod crash_drill_lib;

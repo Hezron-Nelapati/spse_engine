@@ -98,6 +98,9 @@ pub struct MemoryStore {
     pending_writes: Vec<Unit>,
     pending_writes_threshold: usize,
     write_deferred: bool,
+    // Classification pattern storage (Intent channel)
+    classification_patterns: HashMap<Uuid, crate::classification::ClassificationPattern>,
+    classification_by_signature: HashMap<String, Uuid>,
 }
 
 #[derive(Default)]
@@ -367,6 +370,8 @@ impl MemoryStore {
             pending_writes: Vec::new(),
             pending_writes_threshold: 500,
             write_deferred: true,
+            classification_patterns: HashMap::new(),
+            classification_by_signature: HashMap::new(),
         };
         if seed_bootstrap_units {
             store.ensure_bootstrap_seeds();
@@ -470,6 +475,59 @@ impl MemoryStore {
 
     pub fn candidate_promotions_total(&self) -> u64 {
         self.candidate_promotions_total
+    }
+
+    // === Classification Pattern Methods ===
+
+    /// Store a classification pattern in Intent memory channel.
+    pub fn store_classification_pattern(&mut self, pattern: crate::classification::ClassificationPattern) {
+        let sig_hash = pattern.signature.signature_hash().to_string();
+        let unit = pattern.to_unit();
+        
+        // Store pattern
+        self.classification_patterns.insert(pattern.unit_id, pattern.clone());
+        self.classification_by_signature.insert(sig_hash, pattern.unit_id);
+        
+        // Store unit in cache and channel index
+        self.cache.insert(unit.id, unit.clone());
+        self.content_index.insert(unit.normalized.clone(), unit.id);
+        for channel in &unit.memory_channels {
+            self.channel_index.entry(*channel).or_default().insert(unit.id);
+        }
+        
+        // Persist to database
+        let _ = self.db.upsert_unit(&unit);
+    }
+
+    /// Get a classification pattern by ID.
+    pub fn get_classification_pattern(&self, id: uuid::Uuid) -> Option<crate::classification::ClassificationPattern> {
+        self.classification_patterns.get(&id).cloned()
+    }
+
+    /// Update an existing classification pattern.
+    pub fn update_classification_pattern(&mut self, pattern: crate::classification::ClassificationPattern) {
+        if let Some(existing) = self.classification_patterns.get_mut(&pattern.unit_id) {
+            *existing = pattern.clone();
+            
+            // Update unit in cache
+            let unit = pattern.to_unit();
+            if let Some(cached_unit) = self.cache.get_mut(&pattern.unit_id) {
+                *cached_unit = unit.clone();
+            }
+            
+            // Persist to database
+            let _ = self.db.upsert_unit(&unit);
+        }
+    }
+
+    /// Get all classification patterns.
+    pub fn all_classification_patterns(&self) -> Vec<crate::classification::ClassificationPattern> {
+        self.classification_patterns.values().cloned().collect()
+    }
+
+    /// Count classification patterns.
+    pub fn classification_pattern_count(&self) -> usize {
+        self.classification_patterns.len()
     }
 
     pub fn all_units(&self) -> Vec<Unit> {

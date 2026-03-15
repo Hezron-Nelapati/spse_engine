@@ -221,6 +221,10 @@ pub struct Engine {
     dynamic_memory: Arc<DynamicMemoryAllocator>,
     /// Phase 4: Trace context for session/trace ID management
     trace_context: Arc<Mutex<TraceContext>>,
+    /// Classification calculator for intent/tone/resolver inference
+    classification_calculator: crate::classification::ClassificationCalculator,
+    /// Spatial grid for classification pattern retrieval
+    spatial_grid: Arc<Mutex<crate::spatial_index::SpatialGrid>>,
 }
 
 impl Engine {
@@ -281,6 +285,14 @@ impl Engine {
 
         // Phase 4: Initialize trace context
         let trace_context = Arc::new(Mutex::new(TraceContext::new()));
+        
+        // Initialize classification calculator
+        let classification_calculator = crate::classification::ClassificationCalculator::new();
+        
+        // Initialize spatial grid for classification patterns
+        let spatial_grid = Arc::new(Mutex::new(crate::spatial_index::SpatialGrid::new(
+            config.classification.spatial_query_radius,
+        )));
 
         spawn_maintenance(
             memory.clone(),
@@ -313,6 +325,8 @@ impl Engine {
             latency_monitor,
             dynamic_memory,
             trace_context,
+            classification_calculator,
+            spatial_grid,
         };
         engine
     }
@@ -533,6 +547,116 @@ impl Engine {
         }
 
         self.process_prompt(text, None, Vec::new(), true).await
+    }
+
+    /// Process text with explicit retrieval override
+    pub async fn process_with_retrieval(&self, text: &str, retrieval_enabled: bool) -> ProcessResult {
+        let _permit = self.scheduler.acquire(WorkPriority::Inference);
+        
+        // First check for inline document paths - document ingestion always works
+        let inline_request = parse_inline_document_request(text);
+        if !inline_request.paths.is_empty() {
+            match load_documents_from_paths_with_config(
+                &inline_request.paths,
+                &self.config.document,
+            ) {
+                Ok(documents) => {
+                    self.ingest_documents_into_core(&documents);
+                    self.replace_session_documents(documents.clone());
+                    let sources = documents
+                        .iter()
+                        .map(|doc| doc.source_url.clone())
+                        .collect::<Vec<_>>();
+                    if inline_request.prompt.is_empty() {
+                        let names = documents
+                            .iter()
+                            .map(|doc| doc.title.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return simple_result(
+                            format!(
+                                "Loaded {}. Ask a question about it. It will stay active for follow-up questions until you load another document or use /clear.",
+                                names
+                            ),
+                            sources,
+                            "inline_document_load",
+                            text,
+                        );
+                    }
+                    self.ingest_interaction_input(&inline_request.prompt, "inline_document_prompt");
+                    let query_state = self.session_snapshot().query_state;
+                    let sequence = self.current_sequence_state();
+                    let intent_profile = self.resolve_intent_profile(
+                        &inline_request.prompt,
+                        &ContextMatrix::default(),
+                        &sequence,
+                        true,
+                    );
+                    if let Some(answer) = answer_question(
+                        &inline_request.prompt,
+                        &documents,
+                        Some(&query_state),
+                        Some(intent_profile.primary),
+                    ) {
+                        self.remember_document_turn(&inline_request.prompt, &answer);
+                        return document_result(
+                            &answer,
+                            "inline_document_workspace",
+                            &inline_request.prompt,
+                            intent_profile,
+                            self.memory_summary(),
+                        );
+                    }
+                    return self
+                        .process_prompt(
+                            &inline_request.prompt,
+                            Some(documents),
+                            inline_request
+                                .paths
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect(),
+                            retrieval_enabled,
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    return simple_result(err, Vec::new(), "document_load_error", text);
+                }
+            }
+        }
+        
+        // Check session documents for follow-up questions
+        let session = self.session_snapshot();
+        if !session.documents.is_empty() {
+            let sequence = self.current_sequence_state();
+            let pre_intent = self.resolve_intent_profile(
+                text,
+                &ContextMatrix::default(),
+                &sequence,
+                true,
+            );
+            if let Some(answer) = answer_question(
+                text,
+                &session.documents,
+                Some(&session.query_state),
+                Some(pre_intent.primary),
+            ) {
+                if answer.confidence >= self.config.resolver.evidence_answer_confidence_threshold {
+                    self.ingest_interaction_input(text, "session_document_prompt");
+                    self.remember_document_turn(text, &answer);
+                    return document_result(
+                        &answer,
+                        "session_document_workspace",
+                        text,
+                        pre_intent,
+                        self.memory_summary(),
+                    );
+                }
+            }
+        }
+        
+        self.process_prompt(text, None, Vec::new(), retrieval_enabled).await
     }
 
     pub fn clear_session_documents(&self) -> usize {
@@ -2953,86 +3077,37 @@ impl Engine {
     fn resolve_intent_profile(
         &self,
         raw_input: &str,
-        context: &ContextMatrix,
-        sequence: &SequenceState,
-        has_active_document_context: bool,
+        _context: &ContextMatrix,
+        _sequence: &SequenceState,
+        _has_active_document_context: bool,
     ) -> IntentProfile {
-        let heuristic = IntentDetector::classify(
+        // Use calculation-based classification instead of heuristics
+        let memory = self.memory.lock().expect("memory mutex poisoned");
+        let spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
+        
+        let result = self.classification_calculator.calculate(
             raw_input,
-            context,
-            sequence,
-            has_active_document_context,
-            &self.config.intent,
+            &memory,
+            &spatial,
+            &self.config.classification,
         );
-        let memory_scores = self.intent_scores_from_memory(raw_input);
-        if memory_scores.is_empty() {
-            let mut fallback = heuristic;
-            fallback
-                .reasons
-                .push("heuristic_intent_fallback".to_string());
-            return fallback;
-        }
-
-        let mut combined_scores = heuristic.scores.clone();
-        for item in &mut combined_scores {
-            let memory_score = memory_scores.get(&item.intent).copied().unwrap_or(0.0);
-            item.score = (memory_score * 0.65) + (item.score * 0.35);
-        }
-        combined_scores.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
-
-        let top = combined_scores
-            .first()
-            .map(|entry| entry.score)
-            .unwrap_or(0.0);
-        let second = combined_scores
-            .get(1)
-            .map(|entry| entry.score)
-            .unwrap_or(0.0);
-        let ambiguous = (top - second) < self.config.intent.intent_ambiguity_margin;
-        let confidence = profile_confidence(
-            top,
-            second,
-            self.config.intent.intent_floor_threshold,
-            self.config.intent.intent_ambiguity_margin,
-            heuristic.certainty_bias,
-            self.config.intent.certainty_softener_weight,
-        );
-        if top < self.config.intent.intent_floor_threshold || ambiguous {
-            let mut fallback = heuristic;
-            fallback
-                .reasons
-                .push("intent_memory_low_confidence_fallback".to_string());
-            return fallback;
-        }
-
-        let primary = combined_scores
-            .first()
-            .map(|entry| entry.intent)
-            .unwrap_or(heuristic.primary);
-        let mut reasons = heuristic.reasons.clone();
-        reasons.push("intent_memory_primary".to_string());
-        reasons.push(format!(
-            "intent_memory_top={}",
-            combined_scores
-                .iter()
-                .take(3)
-                .map(|score| format!("{:?}:{:.2}", score.intent, score.score))
-                .collect::<Vec<_>>()
-                .join("|")
-        ));
-
+        
+        drop(memory);
+        drop(spatial);
+        
+        // Convert ClassificationResult to IntentProfile
         IntentProfile {
-            primary,
-            confidence,
-            top_score: top,
-            second_score: second,
-            ambiguous,
-            wants_brief: heuristic.wants_brief,
-            references_document_context: heuristic.references_document_context,
-            certainty_bias: heuristic.certainty_bias,
+            primary: result.intent,
+            confidence: result.confidence,
+            top_score: result.confidence,
+            second_score: 0.0,
+            ambiguous: result.confidence < self.config.classification.low_confidence_threshold,
+            wants_brief: false,
+            references_document_context: false,
+            certainty_bias: 0.0,
             fallback_mode: crate::types::IntentFallbackMode::None,
-            scores: combined_scores,
-            reasons,
+            scores: vec![],
+            reasons: vec![format!("classification_method={:?}", result.method)],
         }
     }
 

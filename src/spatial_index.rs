@@ -55,6 +55,63 @@ impl SpatialGrid {
         }
         ids
     }
+    
+    /// Insert a unit with given position into the spatial grid.
+    pub fn insert(&mut self, id: Uuid, position: &[f32; 3]) {
+        let cell = cell_id(*position, self.cell_size);
+        self.cells
+            .entry(cell)
+            .or_default()
+            .push((id, *position));
+    }
+    
+    /// Attract a unit toward a target position (Layer 18 feedback for correct predictions).
+    /// Moves the unit closer to the target by a fraction of the distance.
+    pub fn attract(&mut self, id: Uuid, target: &[f32; 3], strength: f32) {
+        for candidates in self.cells.values_mut() {
+            for (unit_id, position) in candidates.iter_mut() {
+                if *unit_id == id {
+                    // Move toward target by strength fraction
+                    let delta = [
+                        target[0] - position[0],
+                        target[1] - position[1],
+                        target[2] - position[2],
+                    ];
+                    position[0] += delta[0] * strength;
+                    position[1] += delta[1] * strength;
+                    position[2] += delta[2] * strength;
+                    return;
+                }
+            }
+        }
+    }
+    
+    /// Repel a unit away from a source position (Layer 18 feedback for incorrect predictions).
+    /// Moves the unit away from the source by a fraction of the distance.
+    pub fn repel(&mut self, id: Uuid, source: &[f32; 3], strength: f32) {
+        for candidates in self.cells.values_mut() {
+            for (unit_id, position) in candidates.iter_mut() {
+                if *unit_id == id {
+                    // Move away from source by strength fraction
+                    let delta = [
+                        position[0] - source[0],
+                        position[1] - source[1],
+                        position[2] - source[2],
+                    ];
+                    let distance = magnitude(delta).max(0.001);
+                    let direction = [
+                        delta[0] / distance,
+                        delta[1] / distance,
+                        delta[2] / distance,
+                    ];
+                    position[0] += direction[0] * strength;
+                    position[1] += direction[1] * strength;
+                    position[2] += direction[2] * strength;
+                    return;
+                }
+            }
+        }
+    }
 }
 
 pub fn force_directed_layout(units: &[Unit], config: &SemanticMapConfig) -> LayoutOutcome {

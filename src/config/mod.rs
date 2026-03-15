@@ -1148,6 +1148,8 @@ fn default_extraction_mode_passthrough() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourcePoliciesConfig {
+    #[serde(default = "default_seed_training_source_policy")]
+    pub seed_training: SourcePolicyConfig,
     #[serde(default = "default_html_source_policy")]
     pub html: SourcePolicyConfig,
     #[serde(default = "default_qa_json_source_policy")]
@@ -1171,6 +1173,7 @@ pub struct SourcePoliciesConfig {
 impl Default for SourcePoliciesConfig {
     fn default() -> Self {
         Self {
+            seed_training: default_seed_training_source_policy(),
             html: default_html_source_policy(),
             qa_json: default_qa_json_source_policy(),
             structured_json: default_structured_json_source_policy(),
@@ -1181,6 +1184,50 @@ impl Default for SourcePoliciesConfig {
             openapi_spec: default_openapi_source_policy(),
             common_crawl_wet: default_common_crawl_source_policy(),
         }
+    }
+}
+
+fn default_seed_training_source_policy() -> SourcePolicyConfig {
+    SourcePolicyConfig {
+        extraction_mode: "field_select".to_string(),
+        fields_to_extract: vec![
+            "turns".to_string(),
+            "messages".to_string(),
+            "dialogue".to_string(),
+            "conversation".to_string(),
+            "content".to_string(),
+            "role".to_string(),
+            "text".to_string(),
+            "name".to_string(),
+            "definition".to_string(),
+            "category".to_string(),
+            "intent".to_string(),
+            "domain".to_string(),
+        ],
+        fields_to_skip: vec![
+            "id".to_string(),
+            "metadata".to_string(),
+            "timestamp".to_string(),
+            "links".to_string(),
+            "aliases".to_string(),
+            "attributes".to_string(),
+            "contexts".to_string(),
+        ],
+        strip_elements: vec![],
+        keep_only: vec![],
+        extract: vec![],
+        skip: vec![],
+        languages: vec![],
+        flatten_structure: true,
+        skip_internal_ids: true,
+        normalize_whitespace: true,
+        trim_lines: true,
+        merge_to_core: true,
+        trust_bonus: 0.30,
+        memory_type: Some(MemoryType::Core),
+        decay_days: Some(30),
+        usage_tag: Some("seed_training".to_string()),
+        min_corroborations: None,
     }
 }
 
@@ -1687,7 +1734,7 @@ impl Default for RetrievalIoConfig {
             retrieval_timeout_ms: 2_000,
             max_retrieval_results: 10,
             cache_ttl_seconds: 3_600,
-            enable_retrieval: true,
+            enable_retrieval: false,
             max_retries: 2,
         }
     }
@@ -1728,6 +1775,53 @@ pub struct TelemetryConfig {
     pub hot_store: HotStoreConfig,
     /// Phase 4: Latency monitor configuration
     pub latency_monitor: LatencyMonitorConfig,
+}
+
+/// Configuration for calculation-based classification system.
+/// Replaces heuristic intent/tone detection with memory-backed pattern matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClassificationConfig {
+    /// Spatial query radius for pattern retrieval (L6)
+    pub spatial_query_radius: f32,
+    /// Minimum similarity threshold for candidate inclusion
+    pub min_similarity_threshold: f32,
+    /// Low confidence threshold - forces Exploratory resolver mode
+    pub low_confidence_threshold: f32,
+    /// High confidence threshold - allows Deterministic resolver mode upgrade
+    pub high_confidence_threshold: f32,
+    /// Pattern merge threshold for deduplication
+    pub pattern_merge_threshold: f32,
+    /// Weight for structural features (byte_length, entropy, token_count)
+    pub w_structure: f32,
+    /// Weight for punctuation features (?, !, .)
+    pub w_punctuation: f32,
+    /// Weight for semantic centroid features (L5 position)
+    pub w_semantic: f32,
+    /// Weight for derived scores (urgency, formality, technical, etc.)
+    pub w_derived: f32,
+    /// Target accuracy for training convergence
+    pub training_target_accuracy: f32,
+    /// Maximum training iterations
+    pub training_max_iterations: usize,
+}
+
+impl Default for ClassificationConfig {
+    fn default() -> Self {
+        Self {
+            spatial_query_radius: 0.5,
+            min_similarity_threshold: 0.3,
+            low_confidence_threshold: 0.4,
+            high_confidence_threshold: 0.85,
+            pattern_merge_threshold: 0.95,
+            w_structure: 0.25,
+            w_punctuation: 0.20,
+            w_semantic: 0.35,
+            w_derived: 0.20,
+            training_target_accuracy: 0.85,
+            training_max_iterations: 10,
+        }
+    }
 }
 
 impl Default for TelemetryConfig {
@@ -2031,6 +2125,9 @@ pub struct EngineConfig {
     /// Phase 5.2: Config sweeping and benchmarking configuration
     #[serde(default)]
     pub config_sweep: ConfigSweepConfig,
+    /// Calculation-based classification configuration (replaces heuristics)
+    #[serde(default)]
+    pub classification: ClassificationConfig,
 }
 
 impl Default for EngineConfig {
@@ -2061,6 +2158,7 @@ impl Default for EngineConfig {
             gpu: GpuConfig::default(),
             multi_engine: MultiEngineConfig::default(),
             config_sweep: ConfigSweepConfig::default(),
+            classification: ClassificationConfig::default(),
         }
     }
 }
