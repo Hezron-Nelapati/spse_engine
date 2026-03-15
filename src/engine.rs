@@ -42,6 +42,7 @@ use crate::types::{
 };
 use arc_swap::ArcSwap;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -840,6 +841,17 @@ impl Engine {
                 let mut units_created: u64 = 0;
                 let mut bytes_read: u64 = 0;
                 let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
+                let training_batch_size: usize = self.config.builder.training_batch_size.unwrap_or(500) as usize;
+
+                // Enable training mode: skip candidate staging, pattern combos, larger write batches
+                {
+                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                    memory.set_training_mode(true);
+                }
+
+                // Read lines into batches for parallel processing
+                let mut line_batch: Vec<String> = Vec::with_capacity(training_batch_size);
+                let mut done = false;
 
                 for line in reader.lines() {
                     let line = match line {
@@ -851,72 +863,102 @@ impl Engine {
                     }
 
                     bytes_read += line.len() as u64 + 1;
-                    if examples_ingested >= item_limit as u64 || bytes_read > max_bytes {
-                        break;
+                    if examples_ingested + line_batch.len() as u64 >= item_limit as u64
+                        || bytes_read > max_bytes
+                    {
+                        done = true;
                     }
 
-                    let example: crate::seed::TrainingExample = match serde_json::from_str(&line) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
+                    line_batch.push(line);
 
-                    // Ingest answer text (primary knowledge)
-                    let combined = if example.question.len() > 20 {
-                        format!("{} — {}", example.question, example.answer)
-                    } else {
-                        example.answer.clone()
-                    };
+                    if line_batch.len() >= training_batch_size || done {
+                        // Parallel: parse JSON + build units for this batch
+                        let config_ref = &self.config.builder;
+                        let source_name_ref = &source_name;
 
-                    let packet = input::ingest_raw(&combined, true);
-                    let build_output = self.build_units(&packet);
-                    let hierarchy = HierarchicalUnitOrganizer::organize(
-                        &build_output,
-                        &self.config.builder,
-                    );
+                        let prepared: Vec<_> = line_batch
+                            .par_iter()
+                            .filter_map(|raw_line| {
+                                let example: crate::seed::TrainingExample =
+                                    serde_json::from_str(raw_line).ok()?;
+                                let combined = if example.question.len() > 20 {
+                                    format!("{} — {}", example.question, example.answer)
+                                } else {
+                                    example.answer.clone()
+                                };
+                                let packet = input::ingest_raw(&combined, true);
+                                let build_output =
+                                    crate::layers::builder::UnitBuilder::build_units_static(
+                                        &packet, config_ref,
+                                    );
+                                let hierarchy = HierarchicalUnitOrganizer::organize(
+                                    &build_output, config_ref,
+                                );
+                                let context_label = example
+                                    .context
+                                    .clone()
+                                    .unwrap_or_else(|| source_name_ref.clone());
+                                Some((example, hierarchy, context_label))
+                            })
+                            .collect();
 
-                    let context_label = example
-                        .context
-                        .as_deref()
-                        .unwrap_or(&source_name);
+                        // Sequential: ingest all prepared hierarchies under a single lock
+                        {
+                            let mut memory =
+                                self.memory.lock().expect("memory mutex poisoned");
+                            for (example, hierarchy, context_label) in &prepared {
+                                let active_ids = memory.ingest_hierarchy_with_channels(
+                                    hierarchy,
+                                    SourceKind::TrainingDocument,
+                                    &context_label,
+                                    target_memory,
+                                    &channels,
+                                );
+                                units_created += active_ids.len() as u64;
 
-                    let active_ids = {
-                        let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                        memory.ingest_hierarchy_with_channels(
-                            &hierarchy,
-                            SourceKind::TrainingDocument,
-                            context_label,
-                            target_memory,
-                            &channels,
-                        )
-                    };
-                    units_created += active_ids.len() as u64;
+                                if let Some(ref trace) = example.reasoning {
+                                    let trace_ids = training::ingest_reasoning_trace(
+                                        &mut memory,
+                                        trace,
+                                        &example.question,
+                                    );
+                                    units_created += trace_ids.len() as u64;
+                                }
+                            }
+                        }
 
-                    // Ingest reasoning trace if present
-                    if let Some(ref trace) = example.reasoning {
-                        let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                        let trace_ids = training::ingest_reasoning_trace(
-                            &mut memory,
-                            trace,
-                            &example.question,
-                        );
-                        units_created += trace_ids.len() as u64;
+                        // Track intents (outside lock)
+                        for (example, _, _) in &prepared {
+                            if let Some(ref intent_str) = example.intent {
+                                *status
+                                    .intent_distribution
+                                    .entry(intent_str.clone())
+                                    .or_insert(0) += 1;
+                            }
+                        }
+
+                        examples_ingested += prepared.len() as u64;
+                        line_batch.clear();
+
+                        if examples_ingested % 10_000 < training_batch_size as u64 {
+                            eprintln!(
+                                "    {} examples, {} units, {:.1} MB",
+                                examples_ingested,
+                                units_created,
+                                bytes_read as f64 / 1_048_576.0,
+                            );
+                        }
+
+                        if done {
+                            break;
+                        }
                     }
+                }
 
-                    // Track intent distribution
-                    if let Some(ref intent_str) = example.intent {
-                        *status.intent_distribution.entry(intent_str.clone()).or_insert(0) += 1;
-                    }
-
-                    examples_ingested += 1;
-
-                    if examples_ingested % 10_000 == 0 {
-                        eprintln!(
-                            "    {} examples, {} units, {:.1} MB",
-                            examples_ingested,
-                            units_created,
-                            bytes_read as f64 / 1_048_576.0,
-                        );
-                    }
+                // Disable training mode and flush remaining writes
+                {
+                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                    memory.set_training_mode(false);
                 }
 
                 total_examples += examples_ingested;

@@ -36,6 +36,7 @@ layer_2_unit_builder:
   phrase_entity_promotion_frequency: 4
   phrase_entity_promotion_salience: 0.70
   phrase_entity_promotion_confidence: 0.55
+  training_batch_size: 500
 
 layer_5_semantic_map:
   preferred_spacing_k: 1.0

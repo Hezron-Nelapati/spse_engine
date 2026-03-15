@@ -1625,6 +1625,8 @@ pub struct UnitBuilderConfig {
     pub phrase_entity_promotion_frequency: u64,
     pub phrase_entity_promotion_salience: f32,
     pub phrase_entity_promotion_confidence: f32,
+    /// Number of JSONL lines to parse+build in parallel per training batch
+    pub training_batch_size: Option<u32>,
 }
 
 impl Default for UnitBuilderConfig {
@@ -1664,6 +1666,7 @@ impl Default for UnitBuilderConfig {
             phrase_entity_promotion_frequency: 4,
             phrase_entity_promotion_salience: 0.70,
             phrase_entity_promotion_confidence: 0.55,
+            training_batch_size: Some(500),
         }
     }
 }

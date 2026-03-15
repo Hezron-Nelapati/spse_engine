@@ -15,6 +15,11 @@ pub struct DiscoveryThresholds {
 }
 
 impl UnitBuilder {
+    /// Static unit building for parallel training batches (no Engine/governance state needed).
+    pub fn build_units_static(packet: &InputPacket, config: &UnitBuilderConfig) -> BuildOutput {
+        Self::ingest_with_config(packet, config)
+    }
+
     pub fn ingest(packet: &InputPacket) -> BuildOutput {
         Self::ingest_with_config(packet, &UnitBuilderConfig::default())
     }

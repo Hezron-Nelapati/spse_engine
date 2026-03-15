@@ -103,6 +103,8 @@ pub struct MemoryStore {
     pending_writes: Vec<Unit>,
     pending_writes_threshold: usize,
     write_deferred: bool,
+    // Training mode: skip candidate staging, pattern combos, larger write batches
+    training_mode: bool,
     // Classification pattern storage (Intent channel)
     classification_patterns: HashMap<Uuid, crate::classification::ClassificationPattern>,
     classification_by_signature: HashMap<String, Uuid>,
@@ -379,6 +381,7 @@ impl MemoryStore {
             pending_writes: Vec::new(),
             pending_writes_threshold: 500,
             write_deferred: true,
+            training_mode: false,
             classification_patterns: HashMap::new(),
             classification_by_signature: HashMap::new(),
         };
@@ -1001,16 +1004,19 @@ impl MemoryStore {
             }
         }
 
-        let promoted = self.promote_candidates_batch(default_memory_type, context_summary);
-        report.candidate_promotions = promoted.len() as u64;
-        report.new_units += promoted.len() as u64;
-        report.active_ids.extend(promoted);
-        report.active_ids.sort();
-        report.active_ids.dedup();
+        // Skip per-hierarchy candidate promotion and pattern recording in training mode
+        if !self.training_mode {
+            let promoted = self.promote_candidates_batch(default_memory_type, context_summary);
+            report.candidate_promotions = promoted.len() as u64;
+            report.new_units += promoted.len() as u64;
+            report.active_ids.extend(promoted);
+            report.active_ids.sort();
+            report.active_ids.dedup();
 
-        let pattern_cache = self.record_pattern_combinations(&report.active_ids);
-        report.cache_hits = pattern_cache.0;
-        report.cache_lookups = pattern_cache.1;
+            let pattern_cache = self.record_pattern_combinations(&report.active_ids);
+            report.cache_hits = pattern_cache.0;
+            report.cache_lookups = pattern_cache.1;
+        }
         report.bloom_false_positives = self.bloom_filter.stats().false_positives;
 
         report
@@ -2304,6 +2310,10 @@ impl MemoryStore {
     }
 
     fn should_stage_candidate(&self, source: SourceKind, default_memory_type: MemoryType) -> bool {
+        // Training mode bypasses candidate staging for direct insert throughput
+        if self.training_mode {
+            return false;
+        }
         matches!(
             source,
             SourceKind::TrainingDocument | SourceKind::TrainingUrl
@@ -2645,6 +2655,20 @@ impl MemoryStore {
     pub fn set_write_deferred(&mut self, deferred: bool) {
         self.write_deferred = deferred;
         if !deferred {
+            self.flush_pending_writes();
+        }
+    }
+
+    /// Enable or disable training mode.
+    /// When enabled: skips candidate staging (direct insert), skips pattern combination
+    /// recording, and increases deferred write batch size for throughput.
+    pub fn set_training_mode(&mut self, enabled: bool) {
+        self.training_mode = enabled;
+        if enabled {
+            self.pending_writes_threshold = 5000;
+            self.write_deferred = true;
+        } else {
+            self.pending_writes_threshold = 500;
             self.flush_pending_writes();
         }
     }
