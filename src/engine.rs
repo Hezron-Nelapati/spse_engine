@@ -650,6 +650,21 @@ impl Engine {
         memory.audit_pollution(limit)
     }
 
+    /// Run governance maintenance cycle and return the report.
+    pub fn run_maintenance(&self) -> Option<crate::types::GovernanceReport> {
+        let mut memory = self.memory.lock().expect("memory mutex poisoned");
+        let report = memory.run_maintenance(&self.config.governance);
+        drop(memory);
+        self.publish_memory_snapshot();
+        Some(report)
+    }
+
+    /// Return the total number of units currently in memory.
+    pub fn memory_unit_count(&self) -> u64 {
+        let (units, _) = self.memory_counts();
+        units as u64
+    }
+
     fn load_memory_snapshot(&self) -> Arc<MemorySnapshot> {
         self.memory_snapshot.load_full()
     }
@@ -975,10 +990,10 @@ impl Engine {
             );
             layer_13_merge_time_ms = layer_13_start.elapsed().as_millis() as u64;
             self.latency_monitor.record(13, layer_13_merge_time_ms);
-        } else if allow_retrieval
-            && self.config.retrieval_io.enable_retrieval
-            && decision.should_retrieve
-        {
+        } else if allow_retrieval && decision.should_retrieve {
+            // Retrieval is auto-triggered: no config gate required.
+            // The IntentDetector::assess() decision already incorporates entropy,
+            // freshness, disagreement, and open-world intent checks.
             let query = SafeQueryBuilder::build(
                 &packet.original_text,
                 &context_matrix,
@@ -1137,6 +1152,7 @@ impl Engine {
                 final_confidence: initial_confidence,
                 reasoning_triggered: false,
                 thoughts: Vec::new(),
+                needs_retrieval: false,
             }
         };
         let reasoning_time_ms = reasoning_start.elapsed().as_millis() as u64;
@@ -1373,6 +1389,7 @@ impl Engine {
                 final_confidence: initial_confidence,
                 reasoning_triggered: false,
                 thoughts: Vec::new(),
+                needs_retrieval: false,
             };
         }
 
@@ -1383,6 +1400,12 @@ impl Engine {
             // Generate thought unit for this step
             let thought = self.generate_thought_unit(query, step, &state);
             let thought_confidence = thought.confidence;
+
+            // If confidence is still low after first step, flag that retrieval is needed.
+            // The main pipeline checks this flag and triggers web retrieval automatically.
+            if step > 0 && thought_confidence < config.exit_confidence_threshold * 0.7 {
+                state.needs_retrieval = true;
+            }
 
             // Ingest silent thought into memory (Intent channel, not Core)
             self.ingest_silent_thought(&thought);
@@ -1408,6 +1431,7 @@ impl Engine {
             final_confidence,
             reasoning_triggered: true,
             thoughts: state.thoughts,
+            needs_retrieval: state.needs_retrieval,
         }
     }
 

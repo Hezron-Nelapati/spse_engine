@@ -1754,7 +1754,7 @@ impl Default for RetrievalIoConfig {
             retrieval_timeout_ms: 2_000,
             max_retrieval_results: 10,
             cache_ttl_seconds: 3_600,
-            enable_retrieval: false,
+            enable_retrieval: true,
             max_retries: 2,
         }
     }

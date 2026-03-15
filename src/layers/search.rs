@@ -3,6 +3,7 @@ use crate::types::{
     ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit, UnitLevel,
 };
 use nalgebra::SVector;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -68,7 +69,6 @@ impl CandidateScorer {
         intent: Option<IntentKind>,
         original_query: Option<&str>,
     ) -> Vec<ScoredCandidate> {
-        let mut scored = Vec::new();
         let weight_vector = scoring_weight_vector(weights);
         let merged_candidate_ids = merged.candidate_ids.iter().copied().collect::<HashSet<_>>();
         let recent_unit_ids = sequence
@@ -96,7 +96,7 @@ impl CandidateScorer {
                 .unwrap_or_default()
         };
 
-        for unit in candidates {
+        let score_one = |unit: &Unit| -> ScoredCandidate {
             let lowered = unit.content.to_lowercase();
             let spatial_fit = if merged_candidate_ids.contains(&unit.id) {
                 0.9
@@ -117,7 +117,7 @@ impl CandidateScorer {
             let utility_fit = unit.utility_score.clamp(0.0, 1.0) * level_multiplier;
             let confidence_fit = ((unit.confidence + unit.trust_score) / 2.0).clamp(0.0, 1.0);
             let evidence_support = evidence_match(&lowered, merged) * level_multiplier;
-            
+
             // Exact match bonus: prioritize candidates that exactly match query terms
             // This helps disambiguate "Donald Trump" from "Donald Trump Jr."
             let exact_match_bonus = exact_match_score(&lowered, &query_terms, intent) * level_multiplier;
@@ -143,14 +143,21 @@ impl CandidateScorer {
             ]);
             let score = weight_vector.dot(&feature_vector) + merged.freshness_boost + exact_match_bonus;
 
-            scored.push(ScoredCandidate {
+            ScoredCandidate {
                 unit_id: unit.id,
                 content: unit.content.clone(),
                 score,
                 breakdown,
                 memory_type: unit.memory_type,
-            });
-        }
+            }
+        };
+
+        // Parallelize scoring for large candidate sets (>128), sequential for small
+        let mut scored = if candidates.len() > 128 {
+            candidates.par_iter().map(score_one).collect::<Vec<_>>()
+        } else {
+            candidates.iter().map(score_one).collect::<Vec<_>>()
+        };
 
         scored.sort_by(|a, b| {
             b.score

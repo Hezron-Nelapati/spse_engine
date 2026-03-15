@@ -1285,6 +1285,304 @@ pub mod templates {
     }
 }
 
+/// Generate bulk multi-turn dialogue data, streaming to a JSONL file as TrainingExamples.
+/// Returns (examples_written, bytes_written).
+pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64, seed: u64) -> (u64, u64) {
+    use crate::seed::bulk_generator::{
+        self, expand_template, human_bytes, pick, pick_idx, pick_str, seeded_rng, topics_for_domain,
+        JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DETAIL_POOLS, DOMAINS,
+        GREETING_VARIATIONS, GRATITUDE_VARIATIONS,
+    };
+    use crate::seed::TrainingExample;
+    use crate::types::MemoryChannel;
+    use rand::Rng;
+
+    let mut rng = seeded_rng(seed);
+    let mut writer = JsonlWriter::new(output_path).expect("create dialogue JSONL");
+    let mut count: u64 = 0;
+
+    let all_intents = [
+        IntentKind::Question, IntentKind::Explain, IntentKind::Compare,
+        IntentKind::Analyze, IntentKind::Plan, IntentKind::Debug,
+        IntentKind::Verify, IntentKind::Summarize, IntentKind::Classify,
+        IntentKind::Recommend, IntentKind::Extract, IntentKind::Critique,
+        IntentKind::Brainstorm, IntentKind::Translate, IntentKind::Act,
+        IntentKind::Help, IntentKind::Clarify, IntentKind::Rewrite,
+        IntentKind::Continue, IntentKind::Forget,
+    ];
+
+    let followup_templates = [
+        "Can you elaborate on the {} aspect?",
+        "How does that relate to {}?",
+        "What about the {} implications?",
+        "Could you provide an example of {}?",
+        "What are the limitations of {}?",
+        "How would you apply {} in practice?",
+        "Is there a connection between {} and the previous point?",
+        "What's the most important takeaway about {}?",
+        "Can you compare {} with the alternative approaches?",
+        "What evidence supports the claim about {}?",
+        "What would happen if {} were applied differently?",
+        "How does {} interact with other factors?",
+        "Can you break down the {} component further?",
+        "What's the historical context behind {}?",
+        "Are there any controversies surrounding {}?",
+        "What are the emerging trends related to {}?",
+        "How does {} vary across different contexts?",
+        "What are the common pitfalls when dealing with {}?",
+        "Can you quantify the impact of {}?",
+        "What assumptions underlie the {} framework?",
+        "How robust is {} under changing conditions?",
+        "What's the relationship between {} and cost-effectiveness?",
+        "How would you teach {} to a newcomer?",
+        "What distinguishes good from bad implementations of {}?",
+        "What role does {} play in long-term outcomes?",
+    ];
+
+    let clarification_templates = [
+        "I see. So {} essentially means that the core mechanism involves {}?",
+        "To clarify — are you asking about {} specifically, or {} more broadly?",
+        "Let me make sure I understand: {} relates to {} through {}?",
+        "When you mention {}, do you mean in the context of {}?",
+        "So if I understand correctly, {} depends on {} for its effectiveness?",
+        "Are you saying that {} is a prerequisite for {}?",
+        "Just to confirm — {} and {} are complementary rather than competing approaches?",
+        "Does {} apply equally to all cases, or is it specific to {}?",
+        "Would it be accurate to say {} is the primary driver behind {}?",
+        "Can you confirm whether {} supersedes the older approach to {}?",
+        "Is the relationship between {} and {} causal or correlational?",
+        "When practitioners refer to {}, do they typically also include {}?",
+    ];
+
+    let assistant_continuation = [
+        "Building on that, {} also involves {detail}. This is important because {detail} directly impacts the overall outcome.",
+        "To expand further: {detail} plays a crucial role in {}. The relationship between these elements determines the effectiveness of the entire approach.",
+        "Additionally, {} connects to {detail} in several ways. First, {detail} provides the foundation. Second, {detail} ensures quality. Third, the combination produces measurable improvements.",
+        "That's a great follow-up. In {}, {detail} is often overlooked but critical. Research shows that {detail} accounts for a significant portion of the variance in outcomes.",
+        "Exactly. The {} perspective reveals that {detail} and {detail} are interdependent. Optimizing one without the other leads to suboptimal results.",
+        "Good question. The {} dimension introduces {detail}, which complicates the picture. Practitioners typically address this through {detail} and iterative refinement.",
+        "Yes, and {} further depends on {detail}. Without adequate {detail}, the system degrades in predictable ways. The standard mitigation involves layered safeguards.",
+        "That's an insightful connection. In {} specifically, {detail} serves as a feedback mechanism. When {detail} is properly calibrated, outcomes improve substantially.",
+        "Precisely. The {} literature emphasizes that {detail} and {detail} form a virtuous cycle. Breaking this cycle often explains why implementations fail in practice.",
+        "To add nuance: {} benefits from {detail} primarily in complex scenarios. In simpler cases, {detail} alone suffices. The key is matching the approach to the problem scale.",
+        "Interesting angle. In {}, experts have found that {detail} varies by context. Environments with high {detail} demands require fundamentally different strategies.",
+        "Right. The {} community increasingly recognizes that {detail} must be balanced against {detail}. The optimal trade-off depends on organizational maturity and resource constraints.",
+    ];
+
+    // Phase 1: Multi-turn knowledge dialogues (~70% of budget)
+    let phase1_target = target_bytes * 70 / 100;
+    while writer.bytes_written() < phase1_target {
+        let domain_idx = pick_idx(&mut rng, DOMAINS.len());
+        let domain = DOMAINS[domain_idx];
+        let topics = topics_for_domain(domain_idx);
+        let topic = pick_str(&mut rng, topics);
+        let intent = pick(&mut rng, &all_intents);
+        let (tone, _resolver) = DialogueGenerator::infer_tone_resolver(*intent);
+
+        let turn_count: usize = rng.gen_range(2..5); // 2-4 user-assistant exchanges
+
+        // First turn
+        let q_template = pick(&mut rng, bulk_generator::QUESTION_TEMPLATES);
+        let first_question = q_template.0.replace("{}", &format!("{} in {}", topic, domain));
+        let tmpl_prefix = pick_str(&mut rng, ANSWER_PREFIXES);
+        let prefix = expand_template(&mut rng, tmpl_prefix, domain, topic);
+        let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
+        let body = expand_template(&mut rng, tmpl_body, domain, topic);
+        let first_answer = format!("{} {}", prefix, body);
+
+        // Write first turn as example
+        let example = TrainingExample {
+            question: first_question.clone(),
+            answer: first_answer.clone(),
+            context: Some(format!("dialogue:turn_1:{}:{}:{}", domain, format!("{:?}", intent), format!("{:?}", tone))),
+            reasoning: None,
+            intent: Some(format!("{:?}", intent)),
+            entities: vec![topic.to_string(), domain.to_string()],
+            channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+            curriculum: crate::seed::CurriculumMetadata {
+                curriculum_score: rng.gen_range(95..120),
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+                ..Default::default()
+            },
+            quality_gates: Default::default(),
+            training_options: Default::default(),
+        };
+        writer.write_example(&example).expect("write dialogue turn 1");
+        count += 1;
+
+        // Follow-up turns
+        let mut _prev_answer = first_answer;
+        for turn_num in 2..=turn_count {
+            let detail = pick_str(&mut rng, DETAIL_POOLS);
+            let followup_q = format!(
+                "Regarding {} in {}: {}",
+                topic, domain,
+                pick_str(&mut rng, &followup_templates).replacen("{}", detail, 1)
+            );
+
+            let continuation = pick_str(&mut rng, &assistant_continuation)
+                .replacen("{}", topic, 1)
+                .replace("{detail}", detail);
+
+            let followup_intent = if rng.gen_bool(0.3) { IntentKind::Clarify } else { *intent };
+
+            let example = TrainingExample {
+                question: followup_q.clone(),
+                answer: continuation.clone(),
+                context: Some(format!("dialogue:turn_{}:{}:{}", turn_num, domain, format!("{:?}", followup_intent))),
+                reasoning: None,
+                intent: Some(format!("{:?}", followup_intent)),
+                entities: vec![topic.to_string(), domain.to_string()],
+                channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+                curriculum: crate::seed::CurriculumMetadata {
+                    curriculum_score: rng.gen_range(90..115),
+                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+                    ..Default::default()
+                },
+                quality_gates: Default::default(),
+                training_options: Default::default(),
+            };
+            writer.write_example(&example).expect("write dialogue followup");
+            count += 1;
+            _prev_answer = continuation;
+        }
+
+        if count % 100_000 == 0 {
+            eprintln!("  dialogues: {} examples, {}", count, human_bytes(writer.bytes_written()));
+        }
+    }
+
+    // Phase 2: Clarification dialogues (~22% of budget)
+    let phase2_target = target_bytes * 92 / 100;
+    while writer.bytes_written() < phase2_target {
+        let domain_idx = pick_idx(&mut rng, DOMAINS.len());
+        let domain = DOMAINS[domain_idx];
+        let topics = topics_for_domain(domain_idx);
+        let topic = pick_str(&mut rng, topics);
+        let detail_a = pick_str(&mut rng, DETAIL_POOLS);
+        let detail_b = pick_str(&mut rng, DETAIL_POOLS);
+
+        let clarify_q = pick_str(&mut rng, &clarification_templates)
+            .replacen("{}", topic, 1)
+            .replacen("{}", detail_a, 1)
+            .replacen("{}", detail_b, 1);
+
+        let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
+        let body = expand_template(&mut rng, tmpl_body, domain, topic);
+        let answer = format!(
+            "Yes, that's correct. Regarding {} and {} in the context of {}: {}",
+            detail_a, detail_b, topic, body
+        );
+
+        let example = TrainingExample {
+            question: clarify_q,
+            answer,
+            context: Some(format!("dialogue:clarification:{}", domain)),
+            reasoning: None,
+            intent: Some("Clarify".to_string()),
+            entities: vec![topic.to_string()],
+            channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+            curriculum: crate::seed::CurriculumMetadata {
+                curriculum_score: rng.gen_range(95..115),
+                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
+                ..Default::default()
+            },
+            quality_gates: Default::default(),
+            training_options: Default::default(),
+        };
+        writer.write_example(&example).expect("write clarification");
+        count += 1;
+    }
+
+    // Phase 3: Social dialogues — one full pass through pools with domain context (~3% of budget)
+    let phase3_target = target_bytes * 95 / 100;
+    while writer.bytes_written() < phase3_target {
+        let domain_idx = pick_idx(&mut rng, DOMAINS.len());
+        let domain = DOMAINS[domain_idx];
+        let topic = pick(&mut rng, topics_for_domain(domain_idx));
+
+        // Greeting → knowledge question → gratitude triplet
+        let (gq, ga) = pick(&mut rng, GREETING_VARIATIONS);
+        let q_template = pick(&mut rng, bulk_generator::QUESTION_TEMPLATES);
+        let question = q_template.0.replace("{}", &format!("{} in {}", topic, domain));
+        let tmpl_prefix = pick_str(&mut rng, ANSWER_PREFIXES);
+        let prefix = expand_template(&mut rng, tmpl_prefix, domain, topic);
+        let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
+        let body = expand_template(&mut rng, tmpl_body, domain, topic);
+        let full_answer = format!("{} {}", prefix, body);
+
+        // Write greeting with domain-contextualized answer
+        let greeting_q = format!("{} — I need help with {} in {}.", gq, topic, domain);
+        let greeting_answer = format!("{} Let me help with {}. {}", ga, topic, full_answer);
+        let example = TrainingExample::qa(&greeting_q, &greeting_answer)
+            .with_intent(IntentKind::Greeting)
+            .with_entities(vec![topic.to_string(), domain.to_string()])
+            .with_context(&format!("dialogue:social:greeting:{}", domain))
+            .with_curriculum_score(130);
+        writer.write_example(&example).expect("write social greeting");
+        count += 1;
+
+        // Write the knowledge question
+        let example = TrainingExample::qa(&question, &full_answer)
+            .with_intent(IntentKind::Question)
+            .with_entities(vec![topic.to_string(), domain.to_string()])
+            .with_context(&format!("dialogue:social:knowledge:{}", domain))
+            .with_curriculum_score(100);
+        writer.write_example(&example).expect("write social question");
+        count += 1;
+
+        // Write gratitude with summary
+        let (tq, _ta) = pick(&mut rng, GRATITUDE_VARIATIONS);
+        let gratitude_q = format!("{} — your help with {} in {} was great.", tq, topic, domain);
+        let gratitude_answer = format!("You're welcome! To recap: {} I'm glad I could help with {} in {}. Feel free to ask more.", full_answer, topic, domain);
+        let example = TrainingExample::qa(&gratitude_q, &gratitude_answer)
+            .with_intent(IntentKind::Gratitude)
+            .with_entities(vec![topic.to_string(), domain.to_string()])
+            .with_context(&format!("dialogue:social:gratitude:{}", domain))
+            .with_curriculum_score(130);
+        writer.write_example(&example).expect("write social gratitude");
+        count += 1;
+    }
+
+    // Phase 4: Remember/Forget dialogues (~5% of budget)
+    while writer.bytes_written() < target_bytes {
+        let domain_idx = pick_idx(&mut rng, DOMAINS.len());
+        let domain = DOMAINS[domain_idx];
+        let topic = pick_str(&mut rng, topics_for_domain(domain_idx));
+        let detail = pick_str(&mut rng, DETAIL_POOLS);
+
+        let detail_b = pick_str(&mut rng, DETAIL_POOLS);
+        let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
+        let body = expand_template(&mut rng, tmpl_body, domain, topic);
+
+        if rng.gen_bool(0.6) {
+            // Remember pattern
+            let question = format!("Remember this: the {} approach to {} in {} uses {} and {}.", domain, topic, domain, detail, detail_b);
+            let answer = format!("Noted. I'll remember that the {} approach to {} uses {} and {}. For context: {}", domain, topic, detail, detail_b, body);
+            let example = TrainingExample::qa(&question, &answer)
+                .with_intent(IntentKind::Act)
+                .with_entities(vec![topic.to_string(), detail.to_string(), domain.to_string()])
+                .with_context(&format!("dialogue:remember:{}", domain))
+                .with_curriculum_score(110);
+            writer.write_example(&example).expect("write remember");
+        } else {
+            // Forget pattern
+            let question = format!("Forget what I said about {} and {} in {}.", topic, detail, domain);
+            let answer = format!("Done. I've removed the previous information about {} in {}. Previously noted: {} That context has been cleared.", topic, domain, body);
+            let example = TrainingExample::qa(&question, &answer)
+                .with_intent(IntentKind::Forget)
+                .with_entities(vec![topic.to_string(), domain.to_string()])
+                .with_context(&format!("dialogue:forget:{}", domain))
+                .with_curriculum_score(110);
+            writer.write_example(&example).expect("write forget");
+        }
+        count += 1;
+    }
+
+    writer.flush().expect("flush dialogue JSONL");
+    (count, writer.bytes_written())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

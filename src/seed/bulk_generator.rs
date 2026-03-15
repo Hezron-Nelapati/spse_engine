@@ -1,0 +1,861 @@
+//! Bulk seed generation infrastructure.
+//!
+//! Provides shared domain pools, template expansion, and JSONL streaming
+//! for generating ~1GB per seed category. All generators stream to disk
+//! to avoid holding gigabytes in memory.
+
+use crate::seed::TrainingExample;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::path::Path;
+
+// ============================================================================
+// DOMAIN POOLS
+// ============================================================================
+
+pub const DOMAINS: &[&str] = &[
+    "science", "technology", "mathematics", "history", "geography",
+    "medicine", "law", "cooking", "sports", "music",
+    "art", "literature", "philosophy", "economics", "business",
+    "engineering", "biology", "chemistry", "physics", "astronomy",
+    "psychology", "sociology", "education", "agriculture", "environment",
+    "architecture", "transportation", "communication", "military", "politics",
+    "finance", "cybersecurity", "robotics", "linguistics", "anthropology",
+    "meteorology", "oceanography", "geology", "archaeology", "nutrition",
+];
+
+pub const TOPICS_PER_DOMAIN: &[&[&str]] = &[
+    // science
+    &["quantum mechanics", "thermodynamics", "relativity", "evolution", "genetics",
+      "cell biology", "ecology", "neuroscience", "astrophysics", "organic chemistry",
+      "molecular biology", "immunology", "virology", "biochemistry", "pharmacology",
+      "epidemiology", "bioinformatics", "nanotechnology", "materials science", "nuclear physics",
+      "particle physics", "fluid dynamics", "optics", "acoustics", "electromagnetism",
+      "paleontology", "microbiology", "botany", "zoology", "anatomy",
+      "physiology", "toxicology", "computational biology", "synthetic biology", "biophysics",
+      "geophysics", "cosmology", "condensed matter", "spectroscopy", "crystallography"],
+    // technology
+    &["machine learning", "blockchain", "cloud computing", "edge computing", "microservices",
+      "containerization", "devops", "ci/cd pipelines", "api design", "distributed systems",
+      "database optimization", "caching strategies", "load balancing", "message queues", "web sockets",
+      "graphql", "rest apis", "grpc", "serverless", "kubernetes",
+      "docker", "terraform", "monitoring", "logging", "tracing",
+      "encryption", "authentication", "authorization", "rate limiting", "circuit breakers",
+      "event sourcing", "cqrs", "saga patterns", "service mesh", "observability",
+      "feature flags", "a/b testing", "canary deployments", "blue-green deployments", "chaos engineering"],
+    // mathematics
+    &["calculus", "linear algebra", "probability", "statistics", "number theory",
+      "topology", "graph theory", "combinatorics", "differential equations", "abstract algebra",
+      "real analysis", "complex analysis", "numerical methods", "optimization", "game theory",
+      "cryptography", "information theory", "set theory", "logic", "category theory",
+      "fractal geometry", "chaos theory", "fourier analysis", "tensor calculus", "measure theory",
+      "stochastic processes", "regression analysis", "bayesian inference", "hypothesis testing", "monte carlo methods",
+      "simplex method", "dynamic programming", "greedy algorithms", "divide and conquer", "backtracking",
+      "heuristics", "approximation algorithms", "randomized algorithms", "parallel algorithms", "quantum computing"],
+    // history
+    &["ancient civilizations", "roman empire", "medieval europe", "renaissance", "industrial revolution",
+      "world war i", "world war ii", "cold war", "colonial era", "silk road",
+      "french revolution", "american revolution", "ottoman empire", "mongol empire", "viking age",
+      "ancient egypt", "ancient greece", "han dynasty", "mughal empire", "meiji restoration",
+      "apartheid", "civil rights movement", "space race", "decolonization", "globalization",
+      "printing press", "age of exploration", "enlightenment", "reconstruction", "progressive era",
+      "great depression", "marshall plan", "berlin wall", "european union", "united nations",
+      "treaty of westphalia", "magna carta", "declaration of independence", "emancipation proclamation", "treaty of versailles"],
+    // geography
+    &["tectonic plates", "ocean currents", "climate zones", "mountain formation", "river systems",
+      "desert ecosystems", "tropical rainforests", "arctic regions", "volcanic activity", "continental drift",
+      "plate boundaries", "earthquake zones", "tsunami formation", "glacial erosion", "coastal geomorphology",
+      "soil classification", "watershed management", "urban geography", "population distribution", "migration patterns",
+      "trade routes", "time zones", "map projections", "gis systems", "remote sensing",
+      "topographic mapping", "bathymetry", "cartography", "geopolitics", "border disputes",
+      "island formation", "cave systems", "coral reefs", "permafrost", "sand dunes",
+      "fjords", "deltas", "estuaries", "wetlands", "grasslands"],
+    // medicine
+    &["cardiology", "neurology", "oncology", "immunology", "endocrinology",
+      "pulmonology", "gastroenterology", "dermatology", "orthopedics", "ophthalmology",
+      "pediatrics", "geriatrics", "psychiatry", "radiology", "pathology",
+      "anesthesiology", "emergency medicine", "surgery", "pharmacology", "epidemiology",
+      "genetics", "infectious disease", "rheumatology", "nephrology", "hematology",
+      "clinical trials", "drug interactions", "dosage calculations", "side effects", "contraindications",
+      "diagnostic imaging", "blood tests", "biopsy", "vaccination", "antibiotics",
+      "pain management", "rehabilitation", "palliative care", "preventive medicine", "telemedicine"],
+    // law
+    &["contract law", "constitutional law", "criminal law", "tort law", "property law",
+      "intellectual property", "patent law", "trademark law", "copyright law", "employment law",
+      "corporate law", "tax law", "immigration law", "environmental law", "international law",
+      "human rights law", "family law", "estate planning", "bankruptcy", "antitrust law",
+      "securities law", "privacy law", "data protection", "cybercrime", "arbitration",
+      "mediation", "litigation", "evidence rules", "judicial review", "due process",
+      "habeas corpus", "burden of proof", "statute of limitations", "fiduciary duty", "negligence",
+      "strict liability", "vicarious liability", "injunctions", "damages", "legal precedent"],
+    // cooking
+    &["baking techniques", "fermentation", "sous vide", "grilling", "smoking",
+      "knife skills", "sauce making", "bread making", "pastry", "confectionery",
+      "food preservation", "pickling", "canning", "dehydration", "freeze drying",
+      "molecular gastronomy", "flavor pairing", "nutrition balance", "meal planning", "food safety",
+      "temperature control", "emulsification", "caramelization", "maillard reaction", "braising",
+      "poaching", "steaming", "roasting", "sauteing", "deep frying",
+      "stock preparation", "spice blending", "dough handling", "chocolate tempering", "sugar work",
+      "plating techniques", "food photography", "menu design", "cost control", "ingredient sourcing"],
+    // sports
+    &["biomechanics", "sports nutrition", "training periodization", "recovery methods", "injury prevention",
+      "sports psychology", "team dynamics", "coaching strategies", "game theory", "performance analysis",
+      "strength training", "cardiovascular fitness", "flexibility", "agility drills", "endurance training",
+      "plyometrics", "interval training", "circuit training", "functional movement", "mobility work",
+      "competition strategy", "tournament formats", "ranking systems", "fair play", "doping control",
+      "sports medicine", "physiotherapy", "taping techniques", "hydration", "sleep optimization",
+      "video analysis", "wearable technology", "gps tracking", "heart rate monitoring", "force plates",
+      "wind tunnel testing", "altitude training", "heat acclimatization", "mental rehearsal", "visualization"],
+    // music
+    &["music theory", "harmony", "counterpoint", "orchestration", "composition",
+      "improvisation", "ear training", "sight reading", "conducting", "arrangement",
+      "sound design", "mixing", "mastering", "recording techniques", "microphone placement",
+      "signal processing", "equalization", "compression", "reverb", "delay effects",
+      "synthesizers", "sampling", "midi programming", "digital audio", "analog synthesis",
+      "music production", "beat making", "song structure", "chord progressions", "melody writing",
+      "rhythm patterns", "time signatures", "key signatures", "modulation", "transposition",
+      "dynamics", "articulation", "phrasing", "intonation", "tuning systems"],
+    // art
+    &["color theory", "perspective", "composition", "light and shadow", "figure drawing",
+      "landscape painting", "portraiture", "abstract art", "sculpture", "printmaking",
+      "digital art", "photography", "typography", "graphic design", "illustration",
+      "animation", "3d modeling", "texture mapping", "rendering", "visual effects",
+      "art history", "contemporary art", "installation art", "performance art", "conceptual art",
+      "watercolor", "oil painting", "acrylic painting", "charcoal drawing", "ink drawing",
+      "ceramics", "glassblowing", "metalwork", "textile art", "collage",
+      "street art", "mural painting", "art restoration", "museum curation", "art criticism"],
+    // literature
+    &["narrative structure", "character development", "plot construction", "dialogue writing", "world building",
+      "point of view", "literary devices", "metaphor", "symbolism", "allegory",
+      "genre fiction", "literary fiction", "poetry forms", "dramatic writing", "screenwriting",
+      "creative nonfiction", "journalism", "technical writing", "copywriting", "editing",
+      "publishing", "book design", "literary criticism", "comparative literature", "translation",
+      "oral tradition", "mythology", "folklore", "fairy tales", "epic poetry",
+      "modernism", "postmodernism", "realism", "naturalism", "romanticism",
+      "surrealism", "magical realism", "dystopia", "satire", "tragedy"],
+    // philosophy
+    &["epistemology", "metaphysics", "ethics", "logic", "aesthetics",
+      "political philosophy", "philosophy of mind", "philosophy of science", "existentialism", "phenomenology",
+      "utilitarianism", "deontology", "virtue ethics", "social contract", "free will",
+      "determinism", "consciousness", "personal identity", "moral relativism", "moral realism",
+      "pragmatism", "empiricism", "rationalism", "idealism", "materialism",
+      "stoicism", "skepticism", "nihilism", "absurdism", "humanism",
+      "bioethics", "environmental ethics", "business ethics", "technology ethics", "ai ethics",
+      "justice theory", "rights theory", "care ethics", "feminist philosophy", "critical theory"],
+    // economics
+    &["supply and demand", "market equilibrium", "elasticity", "consumer surplus", "producer surplus",
+      "gdp measurement", "inflation", "unemployment", "monetary policy", "fiscal policy",
+      "trade theory", "exchange rates", "balance of payments", "economic growth", "development economics",
+      "behavioral economics", "game theory", "auction theory", "contract theory", "mechanism design",
+      "public goods", "externalities", "market failure", "regulation", "antitrust",
+      "labor economics", "health economics", "environmental economics", "financial economics", "international trade",
+      "macroeconomic models", "microeconomic theory", "econometrics", "time series analysis", "panel data",
+      "cost-benefit analysis", "risk assessment", "portfolio theory", "option pricing", "credit markets"],
+    // business
+    &["strategic planning", "competitive analysis", "market research", "product development", "go-to-market",
+      "customer segmentation", "pricing strategy", "brand management", "digital marketing", "content strategy",
+      "sales funnel", "lead generation", "customer retention", "churn analysis", "lifetime value",
+      "supply chain", "logistics", "inventory management", "procurement", "vendor management",
+      "project management", "agile methodology", "scrum", "kanban", "lean management",
+      "financial modeling", "budgeting", "forecasting", "cash flow", "profitability analysis",
+      "organizational design", "talent management", "performance review", "succession planning", "change management",
+      "mergers and acquisitions", "due diligence", "valuation", "negotiations", "partnership development"],
+    // engineering (index 15)
+    &["structural engineering", "civil engineering", "mechanical engineering", "electrical engineering", "chemical engineering",
+      "aerospace engineering", "biomedical engineering", "environmental engineering", "industrial engineering", "systems engineering",
+      "control systems", "signal processing", "power systems", "embedded systems", "fpga design",
+      "circuit design", "pcb layout", "thermal management", "vibration analysis", "fatigue analysis",
+      "finite element analysis", "computational fluid dynamics", "3d printing", "cnc machining", "welding",
+      "quality control", "six sigma", "reliability engineering", "safety engineering", "risk analysis",
+      "project scheduling", "cost estimation", "requirements engineering", "design review", "testing protocols",
+      "standards compliance", "certification processes", "technical documentation", "failure analysis", "root cause analysis"],
+    // biology (16)
+    &["cell division", "protein synthesis", "dna replication", "gene expression", "epigenetics",
+      "photosynthesis", "cellular respiration", "enzyme kinetics", "membrane transport", "signal transduction",
+      "immune response", "antibody production", "t-cell activation", "inflammation", "wound healing",
+      "nervous system", "muscle contraction", "hormone regulation", "digestion", "circulation",
+      "reproduction", "embryonic development", "stem cells", "aging", "apoptosis",
+      "ecosystem dynamics", "food webs", "population genetics", "speciation", "adaptation",
+      "symbiosis", "parasitism", "competition", "predator-prey", "biodiversity",
+      "conservation biology", "marine biology", "freshwater ecology", "terrestrial ecology", "biogeography"],
+    // chemistry (17)
+    &["atomic structure", "chemical bonding", "molecular geometry", "intermolecular forces", "crystal structures",
+      "chemical kinetics", "reaction mechanisms", "catalysis", "equilibrium", "thermochemistry",
+      "electrochemistry", "redox reactions", "acid-base chemistry", "buffer solutions", "titrations",
+      "organic synthesis", "functional groups", "stereochemistry", "polymer chemistry", "spectroscopy",
+      "mass spectrometry", "chromatography", "nuclear chemistry", "radiochemistry", "photochemistry",
+      "environmental chemistry", "atmospheric chemistry", "water chemistry", "soil chemistry", "green chemistry",
+      "medicinal chemistry", "drug design", "pharmacokinetics", "analytical methods", "quality analysis",
+      "industrial chemistry", "petrochemistry", "food chemistry", "cosmetics chemistry", "forensic chemistry"],
+    // physics (18)
+    &["classical mechanics", "quantum mechanics", "special relativity", "general relativity", "electrodynamics",
+      "statistical mechanics", "solid state physics", "plasma physics", "nuclear physics", "particle physics",
+      "string theory", "quantum field theory", "quantum computing", "superconductivity", "superfluidity",
+      "magnetism", "semiconductors", "photonics", "laser physics", "fiber optics",
+      "wave mechanics", "oscillations", "resonance", "interference", "diffraction",
+      "gravitation", "orbital mechanics", "rocket propulsion", "aerodynamics", "hydrodynamics",
+      "thermodynamic cycles", "heat transfer", "phase transitions", "critical phenomena", "entropy",
+      "measurement theory", "uncertainty principle", "wave-particle duality", "quantum entanglement", "decoherence"],
+    // astronomy (19)
+    &["stellar evolution", "galaxy formation", "black holes", "neutron stars", "white dwarfs",
+      "planetary formation", "exoplanet detection", "habitable zones", "asteroid mining", "space debris",
+      "cosmic microwave background", "dark matter", "dark energy", "gravitational waves", "cosmic inflation",
+      "solar physics", "heliosphere", "solar wind", "sunspots", "solar flares",
+      "lunar science", "mars exploration", "jupiter system", "saturn rings", "kuiper belt",
+      "oort cloud", "comets", "meteor showers", "asteroid impacts", "planetary defense",
+      "space telescopes", "radio astronomy", "x-ray astronomy", "infrared astronomy", "spectral analysis",
+      "astrochemistry", "astrobiology", "seti", "space colonization", "interstellar travel"],
+    // psychology (20)
+    &["cognitive psychology", "behavioral psychology", "developmental psychology", "social psychology", "clinical psychology",
+      "neuropsychology", "forensic psychology", "health psychology", "industrial psychology", "educational psychology",
+      "memory formation", "attention mechanisms", "perception", "decision making", "problem solving",
+      "motivation", "emotion regulation", "stress response", "resilience", "wellbeing",
+      "personality theories", "intelligence models", "creativity", "learning theories", "conditioning",
+      "attachment theory", "cognitive development", "moral development", "identity formation", "aging psychology",
+      "group dynamics", "conformity", "obedience", "persuasion", "prejudice",
+      "therapy modalities", "cognitive behavioral therapy", "psychoanalysis", "mindfulness", "positive psychology"],
+    // sociology (21)
+    &["social stratification", "inequality", "poverty", "social mobility", "class systems",
+      "race and ethnicity", "gender studies", "family structures", "urbanization", "migration",
+      "cultural norms", "deviance", "social control", "institutions", "bureaucracy",
+      "collective behavior", "social movements", "revolution", "protest", "activism",
+      "media influence", "public opinion", "propaganda", "censorship", "information society",
+      "globalization effects", "cultural diffusion", "homogenization", "identity politics", "multiculturalism",
+      "education systems", "healthcare access", "housing policy", "criminal justice", "welfare systems",
+      "demographics", "aging populations", "birth rates", "life expectancy", "quality of life"],
+    // education (22)
+    &["curriculum design", "lesson planning", "assessment methods", "grading systems", "rubric design",
+      "pedagogy", "andragogy", "constructivism", "behaviorism", "connectivism",
+      "differentiated instruction", "inclusive education", "special education", "gifted education", "remedial teaching",
+      "e-learning", "blended learning", "flipped classroom", "project-based learning", "problem-based learning",
+      "educational technology", "learning management systems", "adaptive learning", "gamification", "simulations",
+      "classroom management", "student engagement", "motivation strategies", "feedback techniques", "formative assessment",
+      "teacher training", "professional development", "mentoring", "coaching", "peer observation",
+      "education policy", "school governance", "accreditation", "standardized testing", "education reform"],
+    // agriculture (23)
+    &["crop rotation", "soil management", "irrigation systems", "pest control", "organic farming",
+      "hydroponics", "vertical farming", "precision agriculture", "gps farming", "drone monitoring",
+      "seed technology", "plant breeding", "genetic modification", "biofortification", "herbicide resistance",
+      "livestock management", "dairy farming", "poultry farming", "aquaculture", "apiculture",
+      "harvest optimization", "post-harvest storage", "food processing", "cold chain", "quality grading",
+      "sustainable agriculture", "agroforestry", "permaculture", "regenerative farming", "cover crops",
+      "farm economics", "commodity markets", "agricultural subsidies", "land use policy", "water rights",
+      "climate adaptation", "drought resistance", "flood management", "soil erosion", "desertification"],
+    // environment (24)
+    &["climate change", "greenhouse gases", "carbon cycle", "ozone depletion", "acid rain",
+      "deforestation", "habitat loss", "species extinction", "invasive species", "biodiversity loss",
+      "water pollution", "air quality", "soil contamination", "noise pollution", "light pollution",
+      "renewable energy", "solar power", "wind energy", "hydroelectric", "geothermal",
+      "waste management", "recycling", "composting", "landfill design", "incineration",
+      "environmental impact assessment", "carbon footprint", "life cycle analysis", "sustainability metrics", "green building",
+      "conservation strategies", "protected areas", "wildlife corridors", "restoration ecology", "rewilding",
+      "environmental law", "emissions trading", "carbon tax", "international agreements", "environmental justice"],
+    // architecture (25)
+    &["structural design", "foundation engineering", "load bearing", "seismic design", "wind loading",
+      "building materials", "concrete technology", "steel structures", "timber construction", "masonry",
+      "hvac systems", "plumbing design", "electrical systems", "fire protection", "elevator design",
+      "interior design", "space planning", "lighting design", "acoustic design", "color theory",
+      "sustainable architecture", "passive design", "green roofs", "solar integration", "energy efficiency",
+      "urban planning", "zoning", "mixed use development", "public spaces", "transportation planning",
+      "historic preservation", "adaptive reuse", "building codes", "accessibility standards", "universal design",
+      "parametric design", "bim modeling", "3d visualization", "virtual reality", "construction management"],
+    // transportation (26)
+    &["traffic engineering", "highway design", "intersection design", "roundabouts", "traffic signals",
+      "public transit", "bus rapid transit", "light rail", "subway systems", "commuter rail",
+      "aviation", "airport design", "air traffic control", "flight dynamics", "aircraft maintenance",
+      "maritime transport", "port operations", "container shipping", "bulk cargo", "cruise operations",
+      "electric vehicles", "autonomous driving", "connected vehicles", "ride sharing", "mobility as service",
+      "freight logistics", "supply chain routing", "last mile delivery", "warehouse design", "fleet management",
+      "bicycle infrastructure", "pedestrian design", "complete streets", "traffic calming", "speed management",
+      "transportation policy", "congestion pricing", "emission standards", "fuel efficiency", "safety regulations"],
+    // communication (27)
+    &["wireless networks", "fiber optics", "satellite communication", "radio frequency", "signal propagation",
+      "network protocols", "tcp/ip", "http", "dns", "ssl/tls",
+      "5g technology", "iot networks", "mesh networks", "ad hoc networks", "cognitive radio",
+      "data compression", "error correction", "channel coding", "modulation", "multiplexing",
+      "voice over ip", "video conferencing", "unified communications", "collaboration tools", "instant messaging",
+      "social media", "content delivery", "streaming media", "podcasting", "digital broadcasting",
+      "public speaking", "presentation skills", "technical writing", "scientific communication", "data visualization",
+      "cross-cultural communication", "nonverbal communication", "conflict resolution", "negotiation", "active listening"],
+    // military (28)
+    &["military strategy", "tactical operations", "logistics planning", "intelligence gathering", "reconnaissance",
+      "command and control", "communications security", "electronic warfare", "cyber warfare", "information operations",
+      "ground forces", "naval operations", "air power", "special operations", "joint operations",
+      "weapons systems", "missile defense", "radar systems", "sonar technology", "night vision",
+      "military engineering", "fortification", "demolition", "bridging", "mine clearance",
+      "military history", "battle analysis", "war gaming", "simulation training", "after action review",
+      "defense policy", "arms control", "peacekeeping", "humanitarian assistance", "disaster relief",
+      "veteran affairs", "military justice", "rules of engagement", "geneva conventions", "military ethics"],
+    // politics (29)
+    &["democratic theory", "electoral systems", "voting behavior", "political parties", "campaign strategy",
+      "legislative process", "executive power", "judicial review", "separation of powers", "federalism",
+      "political ideologies", "liberalism", "conservatism", "socialism", "libertarianism",
+      "international relations", "diplomacy", "foreign policy", "geopolitics", "soft power",
+      "public policy", "policy analysis", "regulatory framework", "lobbying", "interest groups",
+      "political communication", "media relations", "public opinion polls", "political advertising", "debates",
+      "governance", "transparency", "accountability", "corruption", "whistleblowing",
+      "human rights", "civil liberties", "freedom of speech", "privacy rights", "equal protection"],
+    // finance (30)
+    &["portfolio management", "asset allocation", "diversification", "risk management", "hedging strategies",
+      "stock valuation", "fundamental analysis", "technical analysis", "candlestick patterns", "moving averages",
+      "bond pricing", "yield curves", "credit risk", "interest rate risk", "duration",
+      "derivatives", "options pricing", "futures contracts", "swaps", "structured products",
+      "banking operations", "lending practices", "deposit management", "payment systems", "clearing houses",
+      "financial reporting", "gaap standards", "ifrs standards", "audit procedures", "internal controls",
+      "insurance", "actuarial science", "underwriting", "claims management", "reinsurance",
+      "fintech", "digital payments", "cryptocurrency", "decentralized finance", "algorithmic trading"],
+    // cybersecurity (31)
+    &["network security", "firewall configuration", "intrusion detection", "vulnerability scanning", "penetration testing",
+      "malware analysis", "ransomware", "phishing attacks", "social engineering", "zero day exploits",
+      "encryption algorithms", "key management", "digital certificates", "pki infrastructure", "hash functions",
+      "access control", "identity management", "multi-factor authentication", "single sign-on", "zero trust",
+      "incident response", "forensic analysis", "threat intelligence", "security operations", "siem systems",
+      "cloud security", "container security", "api security", "mobile security", "iot security",
+      "compliance frameworks", "iso 27001", "nist framework", "gdpr compliance", "hipaa compliance",
+      "security awareness", "phishing simulation", "password policies", "data classification", "data loss prevention"],
+    // robotics (32)
+    &["robot kinematics", "inverse kinematics", "path planning", "motion control", "trajectory optimization",
+      "sensor fusion", "lidar", "computer vision", "depth sensing", "tactile sensing",
+      "actuators", "servo motors", "stepper motors", "pneumatic systems", "hydraulic systems",
+      "robot operating system", "real-time control", "pid controllers", "model predictive control", "adaptive control",
+      "autonomous navigation", "slam algorithms", "obstacle avoidance", "localization", "mapping",
+      "human-robot interaction", "collaborative robots", "safety systems", "teleoperation", "haptic feedback",
+      "industrial robotics", "surgical robots", "agricultural robots", "warehouse robots", "delivery drones",
+      "swarm robotics", "soft robotics", "bio-inspired robots", "humanoid robots", "exoskeletons"],
+    // linguistics (33)
+    &["phonetics", "phonology", "morphology", "syntax", "semantics",
+      "pragmatics", "discourse analysis", "sociolinguistics", "psycholinguistics", "neurolinguistics",
+      "language acquisition", "second language learning", "bilingualism", "code switching", "language attrition",
+      "historical linguistics", "language families", "etymology", "dialectology", "language change",
+      "computational linguistics", "natural language processing", "machine translation", "speech recognition", "text generation",
+      "corpus linguistics", "lexicography", "terminography", "language documentation", "endangered languages",
+      "writing systems", "orthography", "typography", "braille", "sign language",
+      "rhetoric", "stylistics", "narrative analysis", "conversation analysis", "critical discourse"],
+    // anthropology (34)
+    &["cultural anthropology", "physical anthropology", "archaeological methods", "ethnography", "kinship systems",
+      "ritual practices", "religious anthropology", "economic anthropology", "political anthropology", "medical anthropology",
+      "human evolution", "primate studies", "fossil record", "dating methods", "migration patterns",
+      "material culture", "artifact analysis", "ceramics typology", "lithic analysis", "archaeometry",
+      "cultural ecology", "environmental anthropology", "urban anthropology", "digital anthropology", "visual anthropology",
+      "language and culture", "ethnohistory", "oral history", "museum studies", "heritage management",
+      "applied anthropology", "development anthropology", "conflict resolution", "humanitarian work", "indigenous rights",
+      "food systems", "agriculture origins", "domestication", "trade networks", "cultural exchange"],
+    // meteorology (35)
+    &["atmospheric dynamics", "weather systems", "frontal systems", "pressure systems", "jet streams",
+      "cloud formation", "precipitation", "thunderstorms", "tornadoes", "hurricanes",
+      "weather forecasting", "numerical models", "ensemble prediction", "nowcasting", "seasonal forecasting",
+      "climate modeling", "general circulation", "teleconnections", "el nino", "la nina",
+      "atmospheric chemistry", "air pollution", "ozone layer", "greenhouse effect", "aerosols",
+      "radar meteorology", "satellite meteorology", "weather stations", "radiosondes", "weather balloons",
+      "aviation weather", "marine weather", "agricultural weather", "urban meteorology", "mountain weather",
+      "severe weather", "flood forecasting", "drought monitoring", "heat waves", "winter storms"],
+    // oceanography (36)
+    &["ocean circulation", "thermohaline circulation", "surface currents", "deep water formation", "upwelling",
+      "wave dynamics", "tidal forces", "tsunami generation", "storm surge", "coastal erosion",
+      "marine ecosystems", "coral reefs", "deep sea vents", "mangrove forests", "kelp forests",
+      "ocean chemistry", "ocean acidification", "dissolved oxygen", "nutrient cycles", "carbon sequestration",
+      "marine geology", "seafloor spreading", "mid-ocean ridges", "submarine volcanoes", "sediment transport",
+      "marine technology", "submersibles", "autonomous underwater vehicles", "ocean buoys", "sonar mapping",
+      "fisheries science", "marine conservation", "marine protected areas", "whaling history", "overfishing",
+      "polar oceanography", "sea ice dynamics", "iceberg tracking", "arctic shipping", "antarctic research"],
+    // geology (37)
+    &["plate tectonics", "rock cycle", "mineral identification", "crystal systems", "igneous petrology",
+      "sedimentary processes", "metamorphic geology", "structural geology", "stratigraphy", "geochronology",
+      "volcanology", "seismology", "earthquake engineering", "fault mechanics", "crustal deformation",
+      "hydrogeology", "groundwater flow", "aquifer management", "well drilling", "spring formation",
+      "geomorphology", "landscape evolution", "weathering processes", "mass wasting", "fluvial geomorphology",
+      "economic geology", "ore deposits", "petroleum geology", "mining engineering", "gemology",
+      "planetary geology", "lunar geology", "martian geology", "asteroid geology", "impact craters",
+      "environmental geology", "landslide assessment", "subsidence", "coastal geology", "glacial geology"],
+    // archaeology (38)
+    &["excavation methods", "stratigraphy", "dating techniques", "survey methods", "geophysical prospection",
+      "artifact conservation", "pottery analysis", "lithic technology", "metallurgy", "bone analysis",
+      "settlement patterns", "landscape archaeology", "underwater archaeology", "urban archaeology", "industrial archaeology",
+      "prehistoric archaeology", "classical archaeology", "medieval archaeology", "historical archaeology", "contemporary archaeology",
+      "bioarchaeology", "zooarchaeology", "archaeobotany", "isotope analysis", "ancient dna",
+      "experimental archaeology", "ethnoarchaeology", "public archaeology", "heritage law", "repatriation",
+      "gis in archaeology", "remote sensing", "photogrammetry", "3d scanning", "database management",
+      "archaeological theory", "processual archaeology", "post-processual archaeology", "agency theory", "landscape theory"],
+    // nutrition (39)
+    &["macronutrients", "micronutrients", "vitamins", "minerals", "dietary fiber",
+      "protein metabolism", "carbohydrate metabolism", "lipid metabolism", "energy balance", "basal metabolic rate",
+      "dietary guidelines", "food pyramids", "portion control", "calorie counting", "intermittent fasting",
+      "sports nutrition", "pre-workout nutrition", "post-workout recovery", "hydration strategies", "supplementation",
+      "clinical nutrition", "malnutrition", "obesity", "eating disorders", "food allergies",
+      "food labeling", "nutrient claims", "health claims", "organic certification", "food additives",
+      "gut microbiome", "probiotics", "prebiotics", "fermented foods", "digestive health",
+      "functional foods", "nutraceuticals", "phytochemicals", "antioxidants", "anti-inflammatory diet"],
+];
+
+// ============================================================================
+// QUESTION / ANSWER TEMPLATES
+// ============================================================================
+
+pub const QUESTION_TEMPLATES: &[(&str, &str)] = &[
+    ("What is {}?", "Question"),
+    ("Explain {} in detail.", "Explain"),
+    ("How does {} work?", "Question"),
+    ("What are the main principles of {}?", "Question"),
+    ("Compare and contrast {} with related concepts.", "Compare"),
+    ("What is the history of {}?", "Question"),
+    ("What are the advantages and disadvantages of {}?", "Analyze"),
+    ("How is {} applied in practice?", "Question"),
+    ("What are the key components of {}?", "Extract"),
+    ("Describe the process of {}.", "Explain"),
+    ("What role does {} play in its field?", "Question"),
+    ("How has {} evolved over time?", "Question"),
+    ("What are the current challenges in {}?", "Analyze"),
+    ("What are best practices for {}?", "Recommend"),
+    ("Summarize the key aspects of {}.", "Summarize"),
+    ("Why is {} important?", "Explain"),
+    ("What are the different types of {}?", "Classify"),
+    ("How do you implement {}?", "Plan"),
+    ("What are common misconceptions about {}?", "Explain"),
+    ("What is the future outlook for {}?", "Analyze"),
+    ("Plan an approach to learning {}.", "Plan"),
+    ("Critique the current state of {}.", "Critique"),
+    ("Brainstorm applications of {} in new domains.", "Brainstorm"),
+    ("Debug a common problem in {}.", "Debug"),
+    ("Verify whether this claim about {} is correct.", "Verify"),
+    ("Translate the concept of {} into simpler terms.", "Translate"),
+    ("Extract the key facts from this description of {}.", "Extract"),
+    ("Recommend resources for studying {}.", "Recommend"),
+    ("Classify {} among related concepts.", "Classify"),
+    ("Act on this knowledge of {} to solve a problem.", "Act"),
+];
+
+pub const ANSWER_PREFIXES: &[&str] = &[
+    "{topic} is a fundamental concept in {domain}.",
+    "In the field of {domain}, {topic} refers to a well-studied area.",
+    "{topic} encompasses several key aspects within {domain}.",
+    "Understanding {topic} requires knowledge of {domain} fundamentals.",
+    "The study of {topic} in {domain} involves multiple dimensions.",
+    "{topic} is widely recognized in {domain} as a critical area of study.",
+    "Within {domain}, {topic} serves as a foundational building block.",
+    "The concept of {topic} originates from {domain} research.",
+    "{topic} plays a critical role in {domain}.",
+    "Modern approaches to {topic} in {domain} emphasize rigorous methodology.",
+    "{topic} has shaped our understanding of {domain} significantly.",
+    "Experts in {domain} consider {topic} essential to the field.",
+];
+
+pub const ANSWER_BODIES: &[&str] = &[
+    "The core mechanism involves {detail_a}, which interacts with {detail_b} to produce measurable outcomes. Key parameters include efficiency ({num_a}%), reliability ({num_b}%), and throughput ({num_c} units per cycle). Implementation requires careful calibration of initial conditions and ongoing monitoring of {detail_c}.",
+    "There are {num_a} primary components: {detail_a}, {detail_b}, and {detail_c}. Each component contributes to the overall system through well-defined interfaces. The interaction between these components follows established patterns validated through extensive research.",
+    "The process begins with {detail_a}, followed by {detail_b}, and concludes with {detail_c}. At each stage, quality checks ensure that outputs meet established thresholds. The entire cycle typically completes in {num_a} to {num_b} iterations, depending on input complexity and resource availability.",
+    "Research has identified {num_a} key factors. Among them, {detail_a} accounts for a significant portion of observed variation, while {detail_b} and {detail_c} contribute complementary effects. These factors interact nonlinearly, requiring sophisticated models to predict outcomes accurately.",
+    "Practical applications span {num_a} major industries, with the most significant impact in areas requiring {detail_a} and {detail_b}. Implementation typically involves {detail_c} and yields measurable returns within a reasonable timeframe.",
+    "The theoretical foundation rests on {detail_a}, first established in the early work on {detail_b}. Subsequent developments introduced {detail_c}, which resolved key limitations of earlier approaches. Current state-of-the-art methods continue to improve.",
+    "Historical development progressed through {num_a} distinct phases: initial discovery of {detail_a}, systematic study of {detail_b}, and modern integration with {detail_c}. Each phase built upon previous findings, creating a cumulative knowledge base.",
+    "Implementation follows a {num_a}-step methodology: assessment of {detail_a}, design of {detail_b}, deployment of {detail_c}, and iterative optimization. Success metrics track improvement in primary objectives and reduction in resource waste.",
+    "The field has evolved through contributions from multiple disciplines. Central to this evolution is {detail_a}, supported by {detail_b}. Contemporary practice also incorporates {detail_c}, reflecting {num_a} years of accumulated insight.",
+    "Practitioners apply {detail_a} alongside {detail_b} to achieve robust results. A key challenge is balancing {detail_c} with practical constraints. The literature documents {num_a} approaches, with best results emerging from hybrid strategies.",
+];
+
+pub const DETAIL_POOLS: &[&str] = &[
+    "systematic analysis", "iterative refinement", "empirical validation",
+    "cross-functional integration", "adaptive optimization", "pattern recognition",
+    "data-driven decision making", "structural decomposition", "hierarchical organization",
+    "feedback loop mechanisms", "constraint satisfaction", "resource allocation",
+    "performance benchmarking", "continuous monitoring", "risk mitigation",
+    "stakeholder alignment", "quality assurance", "process automation",
+    "predictive modeling", "causal inference", "hypothesis testing",
+    "controlled experimentation", "statistical significance", "confidence intervals",
+    "variance reduction", "outlier detection", "trend analysis",
+    "regression modeling", "classification frameworks", "clustering algorithms",
+    "dimensionality reduction", "feature engineering", "model selection",
+    "cross-validation", "regularization", "ensemble methods",
+    "gradient optimization", "stochastic sampling", "convergence analysis",
+    "scalability assessment", "fault tolerance", "graceful degradation",
+];
+
+// ============================================================================
+// REASONING STEP TEMPLATES
+// ============================================================================
+
+pub const REASONING_PREMISES: &[&str] = &[
+    "The problem involves {topic} in the context of {domain}.",
+    "Given information about {topic}, we need to analyze the {domain} implications.",
+    "Starting with the fundamental principles of {topic} in {domain}.",
+    "The question asks about {topic}, which falls under {domain}.",
+    "To address this, we first identify the relevant aspects of {topic}.",
+    "We know that {topic} in {domain} follows established patterns.",
+];
+
+pub const REASONING_INFERENCES: &[&str] = &[
+    "Based on the principles of {topic}, we can deduce that {detail}.",
+    "Applying {domain} theory to this case suggests {detail}.",
+    "The relationship between components indicates {detail}.",
+    "Following the logical chain: {detail} leads to the next conclusion.",
+    "Cross-referencing with known patterns in {domain} confirms {detail}.",
+    "The evidence supports {detail} as the most likely explanation.",
+    "Considering the constraints, {detail} is the optimal approach.",
+    "Step-by-step analysis reveals that {detail} is the key factor.",
+];
+
+pub const REASONING_CALCULATIONS: &[&str] = &[
+    "Computing: {num_a} + {num_b} = {result} (combined metric).",
+    "Assessment: {num_a} factors plus {num_b} considerations yields {result} total dimensions.",
+    "Aggregation: combining {num_a} primary elements with {num_b} secondary ones gives {result} total.",
+    "Scope estimate: {num_a} core aspects + {num_b} supporting aspects = {result} evaluation points.",
+    "Resource count: {num_a} established inputs + {num_b} derived inputs = {result} total inputs.",
+    "Parameter tally: {num_a} independent variables + {num_b} dependent variables = {result} total.",
+];
+
+pub const REASONING_VERIFICATIONS: &[&str] = &[
+    "Verify: does this align with known {domain} principles? Yes.",
+    "Cross-check: the result {result} is consistent with expected range.",
+    "Sanity check: {detail} falls within acceptable bounds.",
+    "Validation: comparing against {num_a} reference cases confirms accuracy.",
+    "Double-checking: the logical chain holds under {domain} constraints.",
+];
+
+pub const REASONING_CONCLUSIONS: &[&str] = &[
+    "Therefore, the analysis confirms {detail}. This follows from the {domain} reasoning above.",
+    "In conclusion: {detail}. The confidence level is high based on multiple supporting factors.",
+    "The final determination supports {detail}, derived through systematic {domain} reasoning.",
+    "Summary: {detail}. This is consistent with established {domain} knowledge.",
+    "The evidence converges on {detail}, verified through independent reasoning paths in {domain}.",
+    "Bringing these threads together: {detail} is the well-supported conclusion in {domain}.",
+];
+
+// ============================================================================
+// SOCIAL / GREETING TEMPLATES
+// ============================================================================
+
+pub const GREETING_VARIATIONS: &[(&str, &str)] = &[
+    ("hi", "Hello! How can I help you today?"),
+    ("hello", "Hi there! What would you like to know?"),
+    ("hey", "Hey! What can I do for you?"),
+    ("good morning", "Good morning! How can I assist you?"),
+    ("good afternoon", "Good afternoon! What's on your mind?"),
+    ("good evening", "Good evening! How may I help?"),
+    ("howdy", "Howdy! What can I help with?"),
+    ("greetings", "Greetings! How can I be of service?"),
+    ("hi there", "Hello! Ready to help with whatever you need."),
+    ("what's up", "Not much! What can I help you with?"),
+    ("yo", "Hey! What do you need help with?"),
+    ("hiya", "Hi! What would you like to discuss?"),
+    ("morning", "Good morning! What can I do for you today?"),
+    ("afternoon", "Good afternoon! How can I assist?"),
+    ("evening", "Good evening! What would you like to explore?"),
+];
+
+pub const GRATITUDE_VARIATIONS: &[(&str, &str)] = &[
+    ("thanks", "You're welcome! Let me know if you need anything else."),
+    ("thank you", "Happy to help! Feel free to ask more questions."),
+    ("thanks a lot", "Glad I could help! Anything else?"),
+    ("much appreciated", "You're welcome! I'm here if you need more."),
+    ("thanks for your help", "My pleasure! Don't hesitate to ask again."),
+    ("that was helpful", "Glad to hear that! Let me know if there's more."),
+    ("great, thanks", "You're welcome! Happy to assist anytime."),
+    ("perfect, thank you", "Glad that works! Feel free to ask more."),
+    ("thanks so much", "You're very welcome! I'm here to help."),
+    ("i appreciate it", "Of course! Let me know if anything else comes up."),
+    ("cheers", "Cheers! Let me know if you need more help."),
+    ("ty", "You're welcome! Ask away if you have more questions."),
+];
+
+pub const FAREWELL_VARIATIONS: &[(&str, &str)] = &[
+    ("bye", "Goodbye! Have a great day."),
+    ("goodbye", "Take care! See you next time."),
+    ("see you", "See you later! Have a good one."),
+    ("later", "Later! Take care."),
+    ("see you later", "See you! Don't hesitate to come back."),
+    ("bye bye", "Bye! Have a wonderful day."),
+    ("take care", "You too! See you next time."),
+    ("gotta go", "Take care! Come back anytime."),
+    ("that's all", "Alright! Have a great day ahead."),
+    ("i'm done", "Great! Feel free to return anytime you need help."),
+    ("cya", "See ya! Have a good one."),
+    ("peace out", "Peace! Take care."),
+];
+
+// ============================================================================
+// JSONL STREAMING WRITER
+// ============================================================================
+
+/// Streaming JSONL writer that tracks bytes written.
+pub struct JsonlWriter {
+    writer: BufWriter<File>,
+    bytes_written: u64,
+}
+
+impl JsonlWriter {
+    pub fn new(path: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = File::create(path)?;
+        Ok(Self {
+            writer: BufWriter::with_capacity(1024 * 1024, file), // 1MB buffer
+            bytes_written: 0,
+        })
+    }
+
+    pub fn write_example(&mut self, example: &TrainingExample) -> std::io::Result<()> {
+        // Apply article fix to Q and A before serialization
+        let mut fixed = example.clone();
+        fixed.question = fix_articles(&fixed.question);
+        fixed.answer = fix_articles(&fixed.answer);
+        if let Some(ref mut reasoning) = fixed.reasoning {
+            for step in &mut reasoning.steps {
+                step.content = fix_articles(&step.content);
+            }
+        }
+        let json = serde_json::to_string(&fixed).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+        let bytes = json.as_bytes();
+        self.writer.write_all(bytes)?;
+        self.writer.write_all(b"\n")?;
+        self.bytes_written += bytes.len() as u64 + 1;
+        Ok(())
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+// ============================================================================
+// TEMPLATE EXPANSION HELPERS
+// ============================================================================
+
+/// Pick a random item from a slice.
+pub fn pick<'a, T: Sized>(rng: &mut StdRng, items: &'a [T]) -> &'a T {
+    items.choose(rng).expect("empty pool")
+}
+
+/// Pick a random `&str` from a `&[&str]` slice — convenience wrapper.
+pub fn pick_str<'a>(rng: &mut StdRng, items: &'a [&'a str]) -> &'a str {
+    items.choose(rng).expect("empty pool")
+}
+
+/// Pick a random index.
+pub fn pick_idx(rng: &mut StdRng, len: usize) -> usize {
+    rng.gen_range(0..len)
+}
+
+/// Get the topic pool for a domain index. Falls back to science if out of range.
+pub fn topics_for_domain(domain_idx: usize) -> &'static [&'static str] {
+    if domain_idx < TOPICS_PER_DOMAIN.len() {
+        TOPICS_PER_DOMAIN[domain_idx]
+    } else {
+        TOPICS_PER_DOMAIN[0]
+    }
+}
+
+/// Expand a template string with named placeholders.
+/// Details are deduplicated so {detail_a}, {detail_b}, {detail_c} are always distinct.
+/// Numeric ranges are realistic (percentages ≤ 98, counts reasonable).
+pub fn expand_template(
+    rng: &mut StdRng,
+    template: &str,
+    domain: &str,
+    topic: &str,
+) -> String {
+    // Pick 3 distinct details
+    let mut detail_indices: Vec<usize> = (0..DETAIL_POOLS.len()).collect();
+    detail_indices.shuffle(rng);
+    let detail_a = DETAIL_POOLS[detail_indices[0]];
+    let detail_b = DETAIL_POOLS[detail_indices[1]];
+    let detail_c = DETAIL_POOLS[detail_indices[2]];
+
+    let num_a: u32 = rng.gen_range(3..25);
+    let num_b: u32 = rng.gen_range(5..65);
+    let num_c: u32 = rng.gen_range(8..98);
+    let result: u32 = num_a + num_b;
+
+    template
+        .replace("{domain}", domain)
+        .replace("{topic}", topic)
+        .replace("{detail}", detail_a)
+        .replace("{detail_a}", detail_a)
+        .replace("{detail_b}", detail_b)
+        .replace("{detail_c}", detail_c)
+        .replace("{num_a}", &num_a.to_string())
+        .replace("{num_b}", &num_b.to_string())
+        .replace("{num_c}", &num_c.to_string())
+        .replace("{result}", &result.to_string())
+}
+
+/// Fix "a" → "an" before vowel-starting words (except "u" words with /juː/ sound).
+/// Call this on any generated text that may contain "a {placeholder}" patterns.
+pub fn fix_articles(text: &str) -> String {
+    // Words starting with 'u' that take "a" (sound like "yoo")
+    const U_EXCEPTIONS: &[&str] = &[
+        "unified", "unique", "unit", "union", "universal", "university",
+        "uniform", "unilateral", "user", "use", "useful", "usable",
+        "utility", "utilization", "utensil", "uranium", "uterine",
+    ];
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len() + 64);
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for word boundary + "a " or "A " followed by a vowel
+        let is_word_boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        if is_word_boundary
+            && i + 2 < bytes.len()
+            && (bytes[i] == b'a' || bytes[i] == b'A')
+            && bytes[i + 1] == b' '
+            && matches!(bytes[i + 2], b'a' | b'e' | b'i' | b'o' | b'u' | b'A' | b'E' | b'I' | b'O' | b'U')
+        {
+            // Extract the next word to check u-exceptions
+            let word_start = i + 2;
+            let mut word_end = word_start;
+            while word_end < bytes.len() && bytes[word_end].is_ascii_alphanumeric() {
+                word_end += 1;
+            }
+            let next_word = &text[word_start..word_end];
+            let next_lower = next_word.to_lowercase();
+
+            let is_u_exception = next_lower.starts_with('u')
+                && U_EXCEPTIONS.iter().any(|exc| next_lower.starts_with(exc));
+
+            if !is_u_exception {
+                if bytes[i] == b'A' {
+                    result.push_str("An");
+                } else {
+                    result.push_str("an");
+                }
+                i += 1; // skip the 'a', the space will be added normally
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Create a seeded RNG for reproducible generation.
+pub fn seeded_rng(seed: u64) -> StdRng {
+    StdRng::seed_from_u64(seed)
+}
+
+/// Human-readable byte count.
+pub fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+// ============================================================================
+// PARALLEL GENERATION
+// ============================================================================
+
+/// Parallel chunk generation: splits target_bytes across N threads, each generating
+/// to a temp file with a unique RNG seed derived from the base seed. Results are
+/// concatenated into the final output. Returns (total_examples, total_bytes).
+pub fn parallel_generate<F>(
+    output_path: &Path,
+    target_bytes: u64,
+    base_seed: u64,
+    generator_fn: F,
+) -> (u64, u64)
+where
+    F: Fn(&Path, u64, u64) -> (u64, u64) + Send + Sync,
+{
+    let num_chunks = rayon::current_num_threads().max(1);
+    let chunk_bytes = target_bytes / num_chunks as u64;
+
+    if chunk_bytes < 4096 || num_chunks <= 1 {
+        // Too small to benefit from parallelism, or single thread
+        return generator_fn(output_path, target_bytes, base_seed);
+    }
+
+    let tmp_dir = output_path.parent().unwrap_or(Path::new("."));
+    let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
+
+    // Prepare chunk specs
+    let chunks: Vec<(usize, std::path::PathBuf, u64, u64)> = (0..num_chunks)
+        .map(|i| {
+            let chunk_path = tmp_dir.join(format!(".{}_chunk_{}.jsonl.tmp", stem, i));
+            let chunk_seed = base_seed.wrapping_add(i as u64 * 0x9E3779B97F4A7C15);
+            let this_target = if i == num_chunks - 1 {
+                target_bytes - chunk_bytes * (num_chunks as u64 - 1)
+            } else {
+                chunk_bytes
+            };
+            (i, chunk_path, chunk_seed, this_target)
+        })
+        .collect();
+
+    // Generate chunks in parallel using rayon
+    use rayon::prelude::*;
+    let results: Vec<(u64, u64, std::path::PathBuf)> = chunks
+        .into_par_iter()
+        .map(|(_i, chunk_path, chunk_seed, this_target)| {
+            let (examples, bytes) = generator_fn(&chunk_path, this_target, chunk_seed);
+            (examples, bytes, chunk_path)
+        })
+        .collect();
+
+    // Concatenate chunk files into the final output
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let mut out = BufWriter::with_capacity(1024 * 1024, File::create(output_path).expect("create output"));
+    let mut total_examples = 0u64;
+    let mut total_bytes = 0u64;
+
+    for (examples, bytes, chunk_path) in &results {
+        total_examples += examples;
+        total_bytes += bytes;
+        if let Ok(mut chunk_file) = File::open(chunk_path) {
+            std::io::copy(&mut chunk_file, &mut out).expect("concat chunk");
+        }
+        let _ = fs::remove_file(chunk_path);
+    }
+    out.flush().expect("flush output");
+
+    (total_examples, total_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_topic_pool_coverage() {
+        assert_eq!(DOMAINS.len(), TOPICS_PER_DOMAIN.len(), "every domain needs a topic pool");
+        for (i, topics) in TOPICS_PER_DOMAIN.iter().enumerate() {
+            assert!(topics.len() >= 30, "domain {} has only {} topics", DOMAINS[i], topics.len());
+        }
+    }
+
+    #[test]
+    fn template_expansion_fills_placeholders() {
+        let mut rng = seeded_rng(42);
+        let result = expand_template(&mut rng, "The {domain} field of {topic} uses {detail_a}.", "science", "genetics");
+        assert!(!result.contains("{domain}"));
+        assert!(!result.contains("{topic}"));
+        assert!(!result.contains("{detail_a}"));
+    }
+
+    #[test]
+    fn jsonl_writer_tracks_bytes() {
+        let dir = std::env::temp_dir().join("spse_test_jsonl");
+        let path = dir.join("test.jsonl");
+        let mut writer = JsonlWriter::new(&path).unwrap();
+        let example = TrainingExample::qa("test q", "test a");
+        writer.write_example(&example).unwrap();
+        assert!(writer.bytes_written() > 0);
+        writer.flush().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

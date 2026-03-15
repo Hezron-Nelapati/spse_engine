@@ -1207,6 +1207,8 @@ pub struct ReasoningState {
     pub confidence_trajectory: Vec<f32>,
     /// Whether max steps reached
     pub max_steps_reached: bool,
+    /// Whether reasoning determined that web retrieval is needed
+    pub needs_retrieval: bool,
 }
 
 /// Result of dynamic reasoning execution
@@ -1222,6 +1224,8 @@ pub struct ReasoningResult {
     pub reasoning_triggered: bool,
     /// All thoughts generated (for telemetry)
     pub thoughts: Vec<ThoughtUnit>,
+    /// Whether reasoning flagged a need for web retrieval
+    pub needs_retrieval: bool,
 }
 
 /// Validation error from unified training expected_* fields

@@ -35,13 +35,16 @@ The SPSE (Semantic Processing & Storage Engine) is a **privacy-first, config-dri
 ### Key Design Principles
 
 - **No hardcoded thresholds** — every numeric value lives in `config/config.yaml` via `EngineConfig`
+- **No external open sources** — training/seeding uses only internal datasets; the engine acquires knowledge at runtime via web retrieval triggered during reasoning
 - **Auto-Mode only** — engine operates exclusively in auto-intelligence mode; user toggles for temperature, reasoning depth, and creative level are ignored
+- **Auto-retrieval** — web retrieval is always enabled, triggered automatically by the reasoning/intent system when confidence is low or the query is open-world; no manual config gate
+- **Intelligence, not knowledge** — seed datasets teach *how to think* (reasoning chains, retrieval triggers, confidence gating), not factual content
 - **Calculation-based classification** — intent, tone, and resolver mode inferred via memory-backed spatial pattern matching (replaces heuristic detection)
-- **Dynamic reasoning** — confidence-gated internal reasoning loop triggered automatically, not by user request
+- **Dynamic reasoning** — confidence-gated internal reasoning loop triggered automatically, not by user request; signals retrieval when internal confidence stays low
 - **Privacy-first** — PII stripping (L10), no external telemetry, local SQLite persistence
 - **GPU-optional** — `wgpu`-based acceleration behind `#[cfg(feature = "gpu")]` with transparent CPU fallback
 - **Memory channels** — three isolated channels (Main, Intent, Reasoning) prevent cross-contamination
-- **Pollution detection** — automated detection and remediation of duplicate/degraded memory units
+- **Pollution prevention at source** — pre-ingestion content validation gate rejects empty, repetitive, artifact-laden, and low-quality content before it enters memory; post-hoc detection remains as a safety net
 
 ### Technology Stack
 
@@ -718,7 +721,23 @@ Maturity-stage-dependent thresholds:
 | Growth | 1,000–10,000 | 3 | 2 | 0.28 |
 | Stable | > 10,000 | 4 | 3 | 0.42 |
 
-### Pollution Detection
+### Pollution Prevention (Pre-Ingestion Gate)
+
+Content is validated **before** entering memory via `passes_content_validation()` in `ingest_activation()`:
+
+| Gate | Check | Action |
+|------|-------|--------|
+| Gate 1 | Empty or whitespace-only content | Reject |
+| Gate 2 | Purely numeric/punctuation content | Reject |
+| Gate 3 | Excessive word repetition (uniqueness < 30%) | Reject |
+| Gate 4 | Retrieval-sourced: short fragments, HTML/script artifacts | Reject |
+| Gate 5 | Near-duplicate with dramatically lower quality than existing | Reject |
+
+This prevents pollution at the source rather than cleaning up post-hoc.
+
+### Pollution Detection (Post-Hoc)
+
+Runs during `run_maintenance()` as a safety net:
 
 1. Normalize content and compute overlap ratio between unit pairs
 2. Apply Jaccard similarity gate (`pollution_similarity_threshold`: 0.65)
@@ -775,12 +794,20 @@ for step in 0..max_internal_steps (default 3):
        → Anchor boost: +0.15; non-anchor: +0.10; plus similarity × 0.2
     2. Fallback: generate_thought_unit()
        → Confidence improvement: 0.1 × (1.0 - previous).min(0.3)
-    3. Ingest thought into Reasoning channel as Episodic unit
+    3. If step > 0 and confidence < exit_threshold × 0.7:
+       → Set needs_retrieval = true (signals main pipeline to trigger web retrieval)
+    4. Ingest thought into Reasoning channel as Episodic unit
        → MemoryType::Episodic, channels: [Reasoning]
        → NOT Core memory (prevents pollution)
-    4. Track confidence trajectory
-    5. Exit early if confidence >= exit_confidence_threshold (0.60)
+    5. Track confidence trajectory
+    6. Exit early if confidence >= exit_confidence_threshold (0.60)
 ```
+
+### Reasoning-Triggered Retrieval
+
+When the reasoning loop determines it cannot reach sufficient confidence from internal knowledge alone, it sets `needs_retrieval = true` on `ReasoningState`. The main pipeline checks this flag after the reasoning loop exits and automatically triggers web retrieval via the Layer 11 pipeline. This implements the "I don't know → let me check → here's the answer" pattern without requiring any manual retrieval configuration.
+
+**Key**: Web retrieval is always enabled (`enable_retrieval` defaults to `true`). The `enable_retrieval` config gate has been removed from the main retrieval path — retrieval is triggered automatically based on `IntentDetector::assess()` and reasoning confidence signals.
 
 ### Output
 
@@ -791,6 +818,7 @@ ReasoningResult {
     final_confidence: f32,
     reasoning_triggered: bool,
     thoughts: Vec<ThoughtUnit>,
+    needs_retrieval: bool,       // true if reasoning flagged retrieval need
 }
 ```
 
@@ -1027,20 +1055,57 @@ pub struct TrainingExample {
 | `EntityGenerator` | `seed/entity_generator.rs` | Produces entity-based QA datasets |
 | `DialogueGenerator` | `seed/dialogue_generator.rs` | Produces multi-turn dialogue datasets |
 | `generate_dryrun_datasets()` | `seed/dryrun.rs` | Generates DryRun validation datasets |
+| `generate_intelligence_seeds()` | `seed/intelligence_generator.rs` | Intelligence-focused examples: reasoning chains, retrieval triggers, confidence gating |
 
-### Open Source Catalog (`src/open_sources.rs`)
+#### Intelligence-Focused Seed Generation
 
-Pre-defined open data sources:
+The `intelligence_generator` module produces training examples that teach the engine *how to think*, not *what to know*. Five categories:
+
+| Category | Count | Purpose |
+|----------|-------|---------|
+| Reasoning chains | 6+ | Step-by-step mathematical, logical, debugging, planning derivations |
+| Retrieval triggers | 6+ | "I don't know → let me check → here's the answer" pattern |
+| Confidence gating | 6+ | Recognizing high vs. low internal confidence; social short-circuits |
+| Multi-hop reasoning | 3+ | Chaining multiple logical/arithmetic steps |
+| Self-correction | 2+ | Catching and correcting initial reasoning errors |
+
+Each example includes:
+- `ReasoningTrace` with typed steps (`Premise`, `Inference`, `Calculation`, `Verification`, `Hypothesis`, `Conclusion`)
+- `IntentKind` classification
+- `context` hint (e.g., `retrieval_trigger:population_lookup`)
+- `curriculum_score` for training ordering (higher = earlier)
+
+### Internal Dataset Catalog (`src/open_sources.rs`)
+
+**No external open-source datasets are used for training or seeding.** The engine acquires factual knowledge at runtime via web retrieval triggered during reasoning.
+
+Internal-only datasets:
 
 | Source | Category | License | Default Memory | Integration |
 |--------|----------|---------|----------------|-------------|
-| Wikidata | core_kb | CC0 | Core | wikidata_truthy, wikidata_search |
-| Wikipedia | core_kb | CC-BY-SA | Core | wikipedia_dump, url |
-| DBpedia | core_kb | CC-BY-SA/ODbL | Core | dbpedia_dump, url |
-| Project Gutenberg | literature | Public Domain | Episodic | gutenberg_text |
-| Common Crawl | web_text | Various | Episodic | common_crawl_wet |
+| `dryrun_intent_core` | intent_dialogue | Internal | Episodic | structured_json |
+| `dryrun_entity_seed` | core_kb | Internal | Core | structured_json |
 
 Each source defines: `id`, `label`, `category`, `license`, `default_type`, `default_memory`, `default_batch_size`, `default_chunk_char_limit`.
+
+### Config Sweep Benchmark Tool (`src/bin/config_sweep.rs`)
+
+Sweeps key configuration values across ranges, runs probe queries against each configuration, and reports optimal settings. Dimensions swept:
+
+- `evidence_answer_confidence_threshold`, `min_confidence_floor`, `intent_floor_threshold`
+- `entropy_threshold`, `freshness_threshold`, `selection_temperature`
+- `prune_utility_threshold_stable`, `reasoning_trigger_confidence_floor`, `reasoning_exit_confidence`
+
+Output: `benchmarks/config_sweep_report.md`
+
+### Pollution Control Sweep Tool (`src/bin/pollution_sweep.rs`)
+
+Sweeps pollution-related configuration values, ingests a mix of valid and intentionally polluted content, then audits for contamination. Dimensions swept:
+
+- `pollution_detection_enabled`, `pollution_min_length`, `pollution_similarity_threshold`
+- `pollution_overlap_threshold`, `pollution_quality_margin`, `pollution_penalty_factor`, `pollution_edge_trim_limit`
+
+Output: `benchmarks/pollution_sweep_report.md`
 
 ---
 
@@ -1248,20 +1313,23 @@ spse_engine/
 │   │   ├── mod.rs                 # TrainingExample + CurriculumMetadata
 │   │   ├── entity_generator.rs    # Entity-based QA datasets
 │   │   ├── dialogue_generator.rs  # Multi-turn dialogue datasets
+│   │   ├── intelligence_generator.rs # Intelligence-focused seeds (reasoning, retrieval triggers)
 │   │   └── dryrun.rs              # DryRun validation datasets
 │   ├── bin/
 │   │   ├── benchmark_eval.rs      # Benchmark evaluation
+│   │   ├── config_sweep.rs        # Config sweep benchmark tool
 │   │   ├── crash_drill.rs         # Crash resilience drills
 │   │   ├── drill_harness.rs       # Drill execution harness
 │   │   ├── pollution_dev.rs       # Pollution detection development tool
 │   │   ├── pollution_dev_lib.rs   # Pollution dev support library
+│   │   ├── pollution_sweep.rs     # Pollution config sweep tool
 │   │   ├── stress_drill.rs        # Stress testing drills
 │   │   ├── test_harness.rs        # Config sweep harness
 │   │   └── zero_shot_harness.rs   # Zero-shot scenario testing
 │   ├── api.rs                     # REST API router (axum)
 │   ├── bloom_filter.rs            # UnitBloomFilter
 │   ├── document.rs                # Document processing (PDF, DOCX, text)
-│   ├── open_sources.rs            # Open data source catalog
+│   ├── open_sources.rs            # Internal dataset catalog (no external open sources)
 │   ├── persistence.rs             # SQLite persistence layer
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
 │   ├── spatial_index.rs           # SpatialGrid for O(log N) queries

@@ -2,6 +2,7 @@ use crate::config::SemanticMapConfig;
 use crate::types::{MemoryType, Unit};
 use petgraph::graph::NodeIndex;
 use petgraph::{Graph, Undirected};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -197,29 +198,43 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
     let mut temperature = config.max_displacement_per_iteration;
 
     for _ in 0..config.max_layout_iterations {
-        let mut displacements = vec![[0.0; 3]; positions.len()];
         let k = ideal_distance(positions.len(), config);
+        let repulsive_coeff = config.repulsive_force_coefficient.max(0.0);
 
-        for lhs in 0..positions.len() {
-            for rhs in lhs + 1..positions.len() {
-                let delta = subtract(positions[lhs], positions[rhs]);
-                let distance = magnitude(delta).max(0.05);
-                let direction = scale(delta, 1.0 / distance);
-                
-                // Process units vs Content units get 3x repulsion to prevent drift
-                let multiplier = if process_flags[lhs] != process_flags[rhs] {
-                    3.0
-                } else {
-                    1.0
-                };
-                
-                let repulsive_force =
-                    ((k * k) / distance) * config.repulsive_force_coefficient.max(0.0) * multiplier;
-                let adjustment = scale(direction, repulsive_force);
-                displacements[lhs] = add(displacements[lhs], adjustment);
-                displacements[rhs] = subtract(displacements[rhs], adjustment);
+        // Parallelize O(n²) repulsion: each row computes its net displacement independently
+        let n = positions.len();
+        let displacements: Vec<[f32; 3]> = if n > 64 {
+            (0..n).into_par_iter().map(|lhs| {
+                let mut disp = [0.0f32; 3];
+                for rhs in 0..n {
+                    if lhs == rhs { continue; }
+                    let delta = subtract(positions[lhs], positions[rhs]);
+                    let distance = magnitude(delta).max(0.05);
+                    let direction = scale(delta, 1.0 / distance);
+                    let multiplier = if process_flags[lhs] != process_flags[rhs] { 3.0 } else { 1.0 };
+                    let repulsive_force = ((k * k) / distance) * repulsive_coeff * multiplier;
+                    disp = add(disp, scale(direction, repulsive_force));
+                }
+                disp
+            }).collect()
+        } else {
+            // Small n: sequential is faster (no thread overhead)
+            let mut displacements = vec![[0.0; 3]; n];
+            for lhs in 0..n {
+                for rhs in lhs + 1..n {
+                    let delta = subtract(positions[lhs], positions[rhs]);
+                    let distance = magnitude(delta).max(0.05);
+                    let direction = scale(delta, 1.0 / distance);
+                    let multiplier = if process_flags[lhs] != process_flags[rhs] { 3.0 } else { 1.0 };
+                    let repulsive_force = ((k * k) / distance) * repulsive_coeff * multiplier;
+                    let adjustment = scale(direction, repulsive_force);
+                    displacements[lhs] = add(displacements[lhs], adjustment);
+                    displacements[rhs] = subtract(displacements[rhs], adjustment);
+                }
             }
-        }
+            displacements
+        };
+        let mut displacements = displacements;
 
         for edge in graph.edge_indices() {
             let Some((lhs, rhs)) = graph.edge_endpoints(edge) else {

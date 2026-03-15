@@ -1016,6 +1016,71 @@ impl MemoryStore {
         report
     }
 
+    /// Pre-ingestion content validation gate (Layer 21 pollution prevention).
+    /// Returns true if the content passes quality checks and should be ingested.
+    fn passes_content_validation(&self, activation: &ActivatedUnit, source: SourceKind) -> bool {
+        if !self.pollution_detection_enabled {
+            return true;
+        }
+
+        let normalized = &activation.normalized;
+        let content_len = normalized.chars().count();
+
+        // Gate 1: Reject empty or whitespace-only content
+        if normalized.trim().is_empty() {
+            return false;
+        }
+
+        // Gate 2: Reject content that is purely numeric or single-char repetition
+        if content_len > 1 && normalized.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
+            return false;
+        }
+
+        // Gate 3: Reject content with excessive repetition (pollution signature)
+        if content_len >= self.pollution_min_length {
+            let words: Vec<&str> = normalized.split_whitespace().collect();
+            if words.len() >= 3 {
+                let unique_words: std::collections::HashSet<&str> = words.iter().copied().collect();
+                let uniqueness_ratio = unique_words.len() as f32 / words.len() as f32;
+                // If less than 30% of words are unique, it's likely garbage/repetition
+                if uniqueness_ratio < 0.30 {
+                    return false;
+                }
+            }
+        }
+
+        // Gate 4: For retrieval-sourced content, apply stricter validation
+        if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl) {
+            // Reject very short retrieval content (likely noise/fragments)
+            if content_len < 3 {
+                return false;
+            }
+            // Reject content that looks like HTML/script artifacts
+            if normalized.contains("<script") || normalized.contains("javascript:")
+                || normalized.contains("cookie") && normalized.contains("accept")
+            {
+                return false;
+            }
+        }
+
+        // Gate 5: Check against existing content for near-duplicate pollution.
+        // If an existing unit has the same normalized form with much higher quality,
+        // reject the new activation to prevent polluted variants from entering.
+        if let Some(existing_id) = self.content_index.get(normalized.as_str()) {
+            if let Some(existing) = self.cache.get(existing_id) {
+                let existing_quality = existing.trust_score * existing.utility_score;
+                let new_quality = activation.confidence * activation.utility_score;
+                // If existing is dramatically better, still allow (it's a re-observation)
+                // But if new content is extremely low quality compared to existing, reject
+                if new_quality < existing_quality * 0.1 && existing.frequency > 2 {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     fn ingest_activation(
         &mut self,
         activation: &ActivatedUnit,
@@ -1025,6 +1090,11 @@ impl MemoryStore {
         default_memory_type: MemoryType,
         memory_channels: &[MemoryChannel],
     ) -> ActivationOutcome {
+        // Pre-ingestion pollution gate: validate content before accepting
+        if !self.passes_content_validation(activation, source) {
+            return ActivationOutcome::Candidate; // Silently reject as observation
+        }
+
         // Intent channel gate: block Intent-channel units from Core memory promotion
         let is_intent_channel = memory_channels.contains(&MemoryChannel::Intent);
         let promote_to_core = default_memory_type == MemoryType::Core

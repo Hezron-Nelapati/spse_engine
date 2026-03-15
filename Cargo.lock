@@ -3384,6 +3384,7 @@ dependencies = [
  "protoc-bin-vendored",
  "quick-xml",
  "rand 0.8.5",
+ "rayon",
  "regex",
  "reqwest",
  "rmp-serde",

@@ -359,6 +359,132 @@ pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
     }
 }
 
+/// Generate bulk entity data, streaming to a JSONL file as TrainingExamples.
+/// Returns (examples_written, bytes_written).
+pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, seed: u64) -> (u64, u64) {
+    use crate::seed::bulk_generator::{
+        expand_template, human_bytes, pick_idx, pick_str, seeded_rng, topics_for_domain,
+        JsonlWriter, DOMAINS,
+    };
+    use crate::seed::TrainingExample;
+    use crate::types::MemoryChannel;
+    use rand::Rng;
+
+    let mut rng = seeded_rng(seed);
+    let mut writer = JsonlWriter::new(output_path).expect("create entity JSONL");
+    let mut count: u64 = 0;
+
+    let entity_categories = [
+        "process", "concept", "artifact", "role", "metric",
+        "tool", "resource", "event", "domain", "policy",
+        "method", "attribute", "risk", "decision", "relationship",
+    ];
+
+    let link_types = ["related_to", "part_of", "has_part", "prerequisite_for", "produces",
+                      "consumes", "measured_by", "governed_by", "implemented_by", "supports"];
+
+    let definition_templates = [
+        "{topic} is a core {category} in {domain} that governs how {detail_a} interacts with {detail_b}. It encompasses {num_a} distinct sub-components and operates across {num_b} organizational levels. Key metrics include efficiency ({num_c}%), reliability, and stakeholder satisfaction.",
+        "In the context of {domain}, {topic} represents a {category} responsible for {detail_a}. Implementation requires {num_a} sequential phases: initiation, {detail_b}, execution, and {detail_c}. Success is measured against {num_b} predefined benchmarks.",
+        "The {category} known as {topic} within {domain} provides a framework for {detail_a} and {detail_b}. It was established to address gaps in {detail_c} and has since evolved through {num_a} major revisions. Current adoption spans {num_b} departments.",
+        "{topic} ({domain} {category}): enables {detail_a} through structured {detail_b}. Core attributes include scalability ({num_a}x), latency ({num_b}ms), and throughput ({num_c} ops/sec). Integration with {detail_c} provides end-to-end coverage.",
+        "As a key {domain} {category}, {topic} orchestrates {detail_a}, {detail_b}, and {detail_c}. The lifecycle includes {num_a} stages with quality gates at each transition. Annual review ensures alignment with {num_b} strategic objectives.",
+    ];
+
+    let question_patterns = [
+        "What is the definition of {} in {}?",
+        "Describe the {} {} and its key attributes.",
+        "How does {} function within the {} domain?",
+        "What are the main components of {} in {}?",
+        "Explain the role of {} as a {} in its field.",
+        "What relationships does {} have with other {} elements?",
+        "List the attributes and properties of {} in {}.",
+        "How is {} categorized within {}?",
+        "What distinguishes {} from related concepts in {}?",
+        "Provide a structured overview of {} in the context of {}.",
+        "What are the prerequisites for understanding {} in {}?",
+        "How has {} evolved as a concept within {}?",
+        "What are the practical applications of {} in {}?",
+        "Compare {} with its closest alternatives in {}.",
+        "What metrics are used to evaluate {} in {}?",
+        "What constraints apply to {} within the {} framework?",
+        "How do experts in {} typically define {}?",
+        "What are the subtypes or variants of {} found in {}?",
+        "Trace the origin and development of {} in {}.",
+        "What problems does {} solve in the {} domain?",
+        "Summarize the key characteristics of {} in {} terms.",
+        "How does {} interact with adjacent areas of {}?",
+        "What are the common misconceptions about {} in {}?",
+        "What foundational knowledge is needed to master {} in {}?",
+    ];
+
+    while writer.bytes_written() < target_bytes {
+        let domain_idx = pick_idx(&mut rng, DOMAINS.len());
+        let domain = DOMAINS[domain_idx];
+        let topics = topics_for_domain(domain_idx);
+        let topic = pick_str(&mut rng, topics);
+        let category = pick_str(&mut rng, &entity_categories);
+
+        let q_pattern = pick_str(&mut rng, &question_patterns);
+        let question = q_pattern.replacen("{}", &format!("{}", topic), 1)
+            .replacen("{}", &format!("{} ({})", domain, category), 1);
+
+        let def_template = pick_str(&mut rng, &definition_templates);
+        let article = if matches!(domain.chars().next(), Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U')) { "an" } else { "a" };
+        let definition = expand_template(&mut rng, def_template, domain, topic)
+            .replace("{category}", category)
+            .replace("a key", &format!("{} key", article));
+
+        // Generate entity link descriptions
+        let link_count: usize = rng.gen_range(2..6);
+        let mut link_descriptions = Vec::new();
+        for _ in 0..link_count {
+            let link_type = pick_str(&mut rng, &link_types);
+            let related_topic = pick_str(&mut rng, topics);
+            link_descriptions.push(format!("{} {} {}", topic, link_type, related_topic));
+        }
+        let links_text = link_descriptions.join("; ");
+
+        let answer = format!(
+            "{}\n\nRelationships: {}.\n\nCategory: {} | Domain: {}",
+            definition, links_text, category, domain
+        );
+
+        let entities_list: Vec<String> = vec![
+            topic.to_string(),
+            domain.to_string(),
+            category.to_string(),
+        ];
+
+        let example = TrainingExample {
+            question,
+            answer,
+            context: Some(format!("entity:{}:{}:{}", domain, category, topic)),
+            reasoning: None,
+            intent: Some("Question".to_string()),
+            entities: entities_list,
+            channels: vec![MemoryChannel::Main],
+            curriculum: crate::seed::CurriculumMetadata {
+                curriculum_score: rng.gen_range(90..115),
+                memory_channels: vec![MemoryChannel::Main],
+                ..Default::default()
+            },
+            quality_gates: Default::default(),
+            training_options: Default::default(),
+        };
+
+        writer.write_example(&example).expect("write entity");
+        count += 1;
+
+        if count % 100_000 == 0 {
+            eprintln!("  entities: {} examples, {}", count, human_bytes(writer.bytes_written()));
+        }
+    }
+
+    writer.flush().expect("flush entity JSONL");
+    (count, writer.bytes_written())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

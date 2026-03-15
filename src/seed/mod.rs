@@ -11,13 +11,20 @@
 //! - `QualityGates` - minimum thresholds for training validation
 //! - `TrainingOptions` - processing options (from types.rs)
 
+pub mod bulk_generator;
 mod entity_generator;
 mod dialogue_generator;
 mod dryrun;
+mod intelligence_generator;
+mod classification_generator;
 
 pub use entity_generator::{EntityGenerator, EntityJsonDataset};
 pub use dialogue_generator::{DialogueGenerator, DialogueJsonDataset, Dialogue, DialogueTurn, DialogueMetadata as SeedDialogueMetadata, ExpectedUnitCount, MemoryTarget as SeedMemoryTarget};
 pub use dryrun::{generate_dryrun_datasets, DryRunDatasetConfig};
+pub use intelligence_generator::{generate_intelligence_seeds, intelligence_seed_count, generate_bulk_intelligence};
+pub use entity_generator::generate_bulk_entities;
+pub use dialogue_generator::generate_bulk_dialogues;
+pub use classification_generator::generate_bulk_classification;
 
 
 use crate::types::{MemoryChannel, MemoryType, TrainingPhaseKind, TrainingOptions, ReasoningTrace, ReasoningStep, ReasoningType, ReasoningStepType, IntentKind};

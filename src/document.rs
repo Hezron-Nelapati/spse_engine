@@ -266,10 +266,18 @@ pub fn answer_question_with_config(
     }
 
     let weights = query_term_weights(&chunks, &query.effective_terms);
-    let mut scored = chunks
-        .into_iter()
-        .map(|chunk| score_chunk(chunk, &query, &weights))
-        .collect::<Vec<_>>();
+    let mut scored = if chunks.len() > 64 {
+        use rayon::prelude::*;
+        chunks
+            .into_par_iter()
+            .map(|chunk| score_chunk(chunk, &query, &weights))
+            .collect::<Vec<_>>()
+    } else {
+        chunks
+            .into_iter()
+            .map(|chunk| score_chunk(chunk, &query, &weights))
+            .collect::<Vec<_>>()
+    };
     scored.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
 
     let mode = select_response_mode(&query, &scored);

@@ -152,9 +152,15 @@ fn validation_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
+    // Validation uses the same internal datasets to verify ingestion quality.
+    // No external sources are used.
+    let mut intent_source = source("dryrun_intent_core");
+    intent_source.stream.item_limit = Some(5_000);
+    intent_source.stream.batch_size = Some(250);
+
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Validation,
-        sources: curriculum_order(vec![source("squad_v2"), source("natural_questions")]),
+        sources: vec![intent_source],
         batches_target: 1,
         options: phase_options(config, execution_mode, &config.training_phases.validation),
         min_unit_discovery_efficiency: config
@@ -172,14 +178,13 @@ fn expansion_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
+    // Expansion phase is reserved for future user-supplied or API-driven sources.
+    // No external open-source datasets are used. The engine acquires knowledge
+    // at runtime via web retrieval triggered during reasoning.
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Expansion,
-        sources: curriculum_order(vec![
-            source("public_openapi_specs"),
-            source("proofwriter"),
-            source("common_crawl"),
-        ]),
-        batches_target: 1,
+        sources: Vec::new(),
+        batches_target: 0,
         options: phase_options(config, execution_mode, &config.training_phases.expansion),
         min_unit_discovery_efficiency: config
             .training_phases
@@ -223,19 +228,12 @@ fn huggingface_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
+    // HuggingFace phase disabled: no external datasets used for training.
+    // The engine acquires knowledge at runtime via web retrieval during reasoning.
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Lifelong,
-        sources: curriculum_order(vec![
-            hf_source("hf_openai_gsm8k", 1),
-            hf_source("hf_tb_smoltalk2", 1),
-            hf_source("hf_h4_ultrachat_200k", 1),
-            hf_source("hf_fw_fineweb_edu", 1),
-            hf_source("hf_tb_cosmopedia", 1),
-            hf_source("hf_karpathy_climbmix", 1),
-            hf_source("hf_karpathy_fineweb_edu", 1),
-            hf_source("hf_karpathy_tinystories", 1),
-        ]),
-        batches_target: 1,
+        sources: Vec::new(),
+        batches_target: 0,
         options: phase_options(config, execution_mode, &config.training_phases.huggingface),
         min_unit_discovery_efficiency: config
             .training_phases
@@ -277,14 +275,6 @@ fn source(name: &str) -> TrainingSource {
     open_sources::catalog_source(name)
 }
 
-fn hf_source(name: &str, shard_limit: usize) -> TrainingSource {
-    let mut source = open_sources::catalog_source(name);
-    if shard_limit > 0 {
-        source.stream.shard_limit = Some(shard_limit);
-    }
-    source
-}
-
 fn curriculum_order(mut sources: Vec<TrainingSource>) -> Vec<TrainingSource> {
     sources.sort_by(|lhs, rhs| {
         curriculum_score(rhs)
@@ -295,25 +285,11 @@ fn curriculum_order(mut sources: Vec<TrainingSource>) -> Vec<TrainingSource> {
 }
 
 fn curriculum_score(source: &TrainingSource) -> i32 {
+    // Internal datasets only — external open-source scores removed.
     if let Some(name) = source.name.as_deref() {
         let explicit = match name {
-            "wikidata" => Some(112),
-            "public_openapi_specs" => Some(110),
-            "proofwriter" => Some(102),
-            "gsm8k_train" => Some(98),
-            "natural_questions" => Some(94),
-            "wikipedia" => Some(90),
-            "squad_v2" => Some(88),
-            "dolly_15k" => Some(84),
-            "common_crawl" => Some(22),
-            "hf_tb_smoltalk2" => Some(108),
-            "hf_openai_gsm8k" => Some(106),
-            "hf_h4_ultrachat_200k" => Some(104),
-            "hf_fw_fineweb_edu" => Some(96),
-            "hf_tb_cosmopedia" => Some(95),
-            "hf_karpathy_climbmix" => Some(93),
-            "hf_karpathy_fineweb_edu" => Some(92),
-            "hf_karpathy_tinystories" => Some(82),
+            "dryrun_intent_core" => Some(120),
+            "dryrun_entity_seed" => Some(110),
             _ => None,
         };
         if let Some(score) = explicit {
@@ -322,20 +298,12 @@ fn curriculum_score(source: &TrainingSource) -> i32 {
     }
 
     let structure_score = match source.source_type {
-        crate::types::TrainingSourceType::WikidataTruthy => 100,
-        crate::types::TrainingSourceType::DbpediaDump => 96,
-        crate::types::TrainingSourceType::OpenApiSpec => 94,
         crate::types::TrainingSourceType::QaJson => 88,
-        crate::types::TrainingSourceType::HuggingFaceDataset => 87,
         crate::types::TrainingSourceType::StructuredJson => 86,
         crate::types::TrainingSourceType::Dataset => 82,
-        crate::types::TrainingSourceType::WikipediaDump => 72,
-        crate::types::TrainingSourceType::ProjectGutenberg => 64,
-        crate::types::TrainingSourceType::CodeRepository => 60,
         crate::types::TrainingSourceType::Document => 54,
         crate::types::TrainingSourceType::Url => 48,
-        crate::types::TrainingSourceType::OpenWebText => 38,
-        crate::types::TrainingSourceType::CommonCrawlWet => 22,
+        _ => 40,
     };
     structure_score
 }
