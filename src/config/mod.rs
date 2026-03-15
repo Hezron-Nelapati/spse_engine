@@ -51,6 +51,14 @@ pub struct RetrievalThresholds {
     pub decision_threshold: f32,
     pub cost_penalty: f32,
     pub recency_threshold_hours: u32,
+    /// Weight for temporal term matches in freshness signal calculation
+    pub freshness_temporal_term_weight: f32,
+    /// Weight for freshness-sensitive context in freshness signal calculation
+    pub freshness_context_weight: f32,
+    /// Weight for task entities in freshness signal calculation
+    pub freshness_task_entity_weight: f32,
+    /// Maximum freshness signal value
+    pub freshness_max_value: f32,
 }
 
 impl Default for RetrievalThresholds {
@@ -66,6 +74,10 @@ impl Default for RetrievalThresholds {
             decision_threshold: 1.1,
             cost_penalty: 0.15,
             recency_threshold_hours: 72,
+            freshness_temporal_term_weight: 0.22,
+            freshness_context_weight: 0.18,
+            freshness_task_entity_weight: 0.08,
+            freshness_max_value: 1.2,
         }
     }
 }
@@ -1752,6 +1764,8 @@ pub struct FineResolverConfig {
     pub evidence_answer_confidence_threshold: f32,
     pub creative_drift_tolerance: f32,
     pub factual_corruption_threshold: f32,
+    /// Threshold for forcing retrieval on factual intent when top candidate score is below this value
+    pub factual_intent_retrieval_threshold: f32,
 }
 
 impl Default for FineResolverConfig {
@@ -1762,6 +1776,7 @@ impl Default for FineResolverConfig {
             evidence_answer_confidence_threshold: 0.22,
             creative_drift_tolerance: 0.25,
             factual_corruption_threshold: 0.15,
+            factual_intent_retrieval_threshold: 0.65,
         }
     }
 }

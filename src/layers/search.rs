@@ -6,6 +6,56 @@ use nalgebra::SVector;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+/// GPU-accelerated candidate scoring wrapper
+/// Uses GPU when available and beneficial, falls back to CPU for small batches
+pub fn score_candidates_gpu_accelerated(
+    candidates: &[Unit],
+    context: &ContextMatrix,
+    sequence: &SequenceState,
+    merged: &MergedState,
+    weights: &ScoringWeights,
+    intent: Option<IntentKind>,
+    original_query: Option<&str>,
+) -> Vec<ScoredCandidate> {
+    #[cfg(feature = "gpu")]
+    {
+        use crate::gpu::compute::candidate_scorer::score_candidates;
+        let mut scored = score_candidates(candidates, context, sequence, merged, weights);
+        
+        // Apply exact match bonus post-processing (GPU doesn't handle this)
+        if let Some(query) = original_query {
+            let query_terms: Vec<String> = if !context.summary.is_empty() {
+                context.summary
+                    .split_whitespace()
+                    .take(10)
+                    .map(|s| s.to_lowercase())
+                    .collect()
+            } else {
+                query.split_whitespace().take(10).map(|s| s.to_lowercase()).collect()
+            };
+            
+            for candidate in &mut scored {
+                let exact_bonus = exact_match_score(&candidate.content.to_lowercase(), &query_terms, intent)
+                    * level_multiplier(crate::types::UnitLevel::Word); // Use default level multiplier
+                candidate.score += exact_bonus;
+            }
+        }
+        
+        // Sort by score descending
+        scored.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        return scored;
+    }
+    
+    // CPU fallback when GPU feature is disabled
+    #[cfg(not(feature = "gpu"))]
+    {
+        CandidateScorer::score(candidates, context, sequence, merged, weights, intent, original_query)
+    }
+}
+
 pub struct CandidateScorer;
 
 impl CandidateScorer {

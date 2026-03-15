@@ -1,4 +1,4 @@
-use crate::config::{IntentConfig, ReasoningLoopConfig, RetrievalThresholds, ToneInferenceConfig};
+use crate::config::{FineResolverConfig, IntentConfig, ReasoningLoopConfig, RetrievalThresholds, ToneInferenceConfig};
 use crate::types::{
     ConfidenceStats, ContextMatrix, IntentBlendReport, IntentFallbackMode, IntentKind,
     IntentProfile, IntentScore, ScoredCandidate, SearchDecision, SequenceState, StyleAnchor,
@@ -40,11 +40,12 @@ impl IntentDetector {
         stats: &ConfidenceStats,
         scored: &[ScoredCandidate],
         thresholds: &RetrievalThresholds,
+        resolver_config: &FineResolverConfig,
         raw_input: &str,
         intent: &IntentProfile,
     ) -> SearchDecision {
         let entropy = Self::calculate_entropy(scored);
-        let freshness_need = freshness_signal(raw_input, context, sequence);
+        let freshness_need = freshness_signal(raw_input, context, sequence, thresholds);
         let disagreement = stats.disagreement.clamp(0.0, 1.0);
         let cost_penalty = thresholds.cost_penalty;
         let score = (thresholds.w_entropy * entropy)
@@ -82,7 +83,7 @@ impl IntentDetector {
                 | IntentKind::Brainstorm
         );
         let open_world_force =
-            should_force_external_retrieval(raw_input, intent, scored, stats.mean_confidence);
+            should_force_external_retrieval(raw_input, intent, scored, stats.mean_confidence, resolver_config.factual_intent_retrieval_threshold);
         if open_world_force {
             reasons.push("open_world_low_confidence_retrieval".to_string());
         }
@@ -266,7 +267,12 @@ fn is_question_starter(token: &str) -> bool {
     )
 }
 
-fn freshness_signal(raw_input: &str, context: &ContextMatrix, sequence: &SequenceState) -> f32 {
+fn freshness_signal(
+    raw_input: &str,
+    context: &ContextMatrix,
+    sequence: &SequenceState,
+    thresholds: &RetrievalThresholds,
+) -> f32 {
     let lowered = raw_input.to_lowercase();
     let mut freshness: f32 = 0.0;
     for term in [
@@ -283,16 +289,16 @@ fn freshness_signal(raw_input: &str, context: &ContextMatrix, sequence: &Sequenc
         "weather",
     ] {
         if lowered.contains(term) {
-            freshness += 0.22;
+            freshness += thresholds.freshness_temporal_term_weight;
         }
     }
     if context.summary.contains("freshness_sensitive") {
-        freshness += 0.18;
+        freshness += thresholds.freshness_context_weight;
     }
     if !sequence.task_entities.is_empty() {
-        freshness += 0.08;
+        freshness += thresholds.freshness_task_entity_weight;
     }
-    freshness.clamp(0.0, 1.2)
+    freshness.clamp(0.0, thresholds.freshness_max_value)
 }
 
 fn should_force_external_retrieval(
@@ -300,6 +306,7 @@ fn should_force_external_retrieval(
     intent: &IntentProfile,
     scored: &[ScoredCandidate],
     mean_confidence: f32,
+    factual_intent_threshold: f32,
 ) -> bool {
     if matches!(intent.fallback_mode, IntentFallbackMode::RetrieveUnknown) {
         return true;
@@ -315,7 +322,7 @@ fn should_force_external_retrieval(
     }
 
     // For factual questions (Question, Verify, Explain, etc.), force retrieval if:
-    // 1. The top candidate score is below a reasonable threshold (0.65)
+    // 1. The top candidate score is below a reasonable threshold
     // 2. The candidate doesn't appear to directly answer the question
     // This prevents settling for vaguely related but unhelpful candidates
     let factual_intent = matches!(
@@ -323,7 +330,7 @@ fn should_force_external_retrieval(
         IntentKind::Question | IntentKind::Verify | IntentKind::Explain | IntentKind::Extract
     );
     
-    if factual_intent && top.score < 0.65 {
+    if factual_intent && top.score < factual_intent_threshold {
         return true;
     }
 
@@ -404,9 +411,6 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
     }
 
     intersection as f32 / lhs.len().max(rhs.len()) as f32
-}
-
-impl IntentDetector {
 }
 
 #[cfg(test)]

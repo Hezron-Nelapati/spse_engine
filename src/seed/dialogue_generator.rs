@@ -149,6 +149,10 @@ impl DialogueGenerator {
                 role,
                 content,
                 context: None,
+                expected_entities: Vec::new(),
+                expected_anchors: Vec::new(),
+                expected_unit_count: ExpectedUnitCount::default(),
+                source_quality: None,
             })
             .collect();
         
@@ -167,6 +171,8 @@ impl DialogueGenerator {
                 entities_referenced: entities,
                 memory_channels,
                 expected_unit_levels,
+                memory_target: MemoryTarget::Episodic,
+                corroboration_threshold: default_corroboration_threshold(),
             },
         }
     }

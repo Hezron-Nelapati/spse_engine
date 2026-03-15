@@ -448,7 +448,11 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
             content: t.content.clone(),
             expected_entities: t.expected_entities.clone(),
             expected_anchors: t.expected_anchors.clone(),
-            expected_unit_count: t.expected_unit_count.clone(),
+            expected_unit_count: ExpectedUnitCount {
+                phrase: t.expected_unit_count.phrase,
+                sentence: t.expected_unit_count.sentence,
+                word: t.expected_unit_count.word,
+            },
             source_quality: t.source_quality,
         }).collect();
         
@@ -456,7 +460,11 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
         let metadata = DialogueMetadata {
             domain: Some(dialogue.metadata.domain.clone()),
             complexity: dialogue.metadata.complexity.clone(),
-            memory_target: dialogue.metadata.memory_target,
+            memory_target: match dialogue.metadata.memory_target {
+                crate::seed::SeedMemoryTarget::StagingEpisodic => MemoryTarget::StagingEpisodic,
+                crate::seed::SeedMemoryTarget::Core => MemoryTarget::Core,
+                crate::seed::SeedMemoryTarget::Episodic => MemoryTarget::Episodic,
+            },
             channels: dialogue.metadata.memory_channels.clone(),
             corroboration_threshold: dialogue.metadata.corroboration_threshold,
         };

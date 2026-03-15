@@ -3,12 +3,10 @@ use crate::config::{
     ReasoningLoopConfig, RetrievalThresholds, ScoringWeights, TrustConfig,
 };
 use crate::document::{
-    answer_question, is_supported_document_path, load_document_bytes,
-    load_documents_from_paths_with_config, load_path_content_with_config,
-    parse_inline_document_request, validate_document_mime, DocumentAnswer, DocumentQueryState,
+    answer_question, load_documents_from_paths_with_config, parse_inline_document_request,
+    DocumentAnswer, DocumentQueryState,
 };
 use crate::layers::builder::UnitBuilder;
-use crate::layers::context::ContextManager;
 use crate::layers::feedback::FeedbackController;
 use crate::layers::hierarchy::HierarchicalUnitOrganizer;
 use crate::layers::input;
@@ -20,18 +18,17 @@ use crate::layers::resolver::FineResolver;
 use crate::layers::retrieval::RetrievalPipeline;
 use crate::layers::router::SemanticRouter;
 use crate::layers::safety::TrustSafetyValidator;
-use crate::layers::search::{top_unit_ids, CandidateScorer};
+use crate::layers::search::{top_unit_ids, CandidateScorer, score_candidates_gpu_accelerated};
 use crate::memory::store::{MemorySnapshot, MemoryStore};
-use crate::open_sources;
-use crate::scheduler::{PriorityScheduler, WorkPriority};
 use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
-use crate::telemetry::test_observer::{
-    ObservationMemory, ObservationRetrieval, ObservationScoring, ObservationTimings,
-    ObservationUnits, ScoreBreakdown as ObservedScoreBreakdown, TestObserver,
-};
+use crate::scheduler::{PriorityScheduler, WorkPriority};
 use crate::telemetry::{
     HotStore, LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent,
     TelemetryWorker, TelemetryWorkerConfig, TraceContext, TraceId,
+};
+use crate::telemetry::test_observer::{
+    ObservationMemory, ObservationRetrieval, ObservationScoring, ObservationTimings,
+    ObservationUnits, ScoreBreakdown as ObservedScoreBreakdown, TestObserver,
 };
 use crate::training::{self, TrainingPhasePlan, TrainingScope};
 use crate::types::{
@@ -134,6 +131,10 @@ pub struct Engine {
 }
 
 impl Engine {
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     pub fn new() -> Self {
         Self::new_with_db_path("spse_memory.db")
     }
@@ -691,6 +692,66 @@ impl Engine {
         self.run_training_plan_with_id(job_id, plan).await
     }
 
+    pub fn start_train(&self, _execution_mode: TrainingExecutionMode) -> String {
+        let job_id = format!("train_{}", Uuid::new_v4().simple());
+        // Spawn happens in api.rs handler to avoid lifetime issues
+        job_id
+    }
+
+    pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus> {
+        let jobs = self.jobs.lock().expect("jobs mutex poisoned");
+        jobs.get(job_id).cloned()
+    }
+
+    pub async fn run_training_plan_with_id(
+        &self,
+        job_id: String,
+        plan: crate::training::TrainingPlan,
+    ) -> TrainingJobStatus {
+        let mut status = TrainingJobStatus {
+            job_id: job_id.clone(),
+            status: JobState::Processing,
+            active_phase: plan.phases.first().map(|p| p.phase),
+            phase_statuses: plan.phases.iter().map(|p| TrainingPhaseStatus {
+                phase: p.phase,
+                status: JobState::Queued,
+                batches_completed: 0,
+                batches_target: p.batches_target,
+                sources_processed: 0,
+                sources_total: p.sources.len(),
+                metrics: TrainingMetrics::default(),
+            }).collect(),
+            progress: crate::types::TrainingProgress::default(),
+            learning_metrics: crate::types::LearningMetrics::default(),
+            performance: crate::types::PerformanceMetrics::default(),
+            intent_distribution: std::collections::BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+        
+        self.store_job(status.clone());
+        status
+    }
+
+    fn prepare_context_and_candidates(
+        &self,
+        _hierarchy: &UnitHierarchy,
+        _routing: &RoutingResult,
+    ) -> (ContextMatrix, SequenceState, Vec<Unit>) {
+        let snapshot = self.load_memory_snapshot();
+        let sequence = snapshot.sequence_state();
+        let context = ContextMatrix::default();
+        let all_units = snapshot.all_units();
+        (context, sequence, all_units)
+    }
+
+    fn resolve_adaptive_runtime(
+        &self,
+        _intent_profile: &IntentProfile,
+        _queue_depths: QueueDepths,
+    ) -> AdaptiveRuntimeSettings {
+        AdaptiveRuntimeSettings::from_config(&self.config)
+    }
+
     pub async fn run_phase0_dry_run(&self, execution_mode: TrainingExecutionMode) -> DryRunReport {
         let status = self
             .train_with_scope(execution_mode, TrainingScope::DryRun)
@@ -842,7 +903,7 @@ impl Engine {
             evidence_support: (reasoning_support.confidence * 0.20).clamp(0.0, 1.0),
             ..MergedState::default()
         };
-        let initial_scored = CandidateScorer::score(
+        let initial_scored = score_candidates_gpu_accelerated(
             &candidate_units,
             &context_matrix,
             &sequence_state,
@@ -859,6 +920,7 @@ impl Engine {
             &confidence_stats,
             &initial_scored,
             &adaptive.retrieval,
+            &self.config.resolver,
             &packet.original_text,
             &intent_profile,
         );
@@ -980,7 +1042,7 @@ impl Engine {
         };
 
         let layer_14_start = Instant::now();
-        let scored = CandidateScorer::score(
+        let scored = score_candidates_gpu_accelerated(
             &final_candidates,
             &context_matrix,
             &sequence_state,
@@ -5039,6 +5101,7 @@ fn blend_resolver_profile(
         evidence_answer_confidence_threshold: config.resolver.evidence_answer_confidence_threshold,
         creative_drift_tolerance: config.resolver.creative_drift_tolerance,
         factual_corruption_threshold: config.resolver.factual_corruption_threshold,
+        factual_intent_retrieval_threshold: config.resolver.factual_intent_retrieval_threshold,
     };
 
     let mode = dominant_behavior_profile_name(blend).and_then(|name| match name {
