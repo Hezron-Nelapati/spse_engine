@@ -38,6 +38,8 @@ pub struct BatchTelemetry {
     pub units_created: u64,
     pub bytes_read: u64,
     pub batch_duration_ms: u64,
+    pub build_ms: u64,
+    pub ingest_ms: u64,
     pub examples_per_sec: f64,
     pub units_per_sec: f64,
     pub cumulative_examples: u64,
@@ -116,6 +118,8 @@ impl TrainingRunLogger {
         units_created: u64,
         bytes_read: u64,
         batch_duration: std::time::Duration,
+        build_duration: std::time::Duration,
+        ingest_duration: std::time::Duration,
         force: bool,
     ) {
         let elapsed = self.run_start.elapsed();
@@ -132,6 +136,8 @@ impl TrainingRunLogger {
             units_created,
             bytes_read,
             batch_duration_ms: batch_ms,
+            build_ms: build_duration.as_millis() as u64,
+            ingest_ms: ingest_duration.as_millis() as u64,
             examples_per_sec: examples_ingested as f64 / elapsed.as_secs_f64().max(0.001),
             units_per_sec: units_created as f64 / elapsed.as_secs_f64().max(0.001),
             cumulative_examples: examples_ingested,
@@ -145,13 +151,15 @@ impl TrainingRunLogger {
             let rate = examples_ingested as f64 / elapsed.as_secs_f64().max(0.001);
             let mb = bytes_read as f64 / 1_048_576.0;
             let msg = format!(
-                "[{}] [{}] {} examples, {} units, {:.1} MB, {:.0} ex/s, {:.1}s elapsed",
+                "[{}] [{}] {} ex, {} units, {:.1} MB | {:.0} ex/s | batch: build={:.0}ms ingest={:.0}ms | {:.1}s total",
                 Utc::now().format("%H:%M:%S"),
                 source_name,
                 examples_ingested,
                 units_created,
                 mb,
                 rate,
+                build_duration.as_secs_f64() * 1000.0,
+                ingest_duration.as_secs_f64() * 1000.0,
                 elapsed.as_secs_f64(),
             );
             self.log_progress(&msg);

@@ -920,7 +920,10 @@ impl Engine {
                             })
                             .collect();
 
+                        let build_elapsed = batch_start.elapsed();
+
                         // Sequential: ingest all prepared hierarchies under a single lock
+                        let ingest_start = Instant::now();
                         {
                             let mut memory =
                                 self.memory.lock().expect("memory mutex poisoned");
@@ -944,6 +947,7 @@ impl Engine {
                                 }
                             }
                         }
+                        let ingest_elapsed = ingest_start.elapsed();
 
                         // Track intents (outside lock)
                         for (example, _, _) in &prepared {
@@ -968,6 +972,8 @@ impl Engine {
                             units_created,
                             bytes_read,
                             batch_start.elapsed(),
+                            build_elapsed,
+                            ingest_elapsed,
                             done, // force print on last batch
                         );
 

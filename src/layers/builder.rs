@@ -150,7 +150,9 @@ fn rolling_hash_units(
     config: &UnitBuilderConfig,
     snapshot: Option<&MemorySnapshot>,
 ) -> Vec<ActivatedUnit> {
-    let mut windows: HashMap<(u64, usize, String), WindowStats> = HashMap::new();
+    let mut windows: HashMap<(u64, usize), WindowStats> = HashMap::new();
+    // Track rejected (hash, byte_len) pairs to skip normalize_window on repeat hits
+    let mut rejected: std::collections::HashSet<(u64, usize)> = std::collections::HashSet::new();
     let boundary_index = TextBoundaryIndex::build(bytes);
 
     for width in rolling_window_sizes(config) {
@@ -170,32 +172,48 @@ fn rolling_hash_units(
                 ) else {
                     continue;
                 };
-                let Some((content, normalized)) = normalize_window(window_text, config) else {
-                    continue;
-                };
+
+                let stable = stable_window_hash(window_text.as_bytes(), config.hash_base)
+                    .unwrap_or(hash);
+                let byte_len = window_end - window_start;
+                let fast_key = (stable, byte_len);
+
                 let left_boundary =
                     window_start == 0 || !boundary_index.is_word_byte(window_start - 1);
                 let right_boundary =
                     window_end >= bytes.len() || !boundary_index.is_word_byte(window_end);
 
-                let key = (
-                    stable_window_hash(window_text.as_bytes(), config.hash_base).unwrap_or(hash),
-                    window_end - window_start,
-                    normalized.clone(),
-                );
-                let entry = windows.entry(key).or_default();
-                if entry.content.is_empty() {
-                    entry.content = content.clone();
-                    entry.normalized = normalized;
-                    entry.byte_len = window_end - window_start;
+                // Fast path: if already seen this window, just update stats (skip normalize)
+                if let Some(entry) = windows.get_mut(&fast_key) {
+                    entry.frequency += 1;
+                    if left_boundary || right_boundary {
+                        entry.edge_boundary_hits += 1;
+                    }
+                    if left_boundary && right_boundary {
+                        entry.full_token_boundary_hits += 1;
+                    }
+                    continue;
                 }
-                entry.frequency += 1;
-                if left_boundary || right_boundary {
-                    entry.edge_boundary_hits += 1;
+
+                // Skip windows that were already rejected by normalize_window
+                if rejected.contains(&fast_key) {
+                    continue;
                 }
-                if left_boundary && right_boundary {
-                    entry.full_token_boundary_hits += 1;
-                }
+
+                // Slow path: first time seeing this window — normalize
+                let Some((content, normalized)) = normalize_window(window_text, config) else {
+                    rejected.insert(fast_key);
+                    continue;
+                };
+
+                windows.insert(fast_key, WindowStats {
+                    content,
+                    normalized,
+                    byte_len,
+                    frequency: 1,
+                    full_token_boundary_hits: if left_boundary && right_boundary { 1 } else { 0 },
+                    edge_boundary_hits: if left_boundary || right_boundary { 1 } else { 0 },
+                });
             }
         }
     }
@@ -279,23 +297,25 @@ fn normalize_window(window: &str, config: &UnitBuilderConfig) -> Option<(String,
 
 /// Check if the normalized string looks like a JSON unicode escape sequence
 fn looks_like_unicode_escape(normalized: &str) -> bool {
+    // Quick length check to avoid work on longer strings
+    if normalized.len() > 12 {
+        return false;
+    }
     // Pattern: u followed by 4-6 hex digits (e.g., u0259, u00b0, u20ac)
-    // Also catch escaped form: \\uXXXX
-    let chars: Vec<char> = normalized.chars().collect();
-    if chars.len() <= 12 {
-        // Look for u[0-9a-f]{4,6} pattern
-        for i in 0..chars.len().saturating_sub(4) {
-            if chars[i] == 'u' {
-                let hex_count = chars[i + 1..]
-                    .iter()
-                    .take_while(|c| c.is_ascii_hexdigit())
-                    .count();
-                if hex_count >= 4 && hex_count <= 6 {
-                    // Check if this is most of the string (likely just the escape)
-                    let rest_len = chars.len() - hex_count - 1;
-                    if rest_len <= 3 {
-                        return true;
-                    }
+    let total_chars = normalized.chars().count();
+    if total_chars > 12 {
+        return false;
+    }
+    for (i, ch) in normalized.char_indices() {
+        if ch == 'u' {
+            let hex_count = normalized[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .count();
+            if hex_count >= 4 && hex_count <= 6 {
+                let rest_len = total_chars - hex_count - 1;
+                if rest_len <= 3 {
+                    return true;
                 }
             }
         }
