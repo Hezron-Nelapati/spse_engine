@@ -34,6 +34,8 @@ enum Commands {
         execution_mode: String,
         #[arg(long, default_value = "full")]
         scope: String,
+        #[arg(long, help = "Train only a single source by name, e.g. seed_entities")]
+        source: Option<String>,
     },
     TrainStatus {
         job_id: String,
@@ -85,6 +87,7 @@ async fn main() {
             json,
             execution_mode,
             scope,
+            source,
         } => {
             let execution_mode = parse_execution_mode(&execution_mode);
             let scope = parse_training_scope(&scope);
@@ -109,15 +112,13 @@ async fn main() {
                 }
             } else {
                 let engine = Arc::new(Engine::new());
+                let status = engine.train_with_scope(execution_mode, scope, source.as_deref()).await;
                 if json {
-                    let status = engine.train_with_scope(execution_mode, scope).await;
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&status).expect("serialize training status")
                     );
                 } else {
-                    let job_id = engine.clone().start_train_with_scope(execution_mode, scope);
-                    let status = wait_for_training_completion(&engine, &job_id).await;
                     print_training_status(&status);
                 }
             }

@@ -686,7 +686,7 @@ impl Engine {
         &self,
         execution_mode: TrainingExecutionMode,
     ) -> TrainingJobStatus {
-        self.train_with_scope(execution_mode, TrainingScope::Full)
+        self.train_with_scope(execution_mode, TrainingScope::Full, None)
             .await
     }
 
@@ -694,10 +694,16 @@ impl Engine {
         &self,
         execution_mode: TrainingExecutionMode,
         scope: TrainingScope,
+        source_filter: Option<&str>,
     ) -> TrainingJobStatus {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
         let job_id = format!("train_{}", Uuid::new_v4().simple());
-        let plan = training::build_training_plan_with_config(&self.config, execution_mode, scope);
+        let mut plan = training::build_training_plan_with_config(&self.config, execution_mode, scope);
+        if let Some(filter) = source_filter {
+            for phase in &mut plan.phases {
+                phase.sources.retain(|s| s.name.as_deref() == Some(filter));
+            }
+        }
         self.run_training_plan_with_id(job_id, plan).await
     }
 
@@ -743,7 +749,7 @@ impl Engine {
         job_id: String,
         plan: crate::training::TrainingPlan,
     ) -> TrainingJobStatus {
-        let status = TrainingJobStatus {
+        let mut status = TrainingJobStatus {
             job_id: job_id.clone(),
             status: JobState::Processing,
             active_phase: plan.phases.first().map(|p| p.phase),
@@ -762,8 +768,232 @@ impl Engine {
             intent_distribution: std::collections::BTreeMap::new(),
             warnings: Vec::new(),
         };
-        
+
         self.store_job(status.clone());
+
+        let plan_start = Instant::now();
+        let mut total_examples: u64 = 0;
+        let mut total_units: u64 = 0;
+
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            let phase_start = Instant::now();
+            if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
+                ps.status = JobState::Processing;
+            }
+            status.active_phase = Some(phase.phase);
+            self.store_job(status.clone());
+
+            eprintln!("[training] phase {:?} — {} sources", phase.phase, phase.sources.len());
+
+            for (src_idx, source) in phase.sources.iter().enumerate() {
+                let resolved = match crate::open_sources::resolve_training_source(source) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        status.warnings.push(format!("source resolve error: {e}"));
+                        continue;
+                    }
+                };
+
+                let file_path = match resolved.value.as_deref() {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => {
+                        status.warnings.push(format!(
+                            "source {:?} has no file path",
+                            resolved.name
+                        ));
+                        continue;
+                    }
+                };
+
+                if !file_path.exists() {
+                    status.warnings.push(format!(
+                        "source file not found: {}",
+                        file_path.display()
+                    ));
+                    continue;
+                }
+
+                let item_limit = resolved.stream.item_limit.unwrap_or(200_000);
+                let target_memory = resolved.target_memory.unwrap_or(MemoryType::Episodic);
+                let channels = resolved.memory_channels.clone().unwrap_or_else(|| vec![MemoryChannel::Main]);
+                let source_name = resolved.name.clone().unwrap_or_default();
+
+                eprintln!(
+                    "  [{}] reading {} (limit={}, memory={:?})",
+                    source_name,
+                    file_path.display(),
+                    item_limit,
+                    target_memory
+                );
+
+                let file = match std::fs::File::open(&file_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        status.warnings.push(format!("failed to open {}: {e}", file_path.display()));
+                        continue;
+                    }
+                };
+                let reader = std::io::BufReader::with_capacity(1024 * 1024, file);
+                use std::io::BufRead;
+
+                let mut examples_ingested: u64 = 0;
+                let mut units_created: u64 = 0;
+                let mut bytes_read: u64 = 0;
+                let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
+
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+
+                    bytes_read += line.len() as u64 + 1;
+                    if examples_ingested >= item_limit as u64 || bytes_read > max_bytes {
+                        break;
+                    }
+
+                    let example: crate::seed::TrainingExample = match serde_json::from_str(&line) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+
+                    // Ingest answer text (primary knowledge)
+                    let combined = if example.question.len() > 20 {
+                        format!("{} — {}", example.question, example.answer)
+                    } else {
+                        example.answer.clone()
+                    };
+
+                    let packet = input::ingest_raw(&combined, true);
+                    let build_output = self.build_units(&packet);
+                    let hierarchy = HierarchicalUnitOrganizer::organize(
+                        &build_output,
+                        &self.config.builder,
+                    );
+
+                    let context_label = example
+                        .context
+                        .as_deref()
+                        .unwrap_or(&source_name);
+
+                    let active_ids = {
+                        let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                        memory.ingest_hierarchy_with_channels(
+                            &hierarchy,
+                            SourceKind::TrainingDocument,
+                            context_label,
+                            target_memory,
+                            &channels,
+                        )
+                    };
+                    units_created += active_ids.len() as u64;
+
+                    // Ingest reasoning trace if present
+                    if let Some(ref trace) = example.reasoning {
+                        let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                        let trace_ids = training::ingest_reasoning_trace(
+                            &mut memory,
+                            trace,
+                            &example.question,
+                        );
+                        units_created += trace_ids.len() as u64;
+                    }
+
+                    // Track intent distribution
+                    if let Some(ref intent_str) = example.intent {
+                        *status.intent_distribution.entry(intent_str.clone()).or_insert(0) += 1;
+                    }
+
+                    examples_ingested += 1;
+
+                    if examples_ingested % 10_000 == 0 {
+                        eprintln!(
+                            "    {} examples, {} units, {:.1} MB",
+                            examples_ingested,
+                            units_created,
+                            bytes_read as f64 / 1_048_576.0,
+                        );
+                    }
+                }
+
+                total_examples += examples_ingested;
+                total_units += units_created;
+
+                eprintln!(
+                    "  [{}] done: {} examples, {} units",
+                    source_name, examples_ingested, units_created
+                );
+
+                if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
+                    ps.sources_processed = src_idx + 1;
+                    ps.metrics.examples_ingested += examples_ingested;
+                    ps.metrics.units_created += units_created;
+                }
+                status.progress.sources_total = plan.phases.iter().map(|p| p.sources.len()).sum();
+                status.progress.sources_processed += 1;
+                self.store_job(status.clone());
+            }
+
+            // Run governance after each phase
+            {
+                let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                let report = memory.prune_to_memory_budget(
+                    (phase.options.max_memory_delta_mb * 1024.0) as i64,
+                );
+                eprintln!(
+                    "  [governance] pruned {} units, {} candidates",
+                    report.pruned_units, report.pruned_candidates
+                );
+            }
+
+            // Rebuild spatial index
+            {
+                let memory = self.memory.lock().expect("memory mutex poisoned");
+                let all_units = memory.all_units();
+                let routing = route_units(
+                    &all_units,
+                    &all_units,
+                    &self.config.semantic_map,
+                );
+                drop(memory);
+                let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                memory.update_positions(&routing.position_updates);
+            }
+            self.publish_memory_snapshot();
+
+            if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
+                ps.status = JobState::Completed;
+                ps.batches_completed = phase.batches_target;
+            }
+
+            let phase_elapsed = phase_start.elapsed();
+            eprintln!(
+                "[training] phase {:?} complete in {:.1}s",
+                phase.phase,
+                phase_elapsed.as_secs_f64()
+            );
+        }
+
+        let total_elapsed = plan_start.elapsed();
+        status.status = JobState::Completed;
+        status.active_phase = None;
+        status.learning_metrics.new_units_discovered = total_units;
+        status.progress.percent_complete = 100.0;
+        status.performance.avg_ms_per_source = if status.progress.sources_processed > 0 {
+            total_elapsed.as_millis() as u64 / status.progress.sources_processed as u64
+        } else {
+            0
+        };
+        self.store_job(status.clone());
+
+        eprintln!(
+            "[training] complete: {} examples, {} units in {:.1}s",
+            total_examples, total_units, total_elapsed.as_secs_f64()
+        );
+
         status
     }
 
@@ -789,7 +1019,7 @@ impl Engine {
 
     pub async fn run_phase0_dry_run(&self, execution_mode: TrainingExecutionMode) -> DryRunReport {
         let status = self
-            .train_with_scope(execution_mode, TrainingScope::DryRun)
+            .train_with_scope(execution_mode, TrainingScope::DryRun, None)
             .await;
         self.finalize_phase0_dry_run(status).await
     }

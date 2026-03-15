@@ -115,26 +115,26 @@ pub fn render_training_plan_with_config(
     lines.join("\n")
 }
 
+fn seed_sources() -> Vec<TrainingSource> {
+    let names = ["seed_entities", "seed_intelligence", "seed_dialogues", "seed_classification"];
+    names.iter().map(|name| source(name)).collect()
+}
+
 fn bootstrap_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
-    // Use generated high-density seed datasets for bootstrap training
-    let mut intent_source = source("dryrun_intent_core");
-    intent_source.stream.max_input_bytes = Some(3 * 1024 * 1024 * 1024); // 3GB limit
-    intent_source.stream.item_limit = Some(100_000);
-    intent_source.stream.batch_size = Some(500);
-    intent_source.stream.chunk_char_limit = Some(8_000);
-
-    let mut entity_source = source("dryrun_entity_seed");
-    entity_source.stream.max_input_bytes = Some(300 * 1024 * 1024); // 300MB limit
-    entity_source.stream.item_limit = Some(50_000);
-    entity_source.stream.batch_size = Some(500);
-    entity_source.stream.chunk_char_limit = Some(6_000);
+    // Use all 4 generated seed datasets for bootstrap training
+    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
+        s.stream.max_input_bytes = Some(1024 * 1024 * 1024); // 1GB per source
+        s.stream.item_limit = Some(200_000);
+        s.stream.batch_size = Some(500);
+        s
+    }).collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Bootstrap,
-        sources: curriculum_order(vec![entity_source, intent_source]),
+        sources: curriculum_order(sources),
         batches_target: 4,
         options: phase_options(config, execution_mode, &config.training_phases.bootstrap),
         min_unit_discovery_efficiency: config
@@ -152,15 +152,16 @@ fn validation_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
-    // Validation uses the same internal datasets to verify ingestion quality.
-    // No external sources are used.
-    let mut intent_source = source("dryrun_intent_core");
-    intent_source.stream.item_limit = Some(5_000);
-    intent_source.stream.batch_size = Some(250);
+    // Validation samples from all 4 seed datasets to verify ingestion quality.
+    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
+        s.stream.item_limit = Some(5_000);
+        s.stream.batch_size = Some(250);
+        s
+    }).collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Validation,
-        sources: vec![intent_source],
+        sources,
         batches_target: 1,
         options: phase_options(config, execution_mode, &config.training_phases.validation),
         min_unit_discovery_efficiency: config
@@ -201,22 +202,17 @@ fn dry_run_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
-    // Use generated high-density seed datasets
-    let mut intent_source = source("dryrun_intent_core");
-    intent_source.stream.max_input_bytes = Some(3 * 1024 * 1024 * 1024); // 3GB limit
-    intent_source.stream.item_limit = Some(100_000);
-    intent_source.stream.batch_size = Some(500);
-    intent_source.stream.chunk_char_limit = Some(8_000);
-
-    let mut entity_source = source("dryrun_entity_seed");
-    entity_source.stream.max_input_bytes = Some(300 * 1024 * 1024); // 300MB limit
-    entity_source.stream.item_limit = Some(50_000);
-    entity_source.stream.batch_size = Some(500);
-    entity_source.stream.chunk_char_limit = Some(6_000);
+    // Dry run uses all 4 seed datasets with same limits as bootstrap
+    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
+        s.stream.max_input_bytes = Some(1024 * 1024 * 1024);
+        s.stream.item_limit = Some(200_000);
+        s.stream.batch_size = Some(500);
+        s
+    }).collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::DryRun,
-        sources: vec![entity_source, intent_source],
+        sources,
         batches_target: 4,
         options: phase_options(config, execution_mode, &config.training_phases.dry_run),
         min_unit_discovery_efficiency: config.training_phases.dry_run.min_unit_discovery_efficiency,
@@ -285,11 +281,14 @@ fn curriculum_order(mut sources: Vec<TrainingSource>) -> Vec<TrainingSource> {
 }
 
 fn curriculum_score(source: &TrainingSource) -> i32 {
-    // Internal datasets only — external open-source scores removed.
+    // Seed datasets ordered: entities first (core KB), then intelligence (reasoning),
+    // then classification (intent patterns), then dialogues (multi-turn).
     if let Some(name) = source.name.as_deref() {
         let explicit = match name {
-            "dryrun_intent_core" => Some(120),
-            "dryrun_entity_seed" => Some(110),
+            "seed_entities" => Some(130),
+            "seed_intelligence" => Some(120),
+            "seed_classification" => Some(110),
+            "seed_dialogues" => Some(100),
             _ => None,
         };
         if let Some(score) = explicit {

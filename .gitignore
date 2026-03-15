@@ -87,5 +87,5 @@ spse_memory.db-shm
 spse_memory.db-wal
 training_jobs.json
 zero_shot_report.json
-datasets/dryrun/*
+datasets/*
 .spse_cache/*

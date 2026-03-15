@@ -23,32 +23,60 @@ pub struct OpenSourceDefinition {
 /// not through pre-baked open-source corpora.
 const OPEN_SOURCES: &[OpenSourceDefinition] = &[
     OpenSourceDefinition {
-        id: "dryrun_intent_core",
-        label: "DryRun Intent Core Dataset",
-        category: "intent_dialogue",
+        id: "seed_intelligence",
+        label: "Seed Intelligence Dataset",
+        category: "reasoning",
         license: "Internal",
         integration: "structured_json",
-        summary: "High-density intent classification dialogues with reasoning chains, multi-turn conversations, and tone/resolver labels for all 24 intent kinds.",
+        summary: "Reasoning chains, retrieval triggers, confidence gating, multi-hop reasoning, self-correction, and multi-step web retrieval seeds.",
         default_type: TrainingSourceType::StructuredJson,
-        default_value: Some("datasets/dryrun/dryrun_intent_core.jsonl"),
+        default_value: Some("datasets/seeds/intelligence.jsonl"),
         default_memory: MemoryType::Episodic,
-        default_item_limit: Some(100_000),
+        default_item_limit: Some(200_000),
         default_batch_size: Some(500),
         default_chunk_char_limit: Some(8_000),
     },
     OpenSourceDefinition {
-        id: "dryrun_entity_seed",
-        label: "DryRun Entity Seed Dataset",
+        id: "seed_entities",
+        label: "Seed Entity Dataset",
         category: "core_kb",
         license: "Internal",
         integration: "structured_json",
         summary: "High-density entity definitions with rich attributes, cross-references, and domain contexts for core knowledge base seeding.",
         default_type: TrainingSourceType::StructuredJson,
-        default_value: Some("datasets/dryrun/dryrun_entity_seed.jsonl"),
+        default_value: Some("datasets/seeds/entities.jsonl"),
         default_memory: MemoryType::Core,
-        default_item_limit: Some(50_000),
+        default_item_limit: Some(200_000),
         default_batch_size: Some(500),
         default_chunk_char_limit: Some(6_000),
+    },
+    OpenSourceDefinition {
+        id: "seed_dialogues",
+        label: "Seed Dialogue Dataset",
+        category: "intent_dialogue",
+        license: "Internal",
+        integration: "structured_json",
+        summary: "Multi-turn knowledge dialogues, clarification chains, and social patterns with domain-contextualized follow-ups.",
+        default_type: TrainingSourceType::StructuredJson,
+        default_value: Some("datasets/seeds/dialogues.jsonl"),
+        default_memory: MemoryType::Episodic,
+        default_item_limit: Some(200_000),
+        default_batch_size: Some(500),
+        default_chunk_char_limit: Some(8_000),
+    },
+    OpenSourceDefinition {
+        id: "seed_classification",
+        label: "Seed Classification Dataset",
+        category: "intent_dialogue",
+        license: "Internal",
+        integration: "structured_json",
+        summary: "Intent, tone, and resolver mode classification patterns across all 24 intent kinds with domain-specific examples.",
+        default_type: TrainingSourceType::StructuredJson,
+        default_value: Some("datasets/seeds/classification.jsonl"),
+        default_memory: MemoryType::Episodic,
+        default_item_limit: Some(200_000),
+        default_batch_size: Some(500),
+        default_chunk_char_limit: Some(8_000),
     },
 ];
 
@@ -76,13 +104,7 @@ pub fn render_catalog_table() -> String {
 }
 
 pub fn reference_url(id: &str) -> Option<&'static str> {
-    if id.eq_ignore_ascii_case("dryrun_intent_core") {
-        Some("datasets/dryrun/dryrun_intent_core.jsonl")
-    } else if id.eq_ignore_ascii_case("dryrun_entity_seed") {
-        Some("datasets/dryrun/dryrun_entity_seed.jsonl")
-    } else {
-        None
-    }
+    find_definition(id).and_then(|d| d.default_value)
 }
 
 pub fn resolve_training_source(source: &TrainingSource) -> Result<TrainingSource, String> {

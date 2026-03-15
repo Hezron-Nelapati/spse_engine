@@ -847,6 +847,10 @@ pub struct TrainingMetrics {
     pub memory_delta_kb: i64,
     #[serde(default)]
     pub search_trigger_precision: Option<f32>,
+    #[serde(default)]
+    pub examples_ingested: u64,
+    #[serde(default)]
+    pub units_created: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
