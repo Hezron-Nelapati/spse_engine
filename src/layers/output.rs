@@ -1,4 +1,3 @@
-use crate::config::FineResolverConfig;
 use crate::types::{ContextMatrix, DecodedOutput, MergedState, ResolvedCandidate};
 
 pub struct OutputDecoder;

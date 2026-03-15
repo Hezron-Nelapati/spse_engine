@@ -7,9 +7,7 @@ use crate::config::ClassificationConfig;
 use crate::memory::MemoryStore;
 use crate::spatial_index::SpatialGrid;
 use crate::types::{GroundTruth, IntentKind, ResolverMode, ToneKind};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Training outcome for a single labeled turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]

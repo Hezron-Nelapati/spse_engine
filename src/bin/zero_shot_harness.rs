@@ -14,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use spse_engine::config::{EngineConfig, RetrievalThresholds};
+use spse_engine::config::EngineConfig;
 use spse_engine::engine::Engine;
 use spse_engine::types::IntentKind;
 use std::collections::HashMap;

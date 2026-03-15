@@ -726,91 +726,6 @@ impl RetrievalPipeline {
         Ok(docs)
     }
 
-    /// Fetch from SearX metasearch engine (aggregates Google, Bing, Yahoo, etc.)
-    async fn fetch_searx_documents(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<RetrievedDocument>, String> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Use a public SearX instance
-        let url = reqwest::Url::parse_with_params(
-            "https://searx.be/search",
-            &[
-                ("q", query),
-                ("format", "json"),
-                ("engines", "google,bing,duckduckgo,yahoo"),
-            ],
-        )
-        .map_err(|err| err.to_string())?;
-
-        let response = self
-            .client
-            .get(url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|err| err.to_string())?;
-
-        let body = response.text().await.map_err(|err| err.to_string())?;
-        let value = serde_json::from_str::<Value>(&body).map_err(|err| err.to_string())?;
-        let mut docs = Vec::new();
-
-        if let Some(results) = value.get("results").and_then(Value::as_array) {
-            for item in results.iter().take(limit) {
-                let title = item
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                let content = item
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                let url = item
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-
-                if title.is_empty() && content.is_empty() {
-                    continue;
-                }
-
-                let raw_content = if content.is_empty() {
-                    title.to_string()
-                } else {
-                    format!("{}: {}", title, content)
-                };
-
-                let normalized = input::normalize_text(&raw_content);
-                if normalized.is_empty() {
-                    continue;
-                }
-
-                docs.push(RetrievedDocument {
-                    source_url: if url.is_empty() {
-                        "https://searx.be".to_string()
-                    } else {
-                        url.to_string()
-                    },
-                    title: title.to_string(),
-                    raw_content,
-                    normalized_content: normalized,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.65, // Slightly lower trust for aggregated results
-                    cached: false,
-                });
-            }
-        }
-
-        Ok(docs)
-    }
-
     async fn fetch_wikipedia_documents(
         &self,
         query: &str,
@@ -1390,7 +1305,7 @@ impl MultiEngineAggregator {
     
     // Individual engine query methods (wrappers around existing fetch methods)
     
-    async fn query_duckduckgo(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>, String> {
+    async fn query_duckduckgo(&self, query: &str, _limit: usize) -> Result<Vec<RetrievedDocument>, String> {
         let url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_redirect=1&no_html=1",
             query.replace(' ', "+")

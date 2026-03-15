@@ -12,11 +12,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::engine::Engine;
-use crate::types::IntentKind;
 
 // ============================================================================
 // Request/Response Types (OpenAI-compatible)
@@ -153,7 +151,7 @@ use crate::api::ApiState;
 /// All parameters except messages are ignored in Auto-Mode.
 pub async fn chat_completions(
     State(state): State<ApiState>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     // Validate messages

@@ -1,7 +1,6 @@
 use crate::config::{CreativeSparkConfig, FineResolverConfig, IntentShapingConfig};
 use crate::types::{ResolvedCandidate, ResolverMode, ScoredCandidate, Unit};
 use rand::seq::SliceRandom;
-use uuid::Uuid;
 
 pub struct FineResolver;
 
@@ -250,8 +249,4 @@ impl FineResolver {
         false
     }
 
-    /// Check if two strings are semantically equivalent (simplified)
-    fn semantically_equivalent(a: &str, b: &str) -> bool {
-        crate::common::similarity::SimilarityUtils::semantically_equivalent(a, b)
-    }
 }

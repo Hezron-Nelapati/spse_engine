@@ -49,6 +49,11 @@ pub struct TestObservation {
     pub shaping_allow_drift: Option<bool>,
     pub shaping_drift_tolerance: Option<f32>,
     pub active_memory_channel: Option<String>,
+    // Reasoning loop telemetry fields
+    pub reasoning_triggered: Option<bool>,
+    pub reasoning_steps_taken: Option<usize>,
+    pub reasoning_final_confidence: Option<f32>,
+    pub reasoning_time_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +247,10 @@ impl TestObserver {
             shaping_allow_drift: None,
             shaping_drift_tolerance: None,
             active_memory_channel: None,
+            reasoning_triggered: None,
+            reasoning_steps_taken: None,
+            reasoning_final_confidence: None,
+            reasoning_time_ms: Some(timings.reasoning_time_ms),
         }
     }
 }
@@ -256,6 +265,7 @@ pub struct ObservationTimings {
     pub layer_13_merge_time_ms: u64,
     pub layer_14_scoring_time_ms: u64,
     pub layer_16_resolution_time_ms: u64,
+    pub reasoning_time_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -12,19 +12,9 @@
 //!   --maintenance <SEC>    Maintenance interval in seconds (default: 60)
 //!   --max-latency <MS>     Max latency spike threshold (default: 500)
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-
-use spse_engine::config::EngineConfig;
-use spse_engine::engine::Engine;
-use spse_engine::memory::store::MemoryStore;
-use spse_engine::types::SourceKind;
-
 use spse_engine::stress_drill_lib::{
-    StressDrillConfig, StressDrillResult, LatencyReport,
-    run_stress_drill, generate_heterogeneous_corpus,
+    StressDrillConfig,
+    run_stress_drill,
 };
 
 fn main() {

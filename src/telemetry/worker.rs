@@ -5,8 +5,7 @@
 
 use crate::types::{IntentKind, MemoryChannel, MemoryType};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use uuid::Uuid;
@@ -122,6 +121,7 @@ impl Default for TelemetryWorkerConfig {
 }
 
 /// Hot store for real-time UI queries
+#[allow(dead_code)]
 pub struct SqliteHotStore {
     path: String,
     connection: Option<rusqlite::Connection>,
@@ -221,6 +221,7 @@ impl SqliteHotStore {
 }
 
 /// Cold log for long-term storage
+#[allow(dead_code)]
 pub struct AppendOnlyLog {
     path: String,
     file: Option<std::fs::File>,

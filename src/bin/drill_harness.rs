@@ -12,12 +12,11 @@
 //!   --all              Run all drills
 //!   --list             List available drill modes
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use spse_engine::drill_lib::{
-    DrillMode, DrillCategory, DrillResult, DrillReport,
-    run_drill, generate_drill_corpus,
+    DrillMode, DrillCategory, DrillReport,
+    run_drill,
 };
 
 fn main() {

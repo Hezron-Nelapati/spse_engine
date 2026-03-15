@@ -1,10 +1,8 @@
-use crate::config::{FineResolverConfig, IntentConfig, ReasoningLoopConfig, RetrievalThresholds, ToneInferenceConfig};
+use crate::config::{FineResolverConfig, ReasoningLoopConfig, RetrievalThresholds};
 use crate::types::{
-    ConfidenceStats, ContextMatrix, IntentBlendReport, IntentFallbackMode, IntentKind,
-    IntentProfile, IntentScore, ScoredCandidate, SearchDecision, SequenceState, StyleAnchor,
-    ToneKind, Unit,
+    ConfidenceStats, ContextMatrix, IntentFallbackMode, IntentKind,
+    IntentProfile, ScoredCandidate, SearchDecision, SequenceState,
 };
-use std::collections::HashMap;
 
 pub struct IntentDetector;
 
@@ -173,133 +171,6 @@ fn token_set(normalized: &str) -> Vec<String> {
         .collect()
 }
 
-fn references_context(normalized: &str) -> bool {
-    normalized.starts_with("and ")
-        || normalized.starts_with("also ")
-        || normalized.starts_with("what about ")
-        || normalized.contains(" it ")
-        || normalized.contains(" they ")
-        || normalized.contains(" that ")
-        || normalized.contains(" those ")
-        || normalized.contains(" this ")
-}
-
-fn wants_brief(tokens: &[String], normalized: &str) -> bool {
-    tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "briefly" | "short" | "quickly" | "concise" | "brief" | "tldr"
-        )
-    }) || normalized.contains("in short")
-}
-
-fn temporal_cues(normalized: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for cue in [
-        "latest",
-        "today",
-        "current",
-        "news",
-        "recent",
-        "recently",
-        "last week",
-        "last month",
-        "now",
-        "currently",
-        "price",
-        "weather",
-    ] {
-        if normalized.contains(cue) {
-            found.push(cue.to_string());
-        }
-    }
-    found
-}
-
-fn domain_hints(normalized: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for cue in [
-        "in code",
-        "in the code",
-        "in the doc",
-        "in the document",
-        "in docs",
-        "in my notes",
-        "in notes",
-    ] {
-        if normalized.contains(cue) {
-            found.push(cue.to_string());
-        }
-    }
-    found
-}
-
-fn preference_cues(normalized: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for cue in [
-        "as before",
-        "like last time",
-        "same as before",
-        "as earlier",
-    ] {
-        if normalized.contains(cue) {
-            found.push(cue.to_string());
-        }
-    }
-    found
-}
-
-fn certainty_bias(normalized: &str, tokens: &[String]) -> f32 {
-    let mut bias: f32 = 0.0;
-    if normalized.contains("probably")
-        || normalized.contains("maybe")
-        || normalized.contains("might")
-        || normalized.contains("not sure")
-    {
-        bias -= 0.2;
-    }
-    if tokens
-        .iter()
-        .any(|token| matches!(token.as_str(), "definitely" | "certainly"))
-    {
-        bias += 0.12;
-    }
-    bias.clamp(-0.3, 0.2)
-}
-
-fn is_document_hint(hint: &str) -> bool {
-    hint.contains("doc") || hint.contains("document") || hint.contains("notes")
-}
-
-fn is_code_hint(hint: &str) -> bool {
-    hint.contains("code")
-}
-
-fn contains_question_marker(raw_input: &str) -> bool {
-    raw_input.contains('?') || raw_input.contains('？') || raw_input.contains('¿')
-}
-
-fn is_question_starter(token: &str) -> bool {
-    matches!(
-        token,
-        "what"
-            | "why"
-            | "how"
-            | "when"
-            | "where"
-            | "who"
-            | "which"
-            | "is"
-            | "are"
-            | "does"
-            | "do"
-            | "can"
-            | "could"
-            | "would"
-            | "should"
-    )
-}
-
 fn freshness_signal(
     raw_input: &str,
     context: &ContextMatrix,
@@ -406,31 +277,6 @@ fn is_open_world_intent(intent: IntentKind) -> bool {
     )
 }
 
-fn imperative_start(tokens: &[String]) -> bool {
-    tokens
-        .first()
-        .map(|token| {
-            matches!(
-                token.as_str(),
-                "implement"
-                    | "run"
-                    | "execute"
-                    | "create"
-                    | "add"
-                    | "remove"
-                    | "delete"
-                    | "install"
-                    | "start"
-                    | "stop"
-                    | "patch"
-                    | "update"
-                    | "modify"
-                    | "write"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
     if lhs.is_empty() || rhs.is_empty() {
         return 0.0;
@@ -449,10 +295,9 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::IntentDetector;
-    use crate::config::RetrievalThresholds;
     use crate::types::{
-        ConfidenceStats, ContextMatrix, IntentFallbackMode, IntentKind, IntentProfile, MemoryType, ScoreBreakdown,
-        ScoredCandidate, SequenceState,
+        MemoryType, ScoreBreakdown,
+        ScoredCandidate,
     };
     use uuid::Uuid;
 

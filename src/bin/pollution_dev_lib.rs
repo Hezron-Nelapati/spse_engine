@@ -16,6 +16,7 @@ use spse_engine::types::{SourceKind, UnitLevel};
 // ============================================================================
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TestContent {
     pub documents: Vec<TestDocument>,
     pub expected_clean: HashSet<String>,
@@ -574,6 +575,7 @@ pub fn generate_test_content() -> TestContent {
 // ============================================================================
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PollutionConfig {
     pub min_frequency: u64,
     pub window_sizes: Vec<usize>,
@@ -646,6 +648,7 @@ pub struct PollutionResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PollutedUnit {
     pub content: String,
     pub normalized: String,
@@ -681,7 +684,7 @@ pub fn run_pollution_test(
     let builder_config = config.to_unit_builder_config();
     
     // Batch documents for efficiency (combine multiple small docs into one)
-    let batch_size = 1000;
+    let _batch_size = 1000;
     let mut batch = String::new();
     let mut batch_count = 0;
     
@@ -1284,6 +1287,7 @@ layer_2_unit_builder:
     })
 }
 
+#[allow(dead_code)]
 fn main() {
     // Library binary - no-op main for compilation
     println!("pollution_dev_lib is a library, not a runnable binary");

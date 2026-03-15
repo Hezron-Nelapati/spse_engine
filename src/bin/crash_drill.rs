@@ -10,13 +10,9 @@
 //!   --crash-point <POINT>  Crash simulation point (default: all)
 //!   --iterations <N>      Number of iterations per crash point (default: 10)
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Instant;
-
 use spse_engine::crash_drill_lib::{
-    CrashPoint, CrashDrillConfig, CrashDrillResult,
-    run_crash_drill, simulate_crash,
+    CrashPoint, CrashDrillConfig,
+    run_crash_drill,
 };
 
 fn main() {

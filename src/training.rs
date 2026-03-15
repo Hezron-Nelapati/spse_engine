@@ -1,6 +1,6 @@
 use crate::config::EngineConfig;
 use crate::open_sources;
-use crate::types::{TrainingExecutionMode, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, Unit, MemoryType, MemoryChannel, SourceKind};
+use crate::types::{TrainingExecutionMode, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, MemoryType, MemoryChannel, SourceKind};
 use crate::memory::store::MemoryStore;
 use uuid::Uuid;
 
@@ -411,8 +411,6 @@ pub fn ingest_reasoning_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ReasoningStep, ReasoningType};
-    use crate::telemetry::trace::{SessionId, TraceId};
 
     #[test]
     fn test_ingest_reasoning_trace_creates_process_units() {

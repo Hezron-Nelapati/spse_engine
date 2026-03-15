@@ -5,13 +5,15 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use uuid::Uuid;
 
 /// Global session counter for generating unique session IDs
+#[allow(dead_code)]
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Global trace counter for generating unique trace IDs
+#[allow(dead_code)]
 static TRACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Session identifier for grouping all events in an engine instance

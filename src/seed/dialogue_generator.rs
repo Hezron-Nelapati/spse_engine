@@ -27,6 +27,7 @@ pub fn hash_trace_structure(trace: &ReasoningTrace) -> u64 {
 
 /// Abstract a raw reasoning trace into a generalized pattern
 /// Replaces specific entities with placeholders
+#[allow(dead_code)]
 pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningTrace {
     let mut abstracted = trace.clone();
     
@@ -38,14 +39,14 @@ pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningT
         step.structure_hash = Some(hash_trace_structure(trace));
     }
     
-    abstracted.structure_hash = Some(hash_trace_structure(trace));
     abstracted.entities = Vec::new(); // No specific entities in abstract
     abstracted
 }
 
 /// Generate a mathematical reasoning trace for a word problem
+#[allow(dead_code)]
 pub fn generate_math_reasoning_trace(
-    problem: &str,
+    _problem: &str,
     steps: &[(&str, ReasoningStepType)],  // (content, step_type) pairs
     entities: &[String],
 ) -> ReasoningTrace {
@@ -71,6 +72,7 @@ pub fn generate_math_reasoning_trace(
 }
 
 /// Generate confidence trajectory (progressive improvement)
+#[allow(dead_code)]
 fn generate_confidence_trajectory(step_count: usize) -> Vec<f32> {
     (0..step_count)
         .map(|i| 0.3 + (i as f32 * 0.15).min(0.6))
@@ -190,6 +192,7 @@ pub struct DialogueJsonDataset {
 /// Generator for DialogueJson datasets
 pub struct DialogueGenerator {
     /// Dialogues per intent kind target
+    #[allow(dead_code)]
     dialogues_per_intent: usize,
     /// Generated dialogues registry
     dialogues: Vec<Dialogue>,
@@ -260,15 +263,22 @@ impl DialogueGenerator {
         
         let dialogue_turns: Vec<DialogueTurn> = turns
             .into_iter()
-            .map(|(role, content, trace)| DialogueTurn {
-                role,
-                content,
-                context: None,
-                expected_entities: Vec::new(),
-                expected_anchors: Vec::new(),
-                expected_unit_count: ExpectedUnitCount::default(),
-                source_quality: None,
-                reasoning_trace: trace,
+            .map(|(role, content, trace)| {
+                // Wire structure hashing into reasoning traces
+                let trace = trace.map(|mut t| {
+                    t.structure_hash = Some(hash_trace_structure(&t));
+                    t
+                });
+                DialogueTurn {
+                    role,
+                    content,
+                    context: None,
+                    expected_entities: Vec::new(),
+                    expected_anchors: Vec::new(),
+                    expected_unit_count: ExpectedUnitCount::default(),
+                    source_quality: None,
+                    reasoning_trace: trace,
+                }
             })
             .collect();
         
@@ -1197,7 +1207,7 @@ pub mod templates {
         }
     }
     
-    fn generate_followup_question(intent: IntentKind, turn: usize, variant: usize) -> String {
+    fn generate_followup_question(_intent: IntentKind, turn: usize, variant: usize) -> String {
         let questions = [
             "What are the initial findings and how do they compare to our baseline?",
             "Can you provide more details on the approach, including methodology and assumptions?",
@@ -1216,7 +1226,7 @@ pub mod templates {
     }
     
     /// Generate reasoning-rich response with step-by-step analysis
-    fn generate_reasoning_response(intent: IntentKind, turn: usize, topic: &str, variant: usize, total_turns: usize) -> String {
+    fn generate_reasoning_response(_intent: IntentKind, turn: usize, topic: &str, variant: usize, total_turns: usize) -> String {
         let depth = if total_turns >= 7 { "deep" } else if total_turns >= 5 { "moderate" } else { "basic" };
         
         let reasoning_prefix = match depth {

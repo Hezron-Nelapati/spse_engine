@@ -8,14 +8,12 @@ use uuid::Uuid;
 
 use crate::config::{GovernanceConfig, UnitBuilderConfig};
 use crate::layers::builder::UnitBuilder;
-use crate::layers::intent::IntentDetector;
 use crate::layers::output::OutputDecoder;
 use crate::layers::safety::TrustSafetyValidator;
 use crate::memory::store::MemoryStore;
-use crate::spatial_index::SpatialGrid;
 use crate::types::{
-    IntentKind, MemoryChannel, MemoryType, SourceKind, UnitLevel, Unit,
-    ContextMatrix, ResolvedCandidate, MergedState, SequenceState, IntentProfile,
+    IntentKind, Unit,
+    IntentProfile,
     InputPacket,
 };
 
@@ -386,7 +384,7 @@ fn generate_garbage_corpus() -> Vec<String> {
 }
 
 fn run_garbage_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let db_path = temp_db_path("garbage");
+    let _db_path = temp_db_path("garbage");
     let config = UnitBuilderConfig::default();
     let mut metrics = HashMap::new();
     
@@ -612,7 +610,7 @@ fn generate_routing_escape_corpus() -> Vec<String> {
 }
 
 fn run_routing_escape_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+    let metrics = HashMap::new();
     
     match category {
         DrillCategory::HappyPath => {
@@ -642,7 +640,7 @@ fn generate_anchor_loss_corpus() -> Vec<String> {
 }
 
 fn run_anchor_loss_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+    let metrics = HashMap::new();
     
     match category {
         DrillCategory::HappyPath => {
@@ -658,8 +656,8 @@ fn generate_context_matrix_corpus() -> Vec<String> {
     ]
 }
 
-fn run_context_matrix_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_context_matrix_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Context matrix test passed".to_string(), String::new(), metrics)
 }
 
@@ -699,7 +697,7 @@ fn run_intent_classify_drill(category: &DrillCategory) -> (bool, String, String,
 }
 
 fn run_intent_classification_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+    let metrics = HashMap::new();
     
     // Intent classification now uses ClassificationCalculator, not old heuristic IntentDetector::classify
     // These drills are deprecated - classification is now done via ClassificationCalculator
@@ -724,8 +722,8 @@ fn run_intent_classification_drill(category: &DrillCategory) -> (bool, String, S
     }
 }
 
-fn run_intent_blend_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_intent_blend_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     
     // Intent blending is deprecated - classification is now done via ClassificationCalculator
     
@@ -740,8 +738,8 @@ fn generate_retrieval_gate_corpus() -> Vec<String> {
     ]
 }
 
-fn run_retrieval_gate_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_retrieval_gate_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Retrieval gate test passed".to_string(), String::new(), metrics)
 }
 
@@ -755,12 +753,13 @@ fn run_intent_memory_gate_drill(category: &DrillCategory) -> (bool, String, Stri
     let db_path = temp_db_path("intent_memory_gate");
     let mut governance = GovernanceConfig::default();
     governance.intent_channel_core_promotion_blocked = true;
-    let mut store = MemoryStore::new_with_governance(&db_path, &governance);
+    let store = MemoryStore::new_with_governance(&db_path, &governance);
     let mut metrics = HashMap::new();
     
     match category {
         DrillCategory::HappyPath => {
             // Verify Intent channel units don't promote to Core
+            #[allow(unused_variables)]
             let report = store.validate_channel_isolation();
             metrics.insert("is_valid".into(), if report.is_valid { 1.0 } else { 0.0 });
             (true, "Intent memory gate test passed".to_string(), 
@@ -807,8 +806,8 @@ fn generate_trust_heuristics_corpus() -> Vec<String> {
     ]
 }
 
-fn run_trust_heuristics_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_trust_heuristics_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Trust heuristics test passed".to_string(), String::new(), metrics)
 }
 
@@ -822,8 +821,8 @@ fn generate_maintenance_corpus() -> Vec<String> {
     ]
 }
 
-fn run_maintenance_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_maintenance_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Maintenance test passed".to_string(), String::new(), metrics)
 }
 
@@ -833,8 +832,8 @@ fn generate_promotion_corpus() -> Vec<String> {
     ]
 }
 
-fn run_promotion_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_promotion_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Promotion test passed".to_string(), String::new(), metrics)
 }
 
@@ -848,11 +847,12 @@ fn run_channel_isolation_drill(category: &DrillCategory) -> (bool, String, Strin
     let db_path = temp_db_path("channel_isolation");
     let mut governance = GovernanceConfig::default();
     governance.intent_channel_core_promotion_blocked = true;
-    let mut store = MemoryStore::new_with_governance(&db_path, &governance);
+    let store = MemoryStore::new_with_governance(&db_path, &governance);
     let mut metrics = HashMap::new();
     
     match category {
         DrillCategory::HappyPath => {
+            #[allow(unused_variables)]
             let report = store.validate_channel_isolation();
             metrics.insert("main_count".into(), report.main_count as f64);
             metrics.insert("intent_count".into(), report.intent_count as f64);
@@ -875,8 +875,8 @@ fn generate_output_decode_corpus() -> Vec<String> {
 }
 
 fn run_output_decode_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let decoder = OutputDecoder;
-    let mut metrics = HashMap::new();
+    let _decoder = OutputDecoder;
+    let metrics = HashMap::new();
     
     match category {
         DrillCategory::HappyPath => {
@@ -893,7 +893,7 @@ fn generate_creative_drift_corpus() -> Vec<String> {
 }
 
 fn run_creative_drift_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let decoder = OutputDecoder;
+    let _decoder = OutputDecoder;
     let mut metrics = HashMap::new();
     
     match category {
@@ -915,8 +915,8 @@ fn generate_intent_shaping_corpus() -> Vec<String> {
     ]
 }
 
-fn run_intent_shaping_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_intent_shaping_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Intent shaping test passed".to_string(), String::new(), metrics)
 }
 
@@ -957,8 +957,8 @@ fn generate_pollution_purge_corpus() -> Vec<String> {
     ]
 }
 
-fn run_pollution_purge_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_pollution_purge_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     (true, "Pollution purge test passed".to_string(), String::new(), metrics)
 }
 
@@ -1014,7 +1014,7 @@ fn run_dynamic_reasoning_drill(category: &DrillCategory) -> (bool, String, Strin
                 ..IntentProfile::default()
             };
             
-            let should_trigger = IntentDetector::should_trigger_reasoning(&intent, &config);
+            let _should_trigger = IntentDetector::should_trigger_reasoning(&intent, &config);
             (true, "Edge case threshold test passed".to_string(),
              format!("At threshold: {:.2}", config.trigger_confidence_floor), metrics)
         }
@@ -1205,8 +1205,8 @@ fn generate_tone_inference_corpus() -> Vec<String> {
     ]
 }
 
-fn run_tone_inference_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_tone_inference_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     
     // Tone inference is now done via ClassificationCalculator, not old ToneInferrer
     
@@ -1220,8 +1220,8 @@ fn generate_style_resonance_corpus() -> Vec<String> {
     ]
 }
 
-fn run_style_resonance_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    let mut metrics = HashMap::new();
+fn run_style_resonance_drill(_category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+    let metrics = HashMap::new();
     
     // Style resonance is deprecated - classification is now done via ClassificationCalculator
     
@@ -1710,7 +1710,7 @@ fn generate_config_sweep_no_optimal_corpus() -> Vec<String> {
 }
 
 fn run_multi_engine_consensus_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::layers::retrieval::{MultiEngineAggregator, ConsensusDocument};
+    use crate::layers::retrieval::MultiEngineAggregator;
     use crate::config::MultiEngineConfig;
     
     let mut metrics = HashMap::new();
@@ -1719,7 +1719,7 @@ fn run_multi_engine_consensus_drill(category: &DrillCategory) -> (bool, String, 
         DrillCategory::HappyPath => {
             // Test consensus agreement across engines
             let config = MultiEngineConfig::default();
-            let aggregator = MultiEngineAggregator::new(config);
+            let _aggregator = MultiEngineAggregator::new(config);
             
             // Simulate consensus scoring with mock results
             let consensus_score = 0.75;
@@ -1794,7 +1794,6 @@ fn run_multi_engine_unavailable_drill(category: &DrillCategory) -> (bool, String
 
 fn run_structured_parsing_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     use crate::layers::retrieval::StructuredParser;
-    use serde_json::Value;
     
     let mut metrics = HashMap::new();
     
@@ -2002,7 +2001,7 @@ fn run_ui_inferred_tone_drill(category: &DrillCategory) -> (bool, String, String
             ];
             
             let mut correct = 0;
-            for (input, _expected_tone) in test_cases {
+            for (_input, _expected_tone) in test_cases {
                 // Tone inference would be done by engine
                 // For drill, we verify the tone field is populated
                 correct += 1;
@@ -2050,7 +2049,7 @@ fn run_ui_mode_parameter_ignored_drill(category: &DrillCategory) -> (bool, Strin
 }
 
 fn run_openai_chat_completion_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::api::openai_compat::{ChatCompletionRequest, ChatCompletionResponse};
+    use crate::api::openai_compat::ChatCompletionRequest;
     
     let mut metrics = HashMap::new();
     

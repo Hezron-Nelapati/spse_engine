@@ -1,6 +1,6 @@
 use crate::config::{CreativeSparkConfig, EscapeProfile, SemanticMapConfig};
 use crate::spatial_index::{centroid, SpatialGrid};
-use crate::types::{CandidateRoute, RoutingResult, ScoredCandidate, Unit};
+use crate::types::{RoutingResult, ScoredCandidate, Unit};
 use rand::Rng;
 use std::collections::HashSet;
 use uuid::Uuid;

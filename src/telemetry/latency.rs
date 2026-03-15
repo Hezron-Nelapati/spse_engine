@@ -118,6 +118,7 @@ impl Default for LatencyMonitorConfig {
 }
 
 /// Latency monitor for tracking layer latencies
+#[allow(dead_code)]
 pub struct LatencyMonitor {
     /// Per-layer metrics (indexed by layer number)
     layer_metrics: Mutex<Vec<LayerLatencyMetrics>>,

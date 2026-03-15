@@ -1387,7 +1387,7 @@ impl MemoryStore {
                 (Utc::now() - unit.created_at).num_hours().max(0) < anchor_grace_hours;
 
             // Never prune process anchors
-            let is_process_anchor = if let Some(hash) = unit.is_process_unit.then(|| unit.content.as_str()).and_then(|_| {
+            let is_process_anchor = if let Some(_hash) = unit.is_process_unit.then(|| unit.content.as_str()).and_then(|_| {
                 // For simplicity here, we assume any process_unit in the process_anchors by ID is protected
                 Some(unit.id)
             }) {
@@ -1697,6 +1697,7 @@ impl MemoryStore {
             self.pollution_edge_trim_limit,
             self.pollution_overlap_threshold,
             self.pollution_quality_margin,
+            self.pollution_similarity_threshold,
         );
         findings.truncate(limit.max(1));
         findings
@@ -1936,6 +1937,7 @@ impl MemoryStore {
             self.pollution_edge_trim_limit,
             self.pollution_overlap_threshold,
             self.pollution_quality_margin,
+            self.pollution_similarity_threshold,
         );
         if findings.is_empty() {
             return PollutionPurgeReport::default();
@@ -2162,10 +2164,12 @@ impl MemoryStore {
             return;
         };
         canonical.frequency += polluted.frequency.max(1);
+        let penalty = self.pollution_penalty_factor;
         canonical.utility_score =
-            (canonical.utility_score * 0.75) + (polluted.utility_score * 0.25);
+            (canonical.utility_score * (1.0 - penalty)) + (polluted.utility_score * penalty);
         canonical.salience_score =
-            (canonical.salience_score * 0.70) + (polluted.salience_score * 0.30);
+            (canonical.salience_score * (1.0 - penalty * 1.2).max(0.0))
+                + (polluted.salience_score * (penalty * 1.2).min(1.0));
         canonical.confidence = canonical.confidence.max(polluted.confidence);
         canonical.trust_score = canonical.trust_score.max(polluted.trust_score);
         canonical.corroboration_count += polluted.corroboration_count;
@@ -2195,8 +2199,9 @@ impl MemoryStore {
     fn absorb_polluted_candidate(&mut self, finding: &PollutionFinding, polluted: &UnitCandidate) {
         if let Some(canonical) = self.cache.get_mut(&finding.canonical_id) {
             canonical.frequency += polluted.observation_count.max(1);
+            let penalty = self.pollution_penalty_factor;
             canonical.utility_score =
-                (canonical.utility_score * 0.80) + (polluted.utility_score * 0.20);
+                (canonical.utility_score * (1.0 - penalty)) + (polluted.utility_score * penalty);
             canonical.salience_score = canonical
                 .salience_score
                 .max(polluted.utility_score.clamp(0.1, 1.0));
@@ -2945,6 +2950,7 @@ fn pollution_findings_for_records(
     edge_trim_limit: usize,
     overlap_threshold: f32,
     quality_margin: f32,
+    similarity_threshold: f32,
 ) -> Vec<PollutionFinding> {
     let mut index: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, record) in records.iter().enumerate() {
@@ -2990,6 +2996,20 @@ fn pollution_findings_for_records(
                     && is_clean_alphanumeric_word(canonical)
                 {
                     continue;
+                }
+
+                // Similarity gate: require minimum content similarity for multi-word content.
+                // Single-word variants are already validated by overlap_threshold above,
+                // and word-level Jaccard is meaningless for single tokens.
+                let is_multi_word = polluted.normalized.contains(' ') || canonical.normalized.contains(' ');
+                if is_multi_word {
+                    let similarity = crate::common::similarity::SimilarityUtils::jaccard_similarity(
+                        &polluted.normalized,
+                        &canonical.normalized,
+                    );
+                    if similarity < similarity_threshold {
+                        continue;
+                    }
                 }
 
                 let canonical_quality = pollution_quality_score(canonical);
@@ -3145,7 +3165,7 @@ mod tests {
         ActivatedUnit, DatabaseMaturityStage, FeedbackEvent, MemoryChannel, MemoryType, SourceKind,
         Unit, UnitHierarchy, UnitLevel,
     };
-    use chrono::{TimeZone, Utc};
+    use chrono::Utc;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -3298,7 +3318,7 @@ mod tests {
             },
         ];
 
-        let findings = pollution_findings_for_records(&records, 3, 3, 0.65, 0.05);
+        let findings = pollution_findings_for_records(&records, 3, 3, 0.65, 0.05, 0.3);
         assert!(findings.is_empty());
     }
 
@@ -3333,7 +3353,7 @@ mod tests {
             },
         ];
 
-        let findings = pollution_findings_for_records(&records, 3, 3, 0.65, 0.05);
+        let findings = pollution_findings_for_records(&records, 3, 3, 0.65, 0.05, 0.3);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].canonical_normalized, "kraemer");
     }

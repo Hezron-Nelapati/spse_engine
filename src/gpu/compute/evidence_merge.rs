@@ -4,7 +4,7 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, Buffer, BindGroupLayout, BindGroupDescriptor, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{Device, Queue, BindGroupLayout, BindGroupDescriptor, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
 
 use crate::types::{ContextMatrix, RetrievedDocument};
 use crate::gpu::device::GpuDevice;
@@ -186,6 +186,7 @@ impl GpuEvidenceMerger {
     }
 
     /// Check overlap on GPU
+    #[allow(private_interfaces)]
     pub fn check_overlap_gpu(
         &self,
         context: &ContextMatrix,

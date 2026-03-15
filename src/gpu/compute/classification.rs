@@ -4,7 +4,7 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, Buffer, BindGroupLayout, BindGroupDescriptor, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{Device, Queue, Buffer, BindGroupLayout, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
 
 use crate::types::{IntentKind, ToneKind, ResolverMode, ClassificationResult, CalculationMethod};
 use crate::classification::{ClassificationSignature, ClassificationPattern};
@@ -151,12 +151,14 @@ pub struct GpuVoteAggregation {
 }
 
 /// Minimum pattern count to justify GPU dispatch overhead
+#[allow(dead_code)]
 const GPU_THRESHOLD: usize = 64;
 
 /// Maximum patterns to process in single GPU dispatch (prevents buffer overflow)
 const MAX_PATTERNS_PER_DISPATCH: usize = 4096;
 
 /// GPU-accelerated classification calculator
+#[allow(dead_code)]
 pub struct GpuClassificationCalculator {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -442,7 +444,7 @@ impl GpuClassificationCalculator {
             self.device.poll(wgpu::Maintain::Wait);
             
             let data = slice.get_mapped_range().to_vec();
-            drop(slice);
+            // slice is dropped here (Copy type, drop is no-op but scope ends)
             staging_buffer.unmap();
             
             bytemuck::cast_slice::<u8, GpuSimilarityResult>(&data).to_vec()

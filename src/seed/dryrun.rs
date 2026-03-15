@@ -7,12 +7,11 @@
 //! - Quality gates for validation
 //! - TrainingOptions hints for the pipeline
 
-use crate::seed::dialogue_generator::{DialogueGenerator, DialogueJsonDataset, templates};
-use crate::seed::entity_generator::{EntityGenerator, EntityJsonDataset};
+use crate::seed::dialogue_generator::{DialogueGenerator, DialogueJsonDataset, templates, validate_dialogue_dataset};
+use crate::seed::entity_generator::{EntityGenerator, EntityJsonDataset, validate_entity_dataset};
 use crate::seed::{CurriculumMetadata, QualityGates, QualityMetrics};
 use crate::types::{IntentKind, MemoryChannel, MemoryType, TrainingExecutionMode, TrainingOptions, TrainingPhaseKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Configuration for DryRun dataset generation (aligned with unified training system)
@@ -174,21 +173,19 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
         Err(e) => warnings.push(format!("Failed to create entity dataset file: {}", e)),
     }
     
-    // Compute quality metrics for the generated datasets
-    let intent_balance = if intents_covered.len() > 0 {
-        intents_covered.len() as f32 / 24.0
-    } else {
-        0.0
-    };
+    // Compute quality metrics from actual generated datasets
+    let dialogue_metrics = validate_dialogue_dataset(&intent_dataset);
+    let entity_metrics = validate_entity_dataset(&entity_dataset);
     
+    // Merge metrics: use entity density from entity validator, intent balance from dialogue validator
     let quality_metrics = QualityMetrics {
-        entity_density: entity_count as f32 / (config.entity_dataset_size_mb * 1024.0),
-        unique_ratio: 0.98, // High uniqueness for generated data
-        link_coverage: 0.85, // Estimated link coverage
-        noise_ratio: 0.02,  // Low noise for synthetic data
-        intent_balance,
-        estimated_unit_discovery_efficiency: 0.75, // Estimated based on high-density generation
-        estimated_semantic_routing_accuracy: 0.80, // Estimated based on entity coverage
+        entity_density: entity_metrics.entity_density,
+        unique_ratio: entity_metrics.unique_ratio,
+        link_coverage: entity_metrics.link_coverage,
+        noise_ratio: dialogue_metrics.noise_ratio,
+        intent_balance: dialogue_metrics.intent_balance,
+        estimated_unit_discovery_efficiency: dialogue_metrics.estimated_unit_discovery_efficiency,
+        estimated_semantic_routing_accuracy: entity_metrics.estimated_semantic_routing_accuracy,
     };
     
     // Validate against quality gates

@@ -46,6 +46,7 @@ pub struct EntityJsonDataset {
 }
 
 /// Generator for EntityJson datasets
+#[allow(dead_code)]
 pub struct EntityGenerator {
     /// Target density (entities per KB)
     target_density: f32,
@@ -301,7 +302,7 @@ fn rand_weight() -> f32 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    (nanos as f32 / u32::MAX as f32)
+    nanos as f32 / u32::MAX as f32
 }
 
 /// Validate entity dataset quality

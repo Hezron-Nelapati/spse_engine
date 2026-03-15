@@ -1,14 +1,11 @@
 //! Stress Drill Library - Core stress testing logic
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 
-use crate::config::{EngineConfig, GovernanceConfig};
+use crate::config::EngineConfig;
 use crate::engine::Engine;
-use crate::memory::store::MemoryStore;
-use crate::types::SourceKind;
 
 /// Default corpus size when GPU is unavailable (MB)
 const DEFAULT_CORPUS_SIZE_MB_CPU: usize = 7;
@@ -238,7 +235,7 @@ pub fn generate_heterogeneous_corpus(config: &StressDrillConfig) -> Heterogeneou
     while total_bytes < target_bytes {
         for source_type in &config.source_types {
             let ratio = distribution.get(source_type).copied().unwrap_or(0.2);
-            let target_for_type = (target_bytes as f32 * ratio) as usize;
+            let _target_for_type = (target_bytes as f32 * ratio) as usize;
             
             let content = generate_source_document(*source_type, doc_id);
             let bytes = content.len();

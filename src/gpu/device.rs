@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use wgpu::{
-    Adapter, Device, Instance, InstanceDescriptor, 
+    Device, Instance,
     PowerPreference, Queue, RequestAdapterOptions, Backends,
 };
 

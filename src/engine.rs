@@ -1,5 +1,5 @@
 use crate::config::{
-    AdaptiveTrustProfile, EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
+    EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
     ReasoningLoopConfig, RetrievalThresholds, ScoringWeights, TrustConfig,
 };
 use crate::document::{
@@ -23,33 +23,27 @@ use crate::memory::store::{MemorySnapshot, MemoryStore};
 use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
 use crate::scheduler::{PriorityScheduler, WorkPriority};
 use crate::telemetry::{
-    HotStore, LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent,
+    LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent,
     TelemetryWorker, TelemetryWorkerConfig, TraceContext, TraceId,
 };
 use crate::telemetry::test_observer::{
     ObservationMemory, ObservationRetrieval, ObservationScoring, ObservationTimings,
     ObservationUnits, ScoreBreakdown as ObservedScoreBreakdown, TestObserver,
 };
-use crate::training::{self, TrainingPhasePlan, TrainingScope};
+use crate::training::{self, TrainingScope};
 use crate::types::{
     ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport, ExplainTrace,
     InputPacket, IntentKind, IntentProfile, JobState, LayerNote, MemoryChannel, MemoryType,
     MergedState, OutputType, ProcessResult, QueueDepths, ReasoningResult, ReasoningState,
-    ResolvedCandidate, ResolverMode, RetrievedDocument, RoutingResult, SearchDecision,
+    ResolverMode, RetrievedDocument, RoutingResult, SearchDecision,
     SequenceState, SourceKind, ThoughtUnit, TrainBatchRequest, TrainingExecutionMode,
-    TrainingJobStatus, TrainingMetrics, TrainingOptions, TrainingPhaseKind, TrainingPhaseStatus,
-    TrainingSource, TrainingSourceType, Unit, UnitHierarchy,
+    TrainingJobStatus, TrainingMetrics, TrainingPhaseKind, TrainingPhaseStatus,
+    Unit, UnitHierarchy,
 };
 use arc_swap::ArcSwap;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -647,7 +641,7 @@ impl Engine {
     }
 
     /// Phase 4: Create a latency timer for a layer
-    pub fn latency_timer(&self, layer: u8) -> LatencyTimer {
+    pub fn latency_timer(&self, layer: u8) -> LatencyTimer<'_> {
         LatencyTimer::new(&self.latency_monitor, layer)
     }
 
@@ -734,7 +728,7 @@ impl Engine {
         job_id: String,
         plan: crate::training::TrainingPlan,
     ) -> TrainingJobStatus {
-        let mut status = TrainingJobStatus {
+        let status = TrainingJobStatus {
             job_id: job_id.clone(),
             status: JobState::Processing,
             active_phase: plan.phases.first().map(|p| p.phase),
@@ -865,6 +859,7 @@ impl Engine {
         let packet = input::ingest_raw(text, false);
         let build_output = self.build_units(&packet);
         let layer_2_time_ms = layer_2_start.elapsed().as_millis() as u64;
+        self.latency_monitor.record(2, layer_2_time_ms);
         let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &self.config.builder);
         let initial_context = summarize_packet(&packet);
 
@@ -881,6 +876,7 @@ impl Engine {
         let layer_5_start = Instant::now();
         let routing = route_units(&active_units, &all_units, &self.config.semantic_map);
         let layer_5_routing_time_ms = layer_5_start.elapsed().as_millis() as u64;
+        self.latency_monitor.record(5, layer_5_routing_time_ms);
 
         {
             let mut memory = self.memory.lock().expect("memory mutex poisoned");
@@ -951,6 +947,7 @@ impl Engine {
             &intent_profile,
         );
         let layer_9_decision_time_ms = layer_9_start.elapsed().as_millis() as u64;
+        self.latency_monitor.record(9, layer_9_decision_time_ms);
 
         let mut retrieval_query = None;
         let mut safety_warnings = Vec::new();
@@ -977,6 +974,7 @@ impl Engine {
                 &self.config.evidence_merge,
             );
             layer_13_merge_time_ms = layer_13_start.elapsed().as_millis() as u64;
+            self.latency_monitor.record(13, layer_13_merge_time_ms);
         } else if allow_retrieval
             && self.config.retrieval_io.enable_retrieval
             && decision.should_retrieve
@@ -1001,6 +999,7 @@ impl Engine {
                 )
                 .await;
             layer_11_retrieval_time_ms = layer_11_start.elapsed().as_millis() as u64;
+            self.latency_monitor.record(11, layer_11_retrieval_time_ms);
             safety_warnings.extend(evidence.warnings.clone());
             if !evidence.documents.is_empty() {
                 self.ingest_web_evidence_into_memory(
@@ -1036,6 +1035,7 @@ impl Engine {
                 &self.config.evidence_merge,
             );
             layer_13_merge_time_ms = layer_13_start.elapsed().as_millis() as u64;
+            self.latency_monitor.record(13, layer_13_merge_time_ms);
             merged.candidate_ids.extend(evidence_ids);
             merged.candidate_ids.sort();
             merged.candidate_ids.dedup();
@@ -1078,6 +1078,7 @@ impl Engine {
             Some(&packet.original_text),
         );
         let layer_14_scoring_time_ms = layer_14_start.elapsed().as_millis() as u64;
+        self.latency_monitor.record(14, layer_14_scoring_time_ms);
 
         let resolver_mode = adaptive.resolver_mode.unwrap_or_else(|| {
             if used_retrieval || intent_profile.certainty_bias < 0.0 || intent_profile.ambiguous {
@@ -1114,6 +1115,31 @@ impl Engine {
                 })
         });
         let layer_16_resolution_time_ms = layer_16_start.elapsed().as_millis() as u64;
+        self.latency_monitor.record(16, layer_16_resolution_time_ms);
+
+        // Phase 3: Dynamic Reasoning Loop — triggered by confidence gating
+        let reasoning_start = Instant::now();
+        let initial_confidence = resolved
+            .as_ref()
+            .map(|r| r.score)
+            .unwrap_or(0.0);
+        let reasoning_result = if self.config.auto_inference.reasoning_loop.enabled {
+            self.execute_reasoning_loop(
+                &packet.original_text,
+                initial_confidence,
+                &intent_profile,
+                &self.config.auto_inference.reasoning_loop,
+            )
+        } else {
+            ReasoningResult {
+                output: OutputType::FinalAnswer(String::new()),
+                steps_taken: 0,
+                final_confidence: initial_confidence,
+                reasoning_triggered: false,
+                thoughts: Vec::new(),
+            }
+        };
+        let reasoning_time_ms = reasoning_start.elapsed().as_millis() as u64;
 
         // Check if retrieval was triggered but returned no documents
         let retrieval_failed = used_retrieval && merged.evidence.documents.is_empty();
@@ -1279,6 +1305,9 @@ impl Engine {
             memory_summary,
             trace_sources,
             queue_depths,
+            reasoning_result.reasoning_triggered,
+            reasoning_result.steps_taken,
+            reasoning_result.final_confidence,
         );
 
         self.record_test_observation(
@@ -1300,9 +1329,21 @@ impl Engine {
                 layer_13_merge_time_ms,
                 layer_14_scoring_time_ms,
                 layer_16_resolution_time_ms,
+                reasoning_time_ms,
             },
             preset_sources,
         );
+
+        // Emit telemetry event for the completed query
+        let total_latency_ms = total_start.elapsed().as_millis() as u64;
+        let (session_id, trace_id) = self.trace_context();
+        self.emit_telemetry(TelemetryEvent::Calculation {
+            layer: 0,
+            operation: "process_prompt".to_string(),
+            duration_ms: total_latency_ms,
+            session_id: session_id.0,
+            trace_id: trace_id.0,
+        });
 
         result
     }
@@ -1465,27 +1506,6 @@ impl Engine {
         );
     }
 
-    /// Assess confidence for dynamic reasoning trigger.
-    fn assess_confidence(&self, query: &str, intent: &IntentProfile) -> f32 {
-        // Use intent confidence as primary signal
-        let base_confidence = intent.confidence;
-
-        // Adjust based on query characteristics
-        let query_lower = query.to_lowercase();
-        let has_question_words = query_lower.contains("what")
-            || query_lower.contains("how")
-            || query_lower.contains("why")
-            || query_lower.contains("when")
-            || query_lower.contains("where");
-
-        // Questions have slightly lower confidence (need more reasoning)
-        if has_question_words {
-            (base_confidence * 0.9).clamp(0.0, 1.0)
-        } else {
-            base_confidence
-        }
-    }
-
     fn store_job(&self, status: TrainingJobStatus) {
         let statuses = {
             let mut jobs = self.jobs.lock().expect("jobs mutex poisoned");
@@ -1569,46 +1589,6 @@ impl Engine {
             scores: vec![],
             reasons: vec![format!("classification_method={:?}", result.method)],
         }
-    }
-
-    fn intent_scores_from_memory(&self, raw_input: &str) -> HashMap<IntentKind, f32> {
-        let normalized = input::normalize_text(raw_input);
-        if normalized.is_empty() {
-            return HashMap::new();
-        }
-
-        let matched_units = {
-            let snapshot = self.load_memory_snapshot();
-            snapshot.top_channel_matches(
-                MemoryChannel::Intent,
-                &normalized,
-                self.config.governance.max_candidate_pool,
-            )
-        };
-
-        let mut scores = HashMap::new();
-        for unit in matched_units {
-            let labels = intent_labels_from_contexts(&unit.contexts);
-            if labels.is_empty() {
-                continue;
-            }
-            let unit_score = ((unit.utility_score.clamp(0.0, 1.0)
-                + unit.confidence.clamp(0.0, 1.0)
-                + unit.trust_score.clamp(0.0, 1.0))
-                / 3.0)
-                * (1.0 + (unit.frequency as f32).ln_1p() * 0.08);
-            for label in labels {
-                *scores.entry(label).or_insert(0.0) += unit_score;
-            }
-        }
-
-        let max_score = scores.values().copied().fold(0.0, f32::max);
-        if max_score > 0.0 {
-            for score in scores.values_mut() {
-                *score = (*score / max_score).clamp(0.0, 1.0);
-            }
-        }
-        scores
     }
 
     fn reasoning_support_from_memory(&self, raw_input: &str) -> ReasoningSupport {
@@ -1896,19 +1876,6 @@ impl Engine {
         memory.database_health()
     }
 
-    fn memory_budget_for(
-        &self,
-        stage: crate::types::DatabaseMaturityStage,
-    ) -> &crate::config::MemoryBudgetTier {
-        match stage {
-            crate::types::DatabaseMaturityStage::ColdStart => {
-                &self.config.memory_budgets.cold_start
-            }
-            crate::types::DatabaseMaturityStage::Growth => &self.config.memory_budgets.growth_phase,
-            crate::types::DatabaseMaturityStage::Stable => &self.config.memory_budgets.stable_phase,
-        }
-    }
-
     fn record_test_observation(
         &self,
         query: &str,
@@ -2096,7 +2063,7 @@ impl Engine {
             // Track unit counts for validation
             let phrase_count = hierarchy.levels.get("phrase").map(|v| v.len() as u32).unwrap_or(0);
             let sentence_count = hierarchy.levels.get("sentence").map(|v| v.len() as u32).unwrap_or(0);
-            let word_count = hierarchy.levels.get("word").map(|v| v.len() as u32).unwrap_or(0);
+            let _word_count = hierarchy.levels.get("word").map(|v| v.len() as u32).unwrap_or(0);
             
             // Validate expected_unit_count (Layer 18 feedback)
             if let Some(expected_phrase) = turn.expected_unit_count.phrase {
@@ -2202,36 +2169,6 @@ impl Default for UnifiedTrainingOptions {
     }
 }
 
-fn record_pruning_event(
-    metrics: &mut crate::types::LearningMetrics,
-    report: &crate::types::GovernanceReport,
-    trigger: &str,
-) {
-    if report.pruned_units == 0
-        && report.pruned_candidates == 0
-        && report.pruned_references.is_empty()
-    {
-        return;
-    }
-
-    metrics.pruning_events.push(crate::types::PruningEventLog {
-        trigger: trigger.to_string(),
-        pruned_units: report.pruned_units,
-        pruned_candidates: report.pruned_candidates,
-        purged_polluted_units: report.purged_polluted_units,
-        purged_polluted_candidates: report.purged_polluted_candidates,
-        anchors_protected: report.anchors_protected,
-        snapshot_path: report.snapshot_path.clone(),
-        reasons: report.pruning_reasons.clone(),
-        pruned_references: report.pruned_references.clone(),
-        pollution_findings: report.pollution_findings.clone(),
-    });
-    if metrics.pruning_events.len() > 16 {
-        let overflow = metrics.pruning_events.len() - 16;
-        metrics.pruning_events.drain(0..overflow);
-    }
-}
-
 fn hierarchy_from_activations(activations: &[crate::types::ActivatedUnit]) -> UnitHierarchy {
     let mut levels = BTreeMap::new();
     for activation in activations {
@@ -2278,6 +2215,9 @@ fn build_trace(
     memory_summary: String,
     preset_sources: Vec<String>,
     queue_depths: QueueDepths,
+    reasoning_triggered: bool,
+    reasoning_steps_taken: usize,
+    reasoning_final_confidence: f32,
 ) -> ExplainTrace {
     let mut layer_notes = vec![
         LayerNote {
@@ -2603,6 +2543,18 @@ fn build_trace(
             ),
         ],
     ));
+    if reasoning_triggered {
+        debug_steps.push(debug_step(
+            16,
+            "reasoning_loop",
+            "Dynamic reasoning loop executed for confidence improvement.",
+            [
+                ("reasoning_triggered", "true".to_string()),
+                ("steps_taken", reasoning_steps_taken.to_string()),
+                ("final_confidence", format!("{:.3}", reasoning_final_confidence)),
+            ],
+        ));
+    }
     debug_steps.push(debug_step(
         17,
         "output",
@@ -2705,22 +2657,6 @@ fn summarize_packet(packet: &InputPacket) -> String {
         .take(12)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn decode_document_bytes(content: &str, mime: Option<&str>) -> Vec<u8> {
-    let trimmed = content.trim();
-    let prefers_binary = mime
-        .map(|value| !value.trim().to_ascii_lowercase().starts_with("text/"))
-        .unwrap_or(false);
-
-    if let Ok(bytes) = BASE64.decode(trimmed) {
-        let binary_signature = bytes.starts_with(b"%PDF-") || bytes.starts_with(b"PK\x03\x04");
-        if prefers_binary || binary_signature || looks_like_base64_blob(trimmed) {
-            return bytes;
-        }
-    }
-
-    content.as_bytes().to_vec()
 }
 
 fn local_evidence_state(
@@ -2838,59 +2774,6 @@ fn simple_result_with_intent(
             score_breakdowns: vec![],
             selected_unit: None,
             safety_warnings: vec![],
-            feedback_events: vec![],
-        },
-    }
-}
-
-fn simple_result_with_safety(
-    text: String,
-    evidence_sources: Vec<String>,
-    route: &str,
-    request_input: &str,
-    safety_warnings: Vec<String>,
-) -> ProcessResult {
-    let evidence_sources = unique_strings(evidence_sources);
-    let predicted_text = text.clone();
-    let normalized_input = input::normalize_text(request_input);
-    let warnings_count = safety_warnings.len().to_string();
-    ProcessResult {
-        predicted_text,
-        confidence: 1.0,
-        used_retrieval: false,
-        trace: ExplainTrace {
-            intent_profile: IntentProfile::default(),
-            memory_summary: String::new(),
-            evidence_sources,
-            layer_notes: vec![LayerNote {
-                layer: 19,
-                note: route.to_string(),
-            }],
-            debug_steps: vec![
-                debug_step(
-                    1,
-                    "input",
-                    "Input received but blocked by safety layer.",
-                    [
-                        ("normalized_input", normalized_input),
-                        ("route", route.to_string()),
-                    ],
-                ),
-                debug_step(
-                    19,
-                    "safety",
-                    "Request blocked due to safety concerns.",
-                    [
-                        ("blocked", "true".to_string()),
-                        ("warnings_count", warnings_count),
-                    ],
-                ),
-            ],
-            active_regions: vec![],
-            retrieval_query: None,
-            score_breakdowns: vec![],
-            selected_unit: None,
-            safety_warnings,
             feedback_events: vec![],
         },
     }
@@ -3401,18 +3284,6 @@ fn casual_reply(intent_profile: &IntentProfile, active_titles: &[String]) -> Opt
     }
 }
 
-fn looks_like_base64_blob(content: &str) -> bool {
-    let compact = content
-        .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
-        .collect::<String>();
-    compact.len() >= 32
-        && compact.len() % 4 == 0
-        && compact
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '='))
-}
-
 fn first_person_reference_score(text: &str) -> f32 {
     let tokens = lexical_tokens(text);
     if tokens.is_empty() {
@@ -3641,7 +3512,7 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
         // Exact match bonus: prioritize documents whose title exactly matches query
         let title_lower = doc.title.to_lowercase();
         let prompt_lower = prompt.to_lowercase();
-        let exact_title_match = title_lower.trim() == prompt_lower.trim()
+        let _exact_title_match = title_lower.trim() == prompt_lower.trim()
             || title_lower.starts_with(&format!("{} ", prompt_lower)) == false 
                 && title_lower.contains(&prompt_lower) == false;
         
@@ -3903,70 +3774,6 @@ fn normalized_terms(text: &str) -> Vec<String> {
         })
         .map(|term| singularize_term(&term))
         .collect()
-}
-
-fn intent_labels_from_contexts(contexts: &[String]) -> Vec<IntentKind> {
-    let mut labels = Vec::new();
-    for context in contexts {
-        for segment in context.split('|') {
-            let trimmed = segment.trim();
-            let Some(label) = trimmed.strip_prefix("intent_label:") else {
-                continue;
-            };
-            if let Some(kind) = intent_kind_from_label(label) {
-                if !labels.contains(&kind) {
-                    labels.push(kind);
-                }
-            }
-        }
-    }
-    labels
-}
-
-fn intent_kind_from_label(label: &str) -> Option<IntentKind> {
-    match label.trim().to_ascii_lowercase().as_str() {
-        "greeting" => Some(IntentKind::Greeting),
-        "gratitude" => Some(IntentKind::Gratitude),
-        "farewell" => Some(IntentKind::Farewell),
-        "help" => Some(IntentKind::Help),
-        "clarify" => Some(IntentKind::Clarify),
-        "rewrite" => Some(IntentKind::Rewrite),
-        "verify" => Some(IntentKind::Verify),
-        "continue" => Some(IntentKind::Continue),
-        "forget" => Some(IntentKind::Forget),
-        "question" => Some(IntentKind::Question),
-        "summarize" => Some(IntentKind::Summarize),
-        "explain" => Some(IntentKind::Explain),
-        "compare" => Some(IntentKind::Compare),
-        "extract" => Some(IntentKind::Extract),
-        "analyze" => Some(IntentKind::Analyze),
-        "plan" => Some(IntentKind::Plan),
-        "act" => Some(IntentKind::Act),
-        "recommend" => Some(IntentKind::Recommend),
-        "classify" => Some(IntentKind::Classify),
-        "translate" => Some(IntentKind::Translate),
-        "debug" => Some(IntentKind::Debug),
-        "critique" => Some(IntentKind::Critique),
-        "brainstorm" => Some(IntentKind::Brainstorm),
-        "unknown" => Some(IntentKind::Unknown),
-        _ => None,
-    }
-}
-
-fn profile_confidence(
-    top: f32,
-    second: f32,
-    floor_threshold: f32,
-    ambiguity_margin: f32,
-    certainty_bias: f32,
-    certainty_softener_weight: f32,
-) -> f32 {
-    let top_gap = (top - second).max(0.0);
-    let floor_score = (top / floor_threshold.max(0.01)).clamp(0.0, 1.0);
-    let gap_score = (top_gap / ambiguity_margin.max(0.01)).clamp(0.0, 1.0);
-    (0.55 * floor_score + 0.45 * gap_score
-        - certainty_bias.min(0.0).abs() * certainty_softener_weight)
-        .clamp(0.0, 1.0)
 }
 
 fn singularize_term(term: &str) -> String {
@@ -4768,544 +4575,8 @@ fn route_candidate_units(
     SemanticRouter::new(semantic_map).route_candidates(routing, all_units, max_candidates, escape)
 }
 
-fn apply_adaptive_trust_profile(config: &mut TrustConfig, profile: &AdaptiveTrustProfile) {
-    config.default_source_trust = profile.default_source_trust;
-    config.min_corroborating_sources = profile.min_corroborating_sources;
-    config.require_https = profile.require_https;
-}
 
-#[derive(Clone, Copy, Default)]
-struct BehaviorProfileBlend {
-    factual: f32,
-    explanatory: f32,
-    procedural: f32,
-    creative: f32,
-    advisory: f32,
-    casual: f32,
-}
 
-#[derive(Clone)]
-struct TrustSignalDecision {
-    harden: bool,
-    reason: String,
-}
-
-fn dynamic_intent_profile_blend(intent_profile: &IntentProfile) -> BehaviorProfileBlend {
-    let score_for = |intent: IntentKind| -> f32 {
-        intent_profile
-            .scores
-            .iter()
-            .find(|score| score.intent == intent)
-            .map(|score| score.score.max(0.0))
-            .unwrap_or(0.0)
-    };
-
-    let mut factual = score_for(IntentKind::Question)
-        + score_for(IntentKind::Verify)
-        + score_for(IntentKind::Extract)
-        + score_for(IntentKind::Classify);
-    let mut explanatory = score_for(IntentKind::Explain)
-        + score_for(IntentKind::Summarize)
-        + score_for(IntentKind::Analyze)
-        + score_for(IntentKind::Compare)
-        + score_for(IntentKind::Critique);
-    let mut procedural =
-        score_for(IntentKind::Plan) + score_for(IntentKind::Act) + score_for(IntentKind::Debug);
-    let mut creative = score_for(IntentKind::Brainstorm)
-        + score_for(IntentKind::Rewrite)
-        + score_for(IntentKind::Translate);
-    let mut advisory = score_for(IntentKind::Recommend);
-    let mut casual = score_for(IntentKind::Greeting)
-        + score_for(IntentKind::Gratitude)
-        + score_for(IntentKind::Farewell)
-        + score_for(IntentKind::Help)
-        + score_for(IntentKind::Clarify)
-        + score_for(IntentKind::Continue)
-        + score_for(IntentKind::Forget)
-        + score_for(IntentKind::Unknown);
-
-    match intent_profile.primary {
-        IntentKind::Question | IntentKind::Verify | IntentKind::Extract | IntentKind::Classify => {
-            factual += 0.20
-        }
-        IntentKind::Explain
-        | IntentKind::Summarize
-        | IntentKind::Analyze
-        | IntentKind::Compare
-        | IntentKind::Critique => explanatory += 0.20,
-        IntentKind::Plan | IntentKind::Act | IntentKind::Debug => procedural += 0.20,
-        IntentKind::Rewrite | IntentKind::Translate | IntentKind::Brainstorm => creative += 0.20,
-        IntentKind::Recommend => advisory += 0.20,
-        _ => casual += 0.20,
-    }
-
-    if intent_profile.ambiguous {
-        casual += 0.12;
-    }
-    if intent_profile.wants_brief {
-        factual += 0.04;
-    }
-    if intent_profile.references_document_context {
-        explanatory += 0.05;
-        procedural += 0.03;
-    }
-    if intent_profile.certainty_bias < 0.0 {
-        advisory += 0.03;
-    }
-
-    let total = factual + explanatory + procedural + creative + advisory + casual;
-    if total <= f32::EPSILON {
-        return BehaviorProfileBlend {
-            factual: 0.22,
-            explanatory: 0.18,
-            procedural: 0.16,
-            creative: 0.14,
-            advisory: 0.10,
-            casual: 0.20,
-        };
-    }
-
-    BehaviorProfileBlend {
-        factual: factual / total,
-        explanatory: explanatory / total,
-        procedural: procedural / total,
-        creative: creative / total,
-        advisory: advisory / total,
-        casual: casual / total,
-    }
-}
-
-fn dominant_behavior_profile_name(blend: &BehaviorProfileBlend) -> Option<&'static str> {
-    [
-        ("factual", blend.factual),
-        ("explanatory", blend.explanatory),
-        ("procedural", blend.procedural),
-        ("creative", blend.creative),
-        ("advisory", blend.advisory),
-        ("casual", blend.casual),
-    ]
-    .into_iter()
-    .max_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1))
-    .map(|(name, _)| name)
-}
-
-fn blend_scoring_weights(config: &EngineConfig, blend: &BehaviorProfileBlend) -> ScoringWeights {
-    let factual = config
-        .adaptive_behavior
-        .intent_profile("factual")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-    let explanatory = config
-        .adaptive_behavior
-        .intent_profile("explanatory")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-    let procedural = config
-        .adaptive_behavior
-        .intent_profile("procedural")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-    let creative = config
-        .adaptive_behavior
-        .intent_profile("creative")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-    let advisory = config
-        .adaptive_behavior
-        .intent_profile("advisory")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-    let casual = config
-        .adaptive_behavior
-        .intent_profile("casual")
-        .map(|profile| profile.scoring.clone())
-        .unwrap_or_else(|| config.scoring.clone());
-
-    ScoringWeights {
-        spatial: weighted_sum(
-            blend,
-            factual.spatial,
-            explanatory.spatial,
-            procedural.spatial,
-            creative.spatial,
-            advisory.spatial,
-            casual.spatial,
-            config.scoring.spatial,
-        ),
-        context: weighted_sum(
-            blend,
-            factual.context,
-            explanatory.context,
-            procedural.context,
-            creative.context,
-            advisory.context,
-            casual.context,
-            config.scoring.context,
-        ),
-        sequence: weighted_sum(
-            blend,
-            factual.sequence,
-            explanatory.sequence,
-            procedural.sequence,
-            creative.sequence,
-            advisory.sequence,
-            casual.sequence,
-            config.scoring.sequence,
-        ),
-        transition: weighted_sum(
-            blend,
-            factual.transition,
-            explanatory.transition,
-            procedural.transition,
-            creative.transition,
-            advisory.transition,
-            casual.transition,
-            config.scoring.transition,
-        ),
-        utility: weighted_sum(
-            blend,
-            factual.utility,
-            explanatory.utility,
-            procedural.utility,
-            creative.utility,
-            advisory.utility,
-            casual.utility,
-            config.scoring.utility,
-        ),
-        confidence: weighted_sum(
-            blend,
-            factual.confidence,
-            explanatory.confidence,
-            procedural.confidence,
-            creative.confidence,
-            advisory.confidence,
-            casual.confidence,
-            config.scoring.confidence,
-        ),
-        evidence: weighted_sum(
-            blend,
-            factual.evidence,
-            explanatory.evidence,
-            procedural.evidence,
-            creative.evidence,
-            advisory.evidence,
-            casual.evidence,
-            config.scoring.evidence,
-        ),
-    }
-}
-
-fn blend_shaping_config(config: &EngineConfig, blend: &BehaviorProfileBlend) -> IntentShapingConfig {
-    let factual = config
-        .adaptive_behavior
-        .intent_profile("factual")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-    let explanatory = config
-        .adaptive_behavior
-        .intent_profile("explanatory")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-    let procedural = config
-        .adaptive_behavior
-        .intent_profile("procedural")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-    let creative = config
-        .adaptive_behavior
-        .intent_profile("creative")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-    let advisory = config
-        .adaptive_behavior
-        .intent_profile("advisory")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-    let casual = config
-        .adaptive_behavior
-        .intent_profile("casual")
-        .map(|profile| profile.shaping.clone())
-        .unwrap_or_default();
-
-    // For shaping, use dominant profile's settings rather than blending
-    // since boolean flags like allow_semantic_drift shouldn't be averaged
-    if let Some(name) = dominant_behavior_profile_name(blend) {
-        if let Some(profile) = config.adaptive_behavior.intent_profile(name) {
-            return profile.shaping.clone();
-        }
-    }
-
-    // Fallback: if any profile has allow_semantic_drift=true, use creative settings
-    if blend.creative > 0.3 || blend.casual > 0.5 {
-        return creative;
-    }
-
-    // Default to factual (conservative) shaping
-    factual
-}
-
-fn blend_escape_profile(config: &EngineConfig, blend: &BehaviorProfileBlend) -> EscapeProfile {
-    let factual = config
-        .adaptive_behavior
-        .intent_profile("factual")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| EscapeProfile {
-            stochastic_jump_prob: 0.0,
-            beam_width: config.governance.max_candidate_pool.max(1),
-        });
-    let explanatory = config
-        .adaptive_behavior
-        .intent_profile("explanatory")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| factual.clone());
-    let procedural = config
-        .adaptive_behavior
-        .intent_profile("procedural")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| factual.clone());
-    let creative = config
-        .adaptive_behavior
-        .intent_profile("creative")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| factual.clone());
-    let advisory = config
-        .adaptive_behavior
-        .intent_profile("advisory")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| factual.clone());
-    let casual = config
-        .adaptive_behavior
-        .intent_profile("casual")
-        .map(|profile| profile.escape.clone())
-        .unwrap_or_else(|| factual.clone());
-
-    EscapeProfile {
-        stochastic_jump_prob: weighted_sum(
-            blend,
-            factual.stochastic_jump_prob,
-            explanatory.stochastic_jump_prob,
-            procedural.stochastic_jump_prob,
-            creative.stochastic_jump_prob,
-            advisory.stochastic_jump_prob,
-            casual.stochastic_jump_prob,
-            0.0,
-        )
-        .clamp(0.0, 1.0),
-        beam_width: weighted_sum(
-            blend,
-            factual.beam_width as f32,
-            explanatory.beam_width as f32,
-            procedural.beam_width as f32,
-            creative.beam_width as f32,
-            advisory.beam_width as f32,
-            casual.beam_width as f32,
-            config.governance.max_candidate_pool.max(1) as f32,
-        )
-        .round()
-        .clamp(1.0, config.governance.max_candidate_pool.max(1) as f32)
-            as usize,
-    }
-}
-
-fn blend_resolver_profile(
-    config: &EngineConfig,
-    blend: &BehaviorProfileBlend,
-) -> (FineResolverConfig, Option<ResolverMode>) {
-    let factual = config
-        .adaptive_behavior
-        .intent_profile("factual")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-    let explanatory = config
-        .adaptive_behavior
-        .intent_profile("explanatory")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-    let procedural = config
-        .adaptive_behavior
-        .intent_profile("procedural")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-    let creative = config
-        .adaptive_behavior
-        .intent_profile("creative")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-    let advisory = config
-        .adaptive_behavior
-        .intent_profile("advisory")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-    let casual = config
-        .adaptive_behavior
-        .intent_profile("casual")
-        .map(|profile| profile.resolver.clone())
-        .unwrap_or_default();
-
-    let resolver = FineResolverConfig {
-        selection_temperature: weighted_sum(
-            blend,
-            factual.selection_temperature,
-            explanatory.selection_temperature,
-            procedural.selection_temperature,
-            creative.selection_temperature,
-            advisory.selection_temperature,
-            casual.selection_temperature,
-            config.resolver.selection_temperature,
-        )
-        .clamp(0.0, 2.0),
-        min_confidence_floor: weighted_sum(
-            blend,
-            factual.min_confidence_floor,
-            explanatory.min_confidence_floor,
-            procedural.min_confidence_floor,
-            creative.min_confidence_floor,
-            advisory.min_confidence_floor,
-            casual.min_confidence_floor,
-            config.resolver.min_confidence_floor,
-        )
-        .clamp(0.0, 1.0),
-        evidence_answer_confidence_threshold: config.resolver.evidence_answer_confidence_threshold,
-        creative_drift_tolerance: config.resolver.creative_drift_tolerance,
-        factual_corruption_threshold: config.resolver.factual_corruption_threshold,
-        factual_intent_retrieval_threshold: config.resolver.factual_intent_retrieval_threshold,
-    };
-
-    let mode = dominant_behavior_profile_name(blend).and_then(|name| match name {
-        "factual" => factual.mode,
-        "explanatory" => explanatory.mode,
-        "procedural" => procedural.mode,
-        "creative" => creative.mode,
-        "advisory" => advisory.mode,
-        "casual" => casual.mode,
-        _ => None,
-    });
-
-    (resolver, mode)
-}
-
-fn dynamic_trust_signal(intent_profile: &IntentProfile) -> TrustSignalDecision {
-    let verify_score = intent_profile
-        .scores
-        .iter()
-        .find(|score| score.intent == IntentKind::Verify)
-        .map(|score| score.score)
-        .unwrap_or(0.0);
-    let factual_score = intent_profile
-        .scores
-        .iter()
-        .filter(|score| {
-            matches!(
-                score.intent,
-                IntentKind::Question | IntentKind::Verify | IntentKind::Extract
-            )
-        })
-        .map(|score| score.score)
-        .sum::<f32>();
-    let freshness_sensitive = intent_profile
-        .reasons
-        .iter()
-        .any(|reason| reason.starts_with("temporal_cues=") || reason == "context_marks_freshness");
-    let low_confidence = intent_profile.confidence < 0.55
-        || intent_profile.ambiguous
-        || intent_profile.certainty_bias < 0.0;
-    let harden = matches!(intent_profile.primary, IntentKind::Verify)
-        || verify_score >= 0.35
-        || (freshness_sensitive && factual_score >= 0.45)
-        || (low_confidence && factual_score >= 0.60);
-
-    let reason = if matches!(intent_profile.primary, IntentKind::Verify) {
-        "verification_request".to_string()
-    } else if verify_score >= 0.35 {
-        "verification_pressure".to_string()
-    } else if freshness_sensitive && factual_score >= 0.45 {
-        "freshness_sensitive".to_string()
-    } else if low_confidence && factual_score >= 0.60 {
-        "uncertain_factual_request".to_string()
-    } else {
-        "default".to_string()
-    };
-
-    TrustSignalDecision { harden, reason }
-}
-
-fn weighted_sum(
-    blend: &BehaviorProfileBlend,
-    factual: f32,
-    explanatory: f32,
-    procedural: f32,
-    creative: f32,
-    advisory: f32,
-    casual: f32,
-    fallback: f32,
-) -> f32 {
-    let total = blend.factual
-        + blend.explanatory
-        + blend.procedural
-        + blend.creative
-        + blend.advisory
-        + blend.casual;
-    if total <= f32::EPSILON {
-        return fallback;
-    }
-    (blend.factual * factual)
-        + (blend.explanatory * explanatory)
-        + (blend.procedural * procedural)
-        + (blend.creative * creative)
-        + (blend.advisory * advisory)
-        + (blend.casual * casual)
-}
-
-fn phase_label(phase: TrainingPhaseKind) -> &'static str {
-    match phase {
-        TrainingPhaseKind::DryRun => "dry_run",
-        TrainingPhaseKind::Bootstrap => "bootstrap",
-        TrainingPhaseKind::Validation => "validation",
-        TrainingPhaseKind::Expansion => "expansion",
-        TrainingPhaseKind::Lifelong => "lifelong",
-    }
-}
-
-fn training_source_label(source: &TrainingSource) -> String {
-    source
-        .name
-        .clone()
-        .or_else(|| source.value.clone())
-        .unwrap_or_else(|| format!("{:?}", source.source_type))
-}
-
-fn is_skippable_training_error(err: &str) -> bool {
-    err.starts_with("fatal:open_source_requires_value:") || is_huggingface_rate_limit_error(err)
-}
-
-fn is_huggingface_rate_limit_error(err: &str) -> bool {
-    err.contains("huggingface rows request failed") && err.contains("HTTP 429")
-}
-
-fn euclidean_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let dx = a[0] - b[0];
-    let dy = a[1] - b[1];
-    let dz = a[2] - b[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-fn default_memory_for_training_source(source_type: TrainingSourceType) -> MemoryType {
-    match source_type {
-        TrainingSourceType::Url
-        | TrainingSourceType::Document
-        | TrainingSourceType::Dataset
-        | TrainingSourceType::HuggingFaceDataset
-        | TrainingSourceType::StructuredJson
-        | TrainingSourceType::QaJson => MemoryType::Episodic,
-        TrainingSourceType::OpenApiSpec | TrainingSourceType::CodeRepository => MemoryType::Core,
-        TrainingSourceType::WikipediaDump
-        | TrainingSourceType::WikidataTruthy
-        | TrainingSourceType::OpenWebText
-        | TrainingSourceType::DbpediaDump
-        | TrainingSourceType::ProjectGutenberg
-        | TrainingSourceType::CommonCrawlWet => MemoryType::Core,
-    }
-}
 
 fn spawn_maintenance(
     memory: Arc<Mutex<MemoryStore>>,
@@ -5375,12 +4646,11 @@ fn flush_feedback_batch(
 #[cfg(test)]
 mod tests {
     use super::{
-        dominant_behavior_profile_name, dynamic_intent_profile_blend, dynamic_trust_signal,
-        evaluate_expression_input, grounded_evidence_answer, is_skippable_training_error,
+        evaluate_expression_input, grounded_evidence_answer,
         reshape_output_for_intent,
     };
     use crate::types::{
-        IntentKind, IntentProfile, IntentScore, MemoryType, RetrievedDocument, ScoreBreakdown,
+        IntentKind, MemoryType, RetrievedDocument, ScoreBreakdown,
         ScoredCandidate,
     };
     use chrono::Utc;
@@ -5429,55 +4699,6 @@ mod tests {
             grounded_evidence_answer("verify whether the president of india is current", &docs)
                 .expect("expected grounded answer");
         assert!(answer.contains("Droupadi Murmu"));
-    }
-
-    #[test]
-    fn adaptive_behavior_blend_favors_factual_profile_for_factual_queries() {
-        let profile = IntentProfile {
-            primary: IntentKind::Question,
-            confidence: 0.88,
-            scores: vec![
-                IntentScore {
-                    intent: IntentKind::Question,
-                    score: 0.81,
-                },
-                IntentScore {
-                    intent: IntentKind::Verify,
-                    score: 0.34,
-                },
-                IntentScore {
-                    intent: IntentKind::Explain,
-                    score: 0.12,
-                },
-            ],
-            ..IntentProfile::default()
-        };
-
-        let blend = dynamic_intent_profile_blend(&profile);
-        assert_eq!(dominant_behavior_profile_name(&blend), Some("factual"));
-    }
-
-    #[test]
-    fn adaptive_trust_signal_hardens_for_verification_requests() {
-        let profile = IntentProfile {
-            primary: IntentKind::Verify,
-            confidence: 0.49,
-            ambiguous: true,
-            scores: vec![IntentScore {
-                intent: IntentKind::Verify,
-                score: 0.62,
-            }],
-            ..IntentProfile::default()
-        };
-
-        let signal = dynamic_trust_signal(&profile);
-        assert!(signal.harden);
-    }
-
-    #[test]
-    fn huggingface_rate_limit_errors_are_skippable() {
-        let err = "fatal:huggingface rows request failed for HuggingFaceTB/smoltalk2/SFT/train at offset 0: HTTP 429 Too Many Requests";
-        assert!(is_skippable_training_error(err));
     }
 
     #[test]

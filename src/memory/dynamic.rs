@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
 
 /// Default thought buffer size in KB
 pub const DEFAULT_THOUGHT_BUFFER_SIZE_KB: usize = 64;
@@ -216,8 +215,8 @@ impl DynamicMemoryAllocator {
 
     /// Force release all reasoning memory
     pub fn release_all_reasoning_memory(&self) -> usize {
-        let buffers = self.buffer_count.load(Ordering::Relaxed);
-        let buffer_size = self.config.thought_buffer_size_kb;
+        let _buffers = self.buffer_count.load(Ordering::Relaxed);
+        let _buffer_size = self.config.thought_buffer_size_kb;
 
         // Reset usage
         let released = self.current_usage_kb.swap(0, Ordering::Relaxed);

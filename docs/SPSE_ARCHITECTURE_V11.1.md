@@ -1,10 +1,8 @@
 # SPSE Engine Architecture Documentation v11.1
 
-**Document Version:** 11.1  
-**Date:** March 15, 2026  
-**Status:** Finalized for MVP Implementation  
-**Target Hardware:** Edge Devices (2GB RAM / Dual-Core CPU)  
-**Architecture Mode:** Unified Auto+Reasoning (Mode C)
+**Document Version:** 11.1 (Revised)  
+**Last Updated:** Derived from live codebase  
+**Status:** Reflects current implementation
 
 ---
 
@@ -13,879 +11,234 @@
 1. [Executive Summary](#1-executive-summary)
 2. [System Overview](#2-system-overview)
 3. [21-Layer Architecture](#3-21-layer-architecture)
-4. [Unified Auto+Reasoning Architecture (Mode C)](#4-unified-autoreasoning-architecture-mode-c)
-5. [Core Data Structures](#5-core-data-structures)
-6. [Configuration System](#6-configuration-system)
-7. [Memory Architecture](#7-memory-architecture)
-8. [Classification System](#8-classification-system)
-9. [GPU Acceleration](#9-gpu-acceleration)
-10. [Unified Training Pipeline](#10-unified-training-pipeline)
-11. [API Specifications](#11-api-specifications)
-12. [Telemetry & Observability](#12-telemetry--observability)
-13. [Deployment Architecture](#13-deployment-architecture)
-14. [Security Considerations](#14-security-considerations)
-15. [Performance Targets](#15-performance-targets)
-16. [Implementation Roadmap](#16-implementation-roadmap)
-17. [Risk Mitigation](#17-risk-mitigation)
+4. [Core Data Structures](#4-core-data-structures)
+5. [Configuration System](#5-configuration-system)
+6. [Engine Pipeline](#6-engine-pipeline)
+7. [Classification System](#7-classification-system)
+8. [Memory Architecture](#8-memory-architecture)
+9. [Dynamic Reasoning](#9-dynamic-reasoning)
+10. [GPU Acceleration](#10-gpu-acceleration)
+11. [Telemetry & Observability](#11-telemetry--observability)
+12. [Training Pipeline & Seed Generation](#12-training-pipeline--seed-generation)
+13. [API Specifications](#13-api-specifications)
+14. [Priority Scheduler](#14-priority-scheduler)
+15. [Security & Trust](#15-security--trust)
+16. [Directory Structure](#16-directory-structure)
+17. [Appendices](#17-appendices)
 
 ---
 
 ## 1. Executive Summary
 
-The SPSE (Semantic Personal Search Engine) is a privacy-preserving, on-device knowledge engine that combines the capabilities of a personal search system with LLM-like reasoning abilities. Unlike cloud-based solutions, SPSE operates entirely locally, ensuring user data never leaves the device.
+The SPSE (Semantic Processing & Storage Engine) is a **privacy-first, config-driven, retrieval-augmented intelligence engine** written in Rust. It processes natural language through a **21-layer pipeline** that ingests text, discovers reusable semantic units via rolling hash, routes them through a 3D spatial map, scores candidates across 7 dimensions, and resolves answers using adaptive runtime profiles.
 
-### Key Innovations in v11.1
+### Key Design Principles
 
-**Unified Auto+Reasoning (Mode C):** The system defaults to a lightweight Auto-Only path (~350MB RAM, <100ms latency), automatically triggering a multi-step reasoning loop only when internal confidence metrics fall below defined thresholds. This achieves optimal resource usage on low-spec hardware while maintaining high capability for complex tasks.
+- **No hardcoded thresholds** — every numeric value lives in `config/config.yaml` via `EngineConfig`
+- **Auto-Mode only** — engine operates exclusively in auto-intelligence mode; user toggles for temperature, reasoning depth, and creative level are ignored
+- **Calculation-based classification** — intent, tone, and resolver mode inferred via memory-backed spatial pattern matching (replaces heuristic detection)
+- **Dynamic reasoning** — confidence-gated internal reasoning loop triggered automatically, not by user request
+- **Privacy-first** — PII stripping (L10), no external telemetry, local SQLite persistence
+- **GPU-optional** — `wgpu`-based acceleration behind `#[cfg(feature = "gpu")]` with transparent CPU fallback
+- **Memory channels** — three isolated channels (Main, Intent, Reasoning) prevent cross-contamination
+- **Pollution detection** — automated detection and remediation of duplicate/degraded memory units
 
-**No User Controls:** All external parameters for `mode`, `temperature`, `reasoning_depth`, and `creative_level` are removed. The engine operates in Auto-Mode exclusively, dynamically inferring intent, tone, and creativity level from query semantics and conversation history.
+### Technology Stack
 
-**Controlled Creative Spark:** A fixed 15% non-greedy sampling rate is enforced globally, subject to factual anchor validation, preventing robotic output while maintaining factual accuracy.
-
-### Target Hardware
-
-- **Minimum:** 2GB RAM, Dual-Core CPU (1.2GHz)
-- **Recommended:** 4GB RAM, Quad-Core CPU (2.0GHz)
-- **Storage:** 500MB for engine + variable for user data
-
-### Performance Guarantees
-
-| Query Type | RAM Usage | Latency (TTFT) | Percentage |
-|------------|-----------|----------------|------------|
-| Simple (greeting, lookup, chat) | ~350MB | <100ms | 90% |
-| Complex (coding, logic, planning) | ~550MB | 500ms-2s | 10% |
+| Component | Technology |
+|-----------|-----------|
+| Language | Rust (2021 edition) |
+| Persistence | SQLite via `rusqlite` |
+| HTTP Server | `axum` + `tokio` |
+| Serialization | `serde` (JSON, YAML), `prost` (Protobuf) |
+| GPU | `wgpu` (feature-gated) |
+| Config | YAML (`config/config.yaml`) |
+| Concurrency | `Arc<Mutex<T>>`, `arc_swap::ArcSwap`, `crossbeam_channel` |
 
 ---
 
 ## 2. System Overview
 
-### 2.1 Design Philosophy
-
-1. **Privacy First:** All processing occurs on-device. No data leaves the device without explicit user consent.
-2. **Config-Driven:** Every numeric threshold, weight, and limit is configurable via YAML.
-3. **Layer Separation:** 21 distinct layers with clear responsibilities and no cross-layer logic leakage.
-4. **Dynamic Resource Allocation:** Memory allocated on-demand for reasoning, released immediately after.
-5. **Auto-Mode Only:** No user toggles for mode, temperature, or creativity. System infers everything.
-
-### 2.2 High-Level Architecture
+### Module Map (`src/lib.rs`)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              USER INTERFACE                                  │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │   Web UI         │  │  CLI Interface   │  │  OpenAI-Compatible API   │  │
-│  │  (Next.js)       │  │  (main.rs)       │  │  (REST/SSE)             │  │
-│  └────────┬─────────┘  └────────┬─────────┘  └────────────┬─────────────┘  │
-└───────────┼─────────────────────┼─────────────────────────┼────────────────┘
-            │                     │                         │
-            └─────────────────────┼─────────────────────────┘
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ENGINE ORCHESTRATION                               │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                        21-LAYER PIPELINE                              │   │
-│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐  │   │
-│  │  │ L1-6   │→│ L7-9   │→│ L10-13 │→│ L14-16 │→│ L17-18 │→│ L19-21 │  │   │
-│  │  │Input   │ │Intent  │ │Retrieve│ │Resolve │ │Output  │ │Govern  │  │   │
-│  │  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘  │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                  │                                           │
-│                    ┌─────────────┼─────────────┐                             │
-│                    ▼             ▼             ▼                             │
-│            ┌───────────┐  ┌───────────┐  ┌───────────┐                       │
-│            │  Memory   │  │ Telemetry │  │  Config   │                       │
-│            │  Store    │  │  Worker   │  │  Manager  │                       │
-│            └───────────┘  └───────────┘  └───────────┘                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          PERSISTENCE LAYER                                   │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │  SQLite (Core)   │  │  SQLite (Telemetry)│  │  Append-Only Logs       │  │
-│  │  Units, Anchors  │  │  Hot Events       │  │  Cold Logs              │  │
-│  └──────────────────┘  └──────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
+pub mod api              // REST + OpenAI-compatible API (axum)
+pub mod bloom_filter     // Probabilistic membership testing (UnitBloomFilter)
+pub mod classification   // Calculation-based intent/tone/resolver inference
+pub mod common           // Shared utilities (scoring, matching, selection, similarity, dedup)
+pub mod config           // EngineConfig and all sub-configs
+pub mod document         // Document ingestion (PDF, DOCX, plain text)
+pub mod drill_lib        // Drill framework for system testing
+pub mod engine           // Core Engine struct and 21-layer pipeline orchestration
+pub mod gpu              // GPU acceleration (feature-gated wgpu)
+pub mod layers           // 14 layer implementation files
+pub mod memory           // MemoryStore (L4/L21) + DynamicMemoryAllocator
+pub mod open_sources     // Open data source catalog (Wikidata, Wikipedia, etc.)
+pub mod persistence      // SQLite persistence layer
+pub mod proto            // Protobuf definitions (api.proto)
+pub mod region_index     // Regional spatial index
+pub mod scheduler        // Priority-based work scheduling (4 priorities)
+pub mod seed             // Dataset generators (dialogue, entity, dryrun)
+pub mod spatial_index    // SpatialGrid for O(log N) spatial queries
+pub mod stress_drill_lib // Stress testing drills
+pub mod crash_drill_lib  // Crash resilience drills
+pub mod telemetry        // L20: worker, hot store, latency, trace
+pub mod training         // Training pipeline orchestration
+pub mod types            // All core type definitions (~1278 lines)
 ```
 
-### 2.3 Data Flow
+### Engine Struct (`src/engine.rs`)
 
-1. **Input Ingestion (L1):** Raw text normalized into `InputPacket`
-2. **Unit Building (L2-L3):** Rolling hash discovery, hierarchy organization
-3. **Memory Ingestion (L4):** Unit persistence with channel routing
-4. **Semantic Routing (L5-L6):** Spatial positioning, context management
-5. **Intent Detection (L7-L9):** Intent classification, entropy calculation, retrieval decision
-6. **Retrieval (L10-L13):** Query building, external fetching, evidence merging
-7. **Resolution (L14-L16):** Candidate scoring, fine resolution with confidence gating
-8. **Output (L17-L18):** Answer finalization, feedback collection
-9. **Governance (L19-L21):** Trust validation, telemetry emission, memory pruning
+The `Engine` is the central orchestrator:
+
+```rust
+pub struct Engine {
+    config: EngineConfig,
+    memory: Arc<Mutex<MemoryStore>>,              // L4/L21 — SQLite-backed unit store
+    memory_snapshot: Arc<ArcSwap<MemorySnapshot>>, // Lock-free read path
+    scheduler: Arc<PriorityScheduler>,             // 4-priority work queue
+    retriever: RetrievalPipeline,                  // L11 — external search
+    merger: EvidenceMerger,                        // L13 — conflict resolution
+    decoder: OutputDecoder,                        // L17 — answer finalization
+    feedback: FeedbackController,                  // L18 — learning events
+    feedback_tx: Sender<Vec<FeedbackEvent>>,       // Async feedback channel (1024 cap)
+    safety: TrustSafetyValidator,                  // L12/L19 — trust assessment
+    jobs: Arc<Mutex<HashMap<String, TrainingJobStatus>>>,
+    session_documents: Arc<Mutex<SessionDocuments>>,
+    observer: Option<TestObserver>,                // Test observation hooks
+    telemetry_worker: Option<TelemetryWorker>,     // L20 — async event emission
+    latency_monitor: Arc<LatencyMonitor>,          // p50/p95/p99 tracking
+    dynamic_memory: Arc<DynamicMemoryAllocator>,   // Reasoning buffer allocation
+    trace_context: Arc<Mutex<TraceContext>>,        // Session/trace ID management
+    classification_calculator: ClassificationCalculator, // Intent/tone/resolver inference
+    spatial_grid: Arc<Mutex<SpatialGrid>>,         // Classification pattern retrieval
+}
+```
+
+### Background Workers
+
+Two background threads are spawned at engine initialization:
+
+1. **Maintenance worker** — runs every `governance.maintenance_interval_secs` (30s), performs memory governance (pruning, promotion, layout)
+2. **Feedback worker** — drains the `feedback_rx` channel and applies feedback events to memory store
 
 ---
 
 ## 3. 21-Layer Architecture
 
-### 3.1 Layer Overview
+| Layer | Name | Source File | Config Section | Responsibility |
+|-------|------|------------|----------------|----------------|
+| L1 | Input Ingestion | `layers/input.rs` | — | Normalize raw text, create `InputPacket` |
+| L2 | Unit Builder | `layers/builder.rs` | `layer_2_unit_builder` | Rolling hash discovery, unit activation, utility/salience/confidence scoring |
+| L3 | Hierarchy Organizer | `layers/hierarchy.rs` | (uses builder config) | Level grouping (Char→Subword→Word→Phrase→Pattern), anchor/entity extraction |
+| L4 | Memory Ingestion | `memory/store.rs` | `layer_21_memory_governance` | Unit persistence, candidate observation, channel-aware ingestion |
+| L5 | Semantic Router | `layers/router.rs` | `layer_5_semantic_map` | 3D spatial routing, neighbor selection, force-directed layout, escape profiles |
+| L6 | Context Manager | `layers/context.rs` | — | Context matrix construction, sequence state, task entities |
+| L7 | Intent Detector | `layers/intent.rs` | `intent` | Intent classification (delegates to `ClassificationCalculator`), entropy calculation |
+| L8 | Adaptive Runtime | `engine.rs` | `adaptive_behavior` | Profile selection (10 intent profiles), weight adjustment |
+| L9 | Retrieval Decision | `layers/intent.rs` | `layer_9_retrieval_gating` | Entropy/freshness/disagreement/cost scoring → `should_retrieve` decision |
+| L10 | Query Builder | `layers/query.rs` | `layer_10_query_builder` | Safe query construction, PII stripping, semantic expansion |
+| L11 | Retrieval Pipeline | `layers/retrieval.rs` | `layer_11_retrieval` | External source fetching (SearxNG), response caching |
+| L12 | Safety Validator | `layers/safety.rs` | `layer_19_trust_heuristics` | Trust assessment, document filtering, HTTPS enforcement |
+| L13 | Evidence Merger | `layers/merge.rs` | `layer_13_evidence_merge` | Conflict detection, agreement scoring, trust-weighted merge |
+| L14 | Candidate Scorer | `layers/search.rs` | `layer_14_candidate_scoring` | 7-dimensional feature scoring (GPU-accelerated when available) |
+| L15 | Resolver Mode | `engine.rs` | `adaptive_behavior` | Deterministic / Balanced / Exploratory mode decision |
+| L16 | Fine Resolver | `layers/resolver.rs` | `layer_16_fine_resolver` | Top-k selection with temperature, intent shaping, anchor protection |
+| L17 | Output Decoder | `layers/output.rs` | — | Answer finalization, sentence extraction, evidence grounding |
+| L18 | Feedback Controller | `layers/feedback.rs` | — | Learning events, impact scoring, weight adjustment signals |
+| L19 | Trust/Safety | `layers/safety.rs` | `layer_19_trust_heuristics` | Source validation, allowlist management, format trust adjustments |
+| L20 | Telemetry | `telemetry/` | `layer_20_telemetry` | Async event emission, hot SQLite store, cold log, latency monitoring |
+| L21 | Governance | `memory/store.rs` | `layer_21_memory_governance` | Pruning, promotion, pollution detection, maintenance cycles |
 
-| Layer | Name | Module | Config Section | Responsibility |
-|-------|------|--------|----------------|----------------|
-| L1 | Input Ingestion | `layers/input.rs` | - | Normalize raw text, create `InputPacket` |
-| L2 | Unit Builder | `layers/builder.rs` | `layer_2_unit_builder` | Rolling hash discovery, unit activation, scoring |
-| L3 | Hierarchy Organizer | `layers/hierarchy.rs` | - | Level grouping, anchor/entity extraction |
-| L4 | Memory Ingestion | `memory/store.rs` | `layer_21_memory_governance` | Unit persistence, candidate observation |
-| L5 | Semantic Router | `layers/router.rs` | `layer_5_semantic_map` | Spatial routing, neighbor selection, escape |
-| L6 | Context Manager | `layers/context.rs` | - | Context matrix, sequence state, task entities |
-| L7 | Intent Detector | `layers/intent.rs` | `intent` | Intent classification, entropy calculation |
-| L8 | Adaptive Runtime | `config/mod.rs` | `adaptive_behavior` | Profile selection, weight adjustment |
-| L9 | Retrieval Decision | `layers/intent.rs` | `layer_9_retrieval_gating` | Entropy/freshness/cost scoring, **Dynamic Reasoning Trigger** |
-| L10 | Query Builder | `layers/query.rs` | `layer_10_query_builder` | Safe query construction, PII stripping |
-| L11 | Retrieval Pipeline | `layers/retrieval.rs` | `layer_11_retrieval` | External source fetching, caching |
-| L12 | Safety Validator | `layers/safety.rs` | `layer_19_trust_heuristics` | Trust assessment, document filtering |
-| L13 | Evidence Merger | `layers/merge.rs` | `layer_13_evidence_merge` | Conflict detection, agreement scoring |
-| L14 | Candidate Scorer | `layers/search.rs` | `layer_14_candidate_scoring` | 7-dimensional feature scoring |
-| L15 | Resolver Mode Selection | `engine.rs` | `adaptive_behavior` | **Stochastic Floor Enforcement (15%)** |
-| L16 | Fine Resolver | `layers/resolver.rs` | `layer_16_fine_resolver` | Top-k selection, **Confidence Gating** |
-| L17 | Output Decoder | `layers/output.rs` | - | Answer finalization, **Silent Thought Emission** |
-| L18 | Feedback Controller | `layers/feedback.rs` | - | Learning events, impact scoring |
-| L19 | Trust/Safety | `layers/safety.rs` | `layer_19_trust_heuristics` | Source validation, allowlist management |
-| L20 | Telemetry | `telemetry/` | `layer_20_telemetry` | Trace emission, **Reasoning Trace Logging** |
-| L21 | Governance | `memory/store.rs` | `layer_21_memory_governance` | Pruning, promotion, maintenance |
+### Layer Timing & Telemetry
 
-### 3.2 Layer Details
+The engine records wall-clock latency for key layers and feeds them into `LatencyMonitor`:
 
-#### L1: Input Ingestion
-
-**Responsibility:** Normalize raw text input into structured `InputPacket`.
-
-```rust
-pub struct InputPacket {
-    pub raw_text: String,
-    pub normalized_text: String,
-    pub timestamp: u64,
-    pub source: InputSource,
-    pub session_id: Uuid,
-    pub trace_id: Uuid,
-}
-
-pub enum InputSource {
-    UserQuery,
-    SilentThought,  // Internal reasoning loop
-    TrainingData,
-    ExternalRetrieval,
-}
+```
+Layer 2  (Unit Building)     → latency_monitor.record(2, ms)
+Layer 5  (Semantic Routing)  → latency_monitor.record(5, ms)
+Layer 9  (Retrieval Decision)→ latency_monitor.record(9, ms)
+Layer 11 (Retrieval I/O)     → latency_monitor.record(11, ms)
+Layer 13 (Evidence Merge)    → latency_monitor.record(13, ms)
+Layer 14 (Candidate Scoring) → latency_monitor.record(14, ms)
+Layer 16 (Fine Resolution)   → latency_monitor.record(16, ms)
 ```
 
-**Processing:**
-1. Trim whitespace
-2. Normalize unicode
-3. Detect language
-4. Create `InputPacket` with session/trace IDs
+At the end of `process_prompt`, a `TelemetryEvent::Calculation` is emitted with `layer: 0` capturing total query processing duration.
 
 ---
 
-#### L2: Unit Builder
-
-**Responsibility:** Discover semantic units using rolling hash, activate units, score by frequency/salience.
-
-```rust
-pub struct UnitBuilder {
-    config: UnitBuilderConfig,
-    rolling_hash: RollingHash,
-    active_units: Vec<Unit>,
-}
-
-pub struct UnitBuilderConfig {
-    pub min_frequency_threshold: f32,
-    pub max_unit_length: usize,
-    pub salience_weight: f32,
-}
-```
-
-**Processing:**
-1. Apply rolling hash to discover phrase boundaries
-2. Check frequency against threshold
-3. Calculate salience score
-4. Activate units meeting criteria
-
----
-
-#### L3: Hierarchy Organizer
-
-**Responsibility:** Group units into hierarchy levels, extract anchors and entities.
-
-```rust
-pub struct UnitHierarchy {
-    pub levels: BTreeMap<String, Vec<ActivatedUnit>>,
-    pub anchors: Vec<String>,
-    pub entities: Vec<String>,
-}
-
-pub struct ActivatedUnit {
-    pub content: String,
-    pub normalized: String,
-    pub level: UnitLevel,
-    pub utility_score: f32,
-    pub frequency: u64,
-    pub salience: f32,
-    pub confidence: f32,
-    pub context_hint: String,
-}
-
-pub enum UnitLevel {
-    Word,
-    Phrase,
-    Sentence,
-    Paragraph,
-}
-```
-
-Note: Anchors are tracked as strings (content) in the hierarchy, not as separate structs. Units with `anchor_status: true` are protected from creative drift.
-
----
-
-#### L4: Memory Ingestion
-
-**Responsibility:** Persist units to memory store with channel routing.
-
-```rust
-pub struct MemoryStore {
-    cache: HashMap<Uuid, Unit>,
-    content_index: HashMap<String, Uuid>,
-    channel_index: HashMap<MemoryChannel, HashSet<Uuid>>,
-    candidate_cache: HashMap<String, UnitCandidate>,
-    sequence_state: SequenceState,
-    anchor_reuse_threshold: u64,
-    core_promotion_threshold: u64,
-    promotion_min_corroborations: u32,
-    prune_utility_threshold: f32,
-    episodic_decay_days: u64,
-    // ... additional config fields
-}
-
-pub enum MemoryChannel {
-    #[default]
-    Main,      // Standard memory path
-    Intent,    // Intent-specific, isolated from Core promotion
-    Reasoning, // Internal reasoning loop, isolated
-}
-
-pub enum MemoryType {
-    Episodic,  // Session-scoped, decayed over time
-    Core,      // High-trust, persistent
-}
-```
-
-**Key Logic - Intent Channel Isolation:**
-```rust
-let is_intent_channel = memory_channels.contains(&MemoryChannel::Intent);
-let promote_to_core = default_memory_type == MemoryType::Core
-    && !(self.intent_channel_core_promotion_blocked && is_intent_channel);
-```
-
----
-
-#### L5: Semantic Router
-
-**Responsibility:** Position units in 3D semantic space, route to neighbors, handle escape conditions.
-
-```rust
-pub struct SpatialGrid {
-    cells: HashMap<GridCell, Vec<Unit>>,
-    cell_size: f32,
-    bounds: BoundingBox,
-}
-
-pub struct Router {
-    config: SemanticMapConfig,
-    grid: SpatialGrid,
-}
-
-pub enum TraversalMode {
-    GreedyNearest,      // Default
-    StochasticWalk,     // Random walk for brainstorm
-    DriftFloor,         // 15% non-greedy sampling
-}
-```
-
----
-
-#### L6: Context Manager
-
-**Responsibility:** Maintain context matrix, sequence state, task entities.
-
-```rust
-pub struct ContextMatrix {
-    pub cells: Vec<ContextCell>,
-    pub summary: String,
-}
-
-pub struct SequenceState {
-    pub recent_unit_ids: Vec<Uuid>,
-    pub anchor_ids: Vec<Uuid>,
-    pub task_entities: Vec<String>,
-    pub turn_index: u64,
-}
-
-pub struct SessionStyleState {
-    pub active_style_anchor: Option<StyleAnchor>,
-    pub decay_rate: f32,  // 0.0 = permanent for session
-}
-```
-
----
-
-#### L7: Intent Detector
-
-**Responsibility:** Classify intent, calculate entropy, **infer tone**.
-
-```rust
-pub struct IntentDetector {
-    config: IntentConfig,
-    tone_inferrer: ToneInferrer,
-}
-
-pub enum IntentKind {
-    Greeting,
-    Gratitude,
-    Farewell,
-    Help,
-    Clarify,
-    Rewrite,
-    Verify,
-    Continue,
-    Forget,
-    Question,
-    Summarize,
-    Explain,
-    Compare,
-    Extract,
-    Analyze,
-    Plan,
-    Act,
-    Recommend,
-    Classify,
-    Translate,
-    Debug,
-    Critique,
-    Brainstorm,
-    #[default]
-    Unknown,
-}
-
-pub struct ToneInferrer {
-    style_anchors: HashMap<ToneKind, StyleAnchor>,
-    decay_rate: f32,
-}
-
-pub enum ToneKind {
-    #[default]
-    NeutralProfessional,
-    Empathetic,
-    Direct,
-    Technical,
-    Casual,
-    Formal,
-}
-```
-
-**Tone Inference Logic:**
-```rust
-pub fn infer_tone(&self, input: &str, history: &[Unit]) -> ToneKind {
-    let urgency = self.detect_urgency(input);
-    let sadness = self.detect_sadness(input);
-    let technical = self.detect_technical_domain(input);
-    
-    if urgency > 0.7 { return ToneKind::Direct; }
-    if sadness > 0.5 { return ToneKind::Empathetic; }
-    if technical > 0.6 { return ToneKind::Technical; }
-    ToneKind::NeutralProfessional
-}
-```
-
----
-
-#### L9: Retrieval Decision (Dynamic Reasoning Trigger)
-
-**Responsibility:** Decide if external retrieval needed, **trigger dynamic reasoning loop**.
-
-```rust
-pub struct RetrievalDecision {
-    entropy_score: f32,
-    freshness_score: f32,
-    cost_score: f32,
-    should_retrieve: bool,
-}
-
-// NEW: Dynamic Reasoning Trigger
-pub fn should_trigger_reasoning(&self, confidence: f32, intent: IntentKind) -> bool {
-    confidence < self.config.reasoning_trigger_floor 
-        || intent == IntentKind::ComplexLogic
-}
-```
-
----
-
-#### L14: Candidate Scorer
-
-**Responsibility:** Score candidates using 7-dimensional features, **style resonance**.
-
-```rust
-pub struct CandidateScorer {
-    weights: ScoringWeights,
-    style_anchor: Option<StyleAnchor>,
-}
-
-pub struct ScoringWeights {
-    pub spatial: f32,
-    pub context: f32,
-    pub sequence: f32,
-    pub transition: f32,
-    pub utility: f32,
-    pub confidence: f32,
-    pub evidence: f32,
-}
-
-// Scoring Note:
-// Confidence is derived from source corroboration count and recency decay.
-// Utility is derived from observed frequency and prediction success.
-
-// NEW: Style Resonance Scoring
-fn score_style_resonance(&self, candidate: &Unit, anchor: &StyleAnchor) -> f32 {
-    self.semantic_similarity(candidate.embedding, anchor.embedding)
-}
-```
-
----
-
-#### L15: Resolver Mode Selection (Stochastic Floor Enforcement)
-
-**Responsibility:** Select resolver mode, **enforce 15% stochastic floor**.
-
-```rust
-pub enum ResolverMode {
-    Deterministic,
-    Balanced,
-    Exploratory,
-}
-
-// NEW: Stochastic Floor Enforcement
-impl Router {
-    pub fn select_with_creative_floor(
-        &self,
-        candidates: &[Candidate],
-        config: &CreativeSparkConfig,
-    ) -> Candidate {
-        let mut rng = rand::thread_rng();
-        let sample = rng.gen::<f32>();
-        
-        if sample < config.global_stochastic_floor {
-            // Sample from top-K neighbors (not just argmax)
-            self.weighted_random_select(candidates, config.temperature)
-        } else {
-            // Greedy selection
-            candidates.iter().max_by_key(|c| c.score).unwrap().clone()
-        }
-    }
-}
-```
-
----
-
-#### L16: Fine Resolver (Confidence Gating)
-
-**Responsibility:** Select top-k candidates, **output confidence score for reasoning trigger**.
-
-```rust
-pub struct FineResolver {
-    config: FineResolverConfig,
-}
-
-pub struct ScoredCandidate {
-    pub unit_id: Uuid,
-    pub content: String,
-    pub score: f32,
-    pub breakdown: ScoreBreakdown,
-    pub memory_type: MemoryType,
-}
-
-pub struct ResolvedCandidate {
-    pub unit_id: Uuid,
-    pub content: String,
-    pub score: f32,
-    pub mode: ResolverMode,
-    pub used_escape: bool,
-}
-
-pub enum ResolverMode {
-    Deterministic,
-    Balanced,
-    Exploratory,
-}
-```
-
-**Anchor Validation:** Units with `anchor_status: true` are protected from creative drift. The resolver checks for contradictions against high-trust anchors before accepting creative candidates.
-
----
-
-#### L17: Output Decoder (Silent Thought Emission)
-
-**Responsibility:** Finalize answer, **emit SilentThought for reasoning loop**.
-
-```rust
-pub struct DecodedOutput {
-    pub text: String,
-    pub grounded: bool,
-}
-
-pub struct ThoughtUnit {
-    pub content: String,
-    pub step: usize,
-    pub internal_only: bool,  // true = hidden from user
-    pub confidence: f32,
-    pub created_at: DateTime<Utc>,
-}
-```
-
----
-
-#### L20: Telemetry (Reasoning Trace Logging)
-
-**Responsibility:** Emit structured events, **log reasoning steps**.
-
-```rust
-pub enum TelemetryEvent {
-    /// Calculation event at layer boundary
-    Calculation {
-        layer: u8,
-        operation: String,
-        duration_ms: u64,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Database push event
-    DbPush {
-        unit_id: Uuid,
-        memory_type: MemoryType,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Retrieval event
-    Retrieval {
-        source: String,
-        results: usize,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Intent label event with channel tracking
-    IntentLabel {
-        label: IntentKind,
-        channel: MemoryChannel,
-        score: f32,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Reasoning step event
-    ReasoningStep {
-        step: usize,
-        thought: String,
-        confidence: f32,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Latency spike event
-    LatencySpike {
-        layer: u8,
-        latency_ms: u64,
-        threshold_ms: u64,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-    /// Memory allocation event
-    MemoryAllocation {
-        allocated_kb: usize,
-        total_kb: usize,
-        limit_kb: usize,
-        session_id: Uuid,
-        trace_id: Uuid,
-    },
-}
-```
-
----
-
-## 4. Unified Auto+Reasoning Architecture (Mode C)
-
-### 4.1 Mode Comparison
-
-| Feature | **Mode A: Auto-Only** | **Mode B: Reasoning-Only** | **Mode C: Unified Auto+Reasoning** |
-| :--- | :--- | :--- | :--- |
-| **Logic** | Direct retrieval → Scoring → Output | Detects need → Loops internally → Output | Default is Mode A. If confidence < threshold, switches to Mode B internally. |
-| **RAM Usage** | ~350 MB | ~550 MB | ~350 MB (Idle), ~550 MB (Active) |
-| **CPU Load** | Low | High | Variable (Low by default; spikes for complex queries) |
-| **Latency** | < 100ms (TTFT) | 500ms - 2s | < 100ms (Simple), 500ms+ (Complex) |
-| **Code Complexity** | Low | Medium | Medium-High |
-| **User Experience** | Fast, but fails on complex logic | User must know when to trigger | Seamless. System "thinks" only when necessary. |
-| **Optimality for Low Spec** | ✅ Best Efficiency, ❌ Low Capability | ❌ High Overhead, ✅ High Capability | ✅ **Best Balance** |
-
-### 4.2 Dynamic Reasoning Mechanism
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         DYNAMIC REASONING FLOW                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-    ┌──────────────┐
-    │ User Query   │
-    └──────┬───────┘
-           ▼
-    ┌──────────────┐     ┌──────────────────────────────────────┐
-    │ Initial Pass │────▶│ Confidence Check (L16)               │
-    │ (L14-L17)    │     │ confidence_score < 0.40?             │
-    └──────────────┘     │ OR intent == ComplexLogic?           │
-                         └──────────────┬───────────────────────┘
-                                        │
-                    ┌───────────────────┼───────────────────┐
-                    │ YES               │                   │ NO
-                    ▼                   │                   ▼
-    ┌────────────────────────┐         │         ┌──────────────────┐
-    │ Enter Reasoning State  │         │         │ Direct Output    │
-    │ (Allocate ~550MB)       │         │         │ (~350MB, <100ms)│
-    └────────────┬───────────┘         │         └──────────────────┘
-                 ▼                     │
-    ┌────────────────────────┐         │
-    │ Generate SilentThought │         │
-    │ (L17)                  │         │
-    └────────────┬───────────┘         │
-                 ▼                     │
-    ┌────────────────────────┐         │
-    │ Ingest as Internal Input│        │
-    │ (L1, internal_only=true)│        │
-    └────────────┬───────────┘         │
-                 ▼                     │
-    ┌────────────────────────┐         │
-    │ Re-assess Confidence   │         │
-    │ confidence > 0.60?     │         │
-    └────────────┬───────────┘         │
-                 │                     │
-    ┌────────────┼────────────┐        │
-    │ YES        │ NO         │        │
-    ▼            ▼            │        │
-┌────────┐ ┌─────────────┐    │        │
-│Output  │ │ step < max? │    │        │
-│        │ │ (max=3)     │    │        │
-└────────┘ └──────┬──────┘    │        │
-                  │           │        │
-         ┌────────┼────────┐  │        │
-         │ YES    │ NO     │  │        │
-         ▼        ▼        │  │        │
-    ┌────────┐ ┌────────┐ │  │        │
-    │Loop    │ │Force   │ │  │        │
-    │Again   │ │Output  │ │  │        │
-    └────────┘ └────────┘ │  │        │
-                         │  │        │
-                         └──┼────────┘
-                            │
-                            ▼
-                   ┌──────────────────┐
-                   │ Release Memory   │
-                   │ (Back to ~350MB) │
-                   └──────────────────┘
-```
-
-### 4.3 Implementation
-
-```rust
-// src/engine.rs
-impl Engine {
-    pub fn resolve_with_dynamic_reasoning(&mut self, query: &str) -> OutputType {
-        let initial_confidence = self.assess_confidence(query);
-        
-        if !self.should_trigger_reasoning(initial_confidence, self.current_intent) {
-            return self.resolve_direct(query);  // Fast path: ~350MB, <100ms
-        }
-        
-        // Reasoning path: temporarily allocate ~550MB
-        self.memory.allocate_thought_buffer();
-        let result = self.execute_reasoning_loop(query, 0);
-        self.memory.deallocate_thought_buffer();
-        result
-    }
-    
-    fn execute_reasoning_loop(&mut self, query: &str, step: usize) -> OutputType {
-        if step >= self.config.max_internal_steps {
-            return self.resolve_direct(query);
-        }
-        
-        let thought = self.generate_thought_unit(query, step);
-        self.ingest_silent_thought(&thought);
-        
-        let new_confidence = self.assess_confidence(query);
-        if new_confidence >= self.config.exit_confidence_threshold {
-            return self.resolve_direct(query);
-        }
-        
-        self.execute_reasoning_loop(query, step + 1)
-    }
-    
-    fn should_trigger_reasoning(&self, confidence: f32, intent: IntentKind) -> bool {
-        confidence < self.config.reasoning_trigger_floor 
-            || intent == IntentKind::ComplexLogic
-    }
-}
-```
-
----
-
-## 5. Core Data Structures
-
-### 5.1 Unit
+## 4. Core Data Structures
+
+All types are defined in `src/types.rs`.
+
+### Key Enumerations
+
+| Enum | Variants | Purpose |
+|------|----------|---------|
+| `MemoryType` | Episodic, Core | Episodic decays; Core is permanent |
+| `MemoryChannel` | Main, Intent, Reasoning | Isolated memory lanes |
+| `DatabaseMaturityStage` | ColdStart, Growth, Stable | Governs pruning/promotion thresholds |
+| `CandidateStatus` | Candidate, Validated, Active, Rejected | Unit lifecycle states |
+| `UnitLevel` | Char, Subword, Word, Phrase, Pattern | Granularity hierarchy |
+| `EdgeType` | Semantic, Parent, Child, Sequence, SourceEvidence | Link types between units |
+| `SourceKind` | UserInput, Retrieval, TrainingDocument, TrainingUrl | Provenance tracking |
+| `ResolverMode` | Deterministic, Balanced, Exploratory | Resolution strategy |
+| `IntentKind` | Greeting, Gratitude, Farewell, Help, Clarify, Rewrite, Verify, Continue, Forget, Question, Summarize, Explain, Compare, Extract, Analyze, Plan, Act, Recommend, Classify, Translate, Debug, Critique, Brainstorm, Unknown (24 total) | Intent labels |
+| `IntentFallbackMode` | None, DocumentScope, ClarifyHelp, RetrieveUnknown | Fallback behavior |
+| `ToneKind` | NeutralProfessional, Empathetic, Direct, Technical, Casual, Formal | Tone inference labels |
+| `ReasoningType` | General, Mathematical, Logical, Explanatory, Planning, Verification, Debugging, MultiHop | Reasoning classification |
+| `ReasoningStepType` | Premise, Inference, Calculation, Verification, Hypothesis, Conclusion | Step-level classification |
+| `OutputType` | FinalAnswer(String), SilentThought(String) | Visible vs internal output |
+| `CalculationMethod` | MemoryLookup | Classification method (spatial query) |
+| `TrainingPhaseKind` | DryRun, Bootstrap, Validation, Expansion, Lifelong | Ordered training phases |
+| `TrainingSourceType` | Url, Document, Dataset, HuggingFaceDataset, StructuredJson, OpenApiSpec, CodeRepository, WikipediaDump, WikidataTruthy, OpenWebText, DbpediaDump, ProjectGutenberg, CommonCrawlWet, QaJson (14 types) | Source formats |
+| `JobState` | Queued, Processing, Completed, Failed | Job lifecycle |
+| `TrainingExecutionMode` | User, Development | Training context |
+
+### Unit (Primary Memory Element)
 
 ```rust
 pub struct Unit {
     pub id: Uuid,
     pub content: String,
     pub normalized: String,
-    pub level: UnitLevel,
+    pub level: UnitLevel,                    // Char..Pattern
     pub frequency: u64,
     pub utility_score: f32,
-    pub semantic_position: [f32; 3],
+    pub semantic_position: [f32; 3],         // 3D spatial coordinates
     pub anchor_status: bool,
-    pub memory_type: MemoryType,
-    pub memory_channels: Vec<MemoryChannel>,
+    pub memory_type: MemoryType,             // Episodic or Core
+    pub memory_channels: Vec<MemoryChannel>, // Default: [Main]
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub salience_score: f32,
     pub confidence: f32,
-    pub trust_score: f32,
+    pub trust_score: f32,                    // Default: 0.5
     pub corroboration_count: u32,
     pub links: Vec<Link>,
     pub contexts: Vec<String>,
-    /// Process units are reasoning steps isolated from Core semantic space
-    /// GPU shaders confine these to Z = -1.0 subspace with 3x repulsion from content units
-    pub is_process_unit: bool,
-}
-
-pub enum UnitLevel {
-    Word,
-    Phrase,
-    Sentence,
-    Paragraph,
-}
-
-pub enum MemoryType {
-    Episodic,  // Session-scoped, decayed over time
-    Core,      // High-trust, persistent
-}
-
-pub enum MemoryChannel {
-    #[default]
-    Main,      // Standard memory path
-    Intent,    // Intent-specific, isolated from Core promotion
-    Reasoning, // Internal reasoning loop, isolated
-}
-
-/// Memory target for training/ingestion (separate from MemoryType)
-pub enum MemoryTarget {
-    #[default]
-    StagingEpisodic,  // High utility, requires corroboration for Core promotion
-    Core,             // Direct to Core (only via consolidate_immediately)
-    Episodic,         // Standard episodic memory
+    pub is_process_unit: bool,               // true for reasoning artifacts
 }
 ```
 
-### 5.2 InputPacket
+### ScoreBreakdown (7-Dimensional Scoring)
 
 ```rust
-pub struct InputPacket {
-    pub original_text: String,
-    pub normalized_text: String,
-    pub bytes: Vec<u8>,
-    pub training_mode: bool,
-    pub timestamp: DateTime<Utc>,
+pub struct ScoreBreakdown {
+    pub spatial_fit: f32,      // Distance in 3D space
+    pub context_fit: f32,      // Context matrix relevance
+    pub sequence_fit: f32,     // Recent unit sequence alignment
+    pub transition_fit: f32,   // Transition probability
+    pub utility_fit: f32,      // Intrinsic utility
+    pub confidence_fit: f32,   // Corroboration confidence
+    pub evidence_support: f32, // External evidence backing
 }
 ```
 
-### 5.3 ThoughtUnit
+Default weights: spatial=0.12, context=0.18, sequence=0.16, transition=0.12, utility=0.14, confidence=0.14, evidence=0.14.
 
-```rust
-pub struct ThoughtUnit {
-    /// The thought content
-    pub content: String,
-    /// Step number in reasoning loop (0-indexed)
-    pub step: usize,
-    /// Whether this thought is internal-only (not shown to user)
-    pub internal_only: bool,
-    /// Confidence after this thought step
-    pub confidence: f32,
-    /// Timestamp when thought was generated
-    pub created_at: DateTime<Utc>,
-}
-```
-
-### 5.4 StyleAnchor
-
-```rust
-pub struct StyleAnchor {
-    /// Tone kind this anchor represents
-    pub tone: ToneKind,
-    /// Semantic position in embedding space
-    pub embedding: [f32; 3],
-    /// Keywords associated with this style
-    pub keywords: Vec<String>,
-    /// Decay rate for session persistence (0.0 = persist for session)
-    pub decay_rate: f32,
-}
-```
-
-### 5.5 Link
-
-```rust
-pub struct Link {
-    pub target_id: Uuid,
-    pub edge_type: EdgeType,
-    pub weight: f32,
-}
-
-pub enum EdgeType {
-    Semantic,
-    Parent,
-    Child,
-    Sequence,
-    SourceEvidence,
-}
-```
-
-Note: Units use `anchor_status: bool` flag rather than a separate Anchor struct. High-trust units with `anchor_status: true` are protected from creative drift.
-
-### 5.6 Reasoning Pattern System
-
-The engine implements a reasoning pattern system that isolates process units from core semantic space, enabling iterative reasoning without polluting the knowledge base.
-
-#### Process Units
-
-Process units are reasoning steps stored in the `Reasoning` memory channel, isolated from `Core`:
-
-- **Flag**: `is_process_unit: bool` on `Unit` struct
-- **Spatial Isolation**: GPU shaders confine process units to Z = -1.0 subspace
-- **Repulsion**: 3x repulsion multiplier between process and content units prevents drift
-- **Pruning Protection**: Process anchors registered via `register_process_anchor()` are never pruned
-
-#### Reasoning Types
-
-```rust
-pub enum ReasoningType {
-    #[default]
-    General,        // Step-by-step reasoning
-    Mathematical,   // Calculation (GSM8K style)
-    Logical,        // Deductive inference (ProofWriter style)
-    Explanatory,    // Why/how causal chains
-    Planning,       // Multi-step action sequences
-    Verification,   // Fact-checking with source tracing
-    Debugging,      // Error isolation and hypothesis testing
-    MultiHop,       // Multi-hop deduction across entities
-}
-```
-
-#### Reasoning Trace
+### ReasoningTrace
 
 ```rust
 pub struct ReasoningTrace {
@@ -893,560 +246,107 @@ pub struct ReasoningTrace {
     pub reasoning_type: ReasoningType,
     pub confidence_trajectory: Vec<f32>,
     pub entities: Vec<String>,
-    pub structure_hash: Option<u64>,
+    pub structure_hash: Option<u64>,     // For pattern matching
 }
-
 pub struct ReasoningStep {
     pub content: String,
     pub step_type: ReasoningStepType,
-    pub anchor_step: bool,
-    pub dependencies: Vec<usize>,
+    pub anchor_step: bool,               // Never pruned
+    pub dependencies: Vec<usize>,        // DAG references
     pub structure_hash: Option<u64>,
 }
 ```
 
-#### Key Functions
-
-| Function | Location | Purpose |
-|----------|----------|---------|
-| `reasoning_patterns_for_query()` | `memory/store.rs` | Retrieve matching patterns from memory |
-| `register_reasoning_pattern()` | `memory/store.rs` | Index a unit as a reasoning pattern |
-| `should_prune_unit()` | `memory/store.rs` | Pruning decision with anchor protection |
-| `adapt_reasoning_pattern()` | `engine.rs` | Adapt retrieved pattern to current context |
-| `ingest_reasoning_trace()` | `training.rs` | Convert trace to process units in memory |
-
-#### GPU Force Layout Integration
-
-The GPU-accelerated force layout handles process units:
-
-1. `GpuPosition` struct includes `is_process_unit: u32` field
-2. Shader applies 3x repulsion between process/content unit pairs
-3. Process units are constrained to Z = -1.0 subspace after each iteration
-4. Anchors (`is_anchor: u32`) remain fixed regardless of type
-
-#### Memory Channel Isolation
-
-Process units are ingested via `MemoryChannel::Reasoning`, not `MemoryChannel::Core`:
+### ProcessResult & ExplainTrace
 
 ```rust
-memory.ingest_hierarchy_with_channels(
-    &hierarchy,
-    SourceKind::UserInput,
-    &context,
-    MemoryType::Episodic,
-    &[MemoryChannel::Reasoning],  // Reasoning channel only
-);
-```
-
-This prevents reasoning artifacts from polluting the core knowledge base.
-
----
-
-## 6. Configuration System
-
-### 6.1 Configuration Schema
-
-```yaml
-# config/config.yaml
-
-engine:
-  mode: "auto_unified"  # LOCKED. No user override.
-
-# Dynamic Reasoning Configuration
-auto_inference:
-  reasoning_loop:
-    enabled: true
-    trigger_confidence_floor: 0.40  # Below this, system starts "thinking"
-    max_internal_steps: 3           # Cap loops to save CPU on low-spec
-    exit_confidence_threshold: 0.60
-    enable_thought_buffer_on_demand: true
-    
-  tone_inference:
-    enabled: true
-    style_anchor_decay: 0.0         # Persist tone for session
-    
-  creative_spark:
-    global_stochastic_floor: 0.15   # Enforce 15% drift
-    anchor_protection_strictness: 0.95  # Never drift on high-trust anchors
-
-  dynamic_memory:
-    enabled: true
-    base_memory_limit_mb: 350
-    max_memory_limit_mb: 550
-    thought_buffer_size_kb: 64
-
-# Layer-Specific Configurations
-layer_2_unit_builder:
-  min_frequency_threshold: 2  # u64 - minimum frequency for unit activation
-  initial_utility_score: 0.50
-  edit_distance_cluster_threshold: 1
-  rolling_hash_window_sizes: [2, 3, 4, 5, 6, 7, 8]
-  max_activated_units: 96
-  punctuation_ratio_limit: 0.55
-  hash_base: 257
-  min_fragment_length: 4
-  utility_compression_gain_cap: 1.2
-  utility_span_weight: 0.45
-  utility_frequency_weight: 0.30
-  salience_base: 0.18
-  confidence_base: 0.22
-
-layer_5_semantic_map:
-  preferred_spacing_k: 1.0
-  max_displacement_per_iteration: 1.75
-  convergence_tolerance: 0.001
-  max_layout_iterations: 24
-  energy_rollback_threshold: 3
-  attractive_force_coefficient: 1.0
-  repulsive_force_coefficient: 1.0
-  layout_boundary: 128.0
-  max_layout_units: 256
-  spatial_cell_size: 4.0
-  neighbor_radius: 6.0
-
-layer_9_retrieval_gating:
-  w_entropy: 0.35
-  w_recency: 0.25
-  w_disagreement: 0.20
-  w_cost: 0.20
-  entropy_threshold: 0.72
-  freshness_threshold: 0.65
-  disagreement_threshold: 0.30
-  decision_threshold: 0.50
-  cost_penalty: 0.10
-
-layer_14_candidate_scoring:
-  w_spatial: 0.15
-  w_context: 0.25
-  w_sequence: 0.15
-  w_transition: 0.10
-  w_utility: 0.15
-  w_confidence: 0.10
-  w_evidence: 0.10
-
-layer_16_fine_resolver:
-  evidence_answer_confidence_threshold: 0.22
-  min_confidence_floor: 0.22
-  selection_temperature: 0.7
-  creative_drift_tolerance: 0.25
-  factual_corruption_threshold: 0.15
-  factual_intent_retrieval_threshold: 0.65
-
-layer_20_telemetry:
-  enabled: true
-  sample_rate: 1.0
-  hot_store_limit: 10000
-
-layer_21_memory_governance:
-  prune_utility_threshold: 0.1
-  max_candidate_pool: 1000
-  intent_channel_core_promotion_blocked: true
-
-# Intent Profiles
-adaptive_behavior:
-  intent_profiles:
-    creative:
-      scoring:
-        w_spatial: 0.10
-        w_context: 0.20
-        w_utility: 0.15
-      resolver:
-        selection_temperature: 0.80
-        min_confidence_floor: 0.15
-        mode: "exploratory"
-    factual:
-      scoring:
-        w_spatial: 0.20
-        w_context: 0.30
-        w_utility: 0.10
-      resolver:
-        selection_temperature: 0.30
-        min_confidence_floor: 0.25
-        mode: "deterministic"
-```
-
-### 6.2 Configuration Principles
-
-1. **All numeric values in config:** No hardcoded thresholds in code
-2. **Named config fields:** Every field has descriptive name
-3. **Layer-prefixed sections:** `layer_N_name` for layer-specific settings
-4. **Documented fields:** Every field has comment explaining purpose
-
----
-
-## 7. Memory Architecture
-
-### 7.1 Memory Tiers
-
-| Tier | Type | Persistence | Trust Score | Use Case |
-|------|------|-------------|-------------|----------|
-| Core | Persistent | SQLite | > 0.8 | High-trust facts, anchors |
-| Episodic | Session-scoped | SQLite + decay | Variable | Context, recent queries |
-
-### 7.2 Memory Channels
-
-```rust
-pub enum MemoryChannel {
-    #[default]
-    Main,      // Standard memory path
-    Intent,    // Intent-specific, isolated from Core promotion
-    Reasoning, // Internal reasoning loop, isolated from Core
-}
-```
-
-### 7.3 Memory Targets (Training/Ingestion)
-
-```rust
-pub enum MemoryTarget {
-    #[default]
-    StagingEpisodic,  // High utility, requires corroboration for Core promotion
-    Core,             // Direct to Core (only via consolidate_immediately)
-    Episodic,         // Standard episodic memory
-}
-```
-
-**Intent Channel Isolation:** Units in the Intent channel are blocked from promotion to Core memory to prevent pollution.
-
-### 7.4 Dynamic Memory Allocation
-
-```rust
-pub struct DynamicMemoryAllocator {
-    base_limit_mb: usize,    // 350MB idle
-    max_limit_mb: usize,     // 550MB during reasoning
-    current_usage: AtomicUsize,
-    thought_buffer: Option<ThoughtBuffer>,
-}
-
-impl DynamicMemoryAllocator {
-    pub fn allocate_thought_buffer(&mut self) -> Option<ThoughtBuffer> {
-        if self.current_usage.load() + THOUGHT_BUFFER_SIZE <= self.max_limit_mb {
-            self.current_usage.fetch_add(THOUGHT_BUFFER_SIZE);
-            Some(ThoughtBuffer::new())
-        } else {
-            None
-        }
-    }
-    
-    pub fn deallocate_thought_buffer(&mut self) {
-        self.current_usage.fetch_sub(THOUGHT_BUFFER_SIZE);
-        self.thought_buffer = None;
-    }
-}
-```
-
----
-
-## 8. Classification System
-
-### 8.1 Overview
-
-The classification system provides hybrid retrieval-augmented classification for intent, tone, and resolver mode inference. It combines lightweight feature signatures with spatial pattern retrieval.
-
-### 8.2 Architecture Alignment
-
-| Layer | Classification Component |
-|-------|-------------------------|
-| L2 | ClassificationSignature as specialized Unit feature |
-| L4 | ClassificationPattern storage in Intent memory channel |
-| L6 | Spatial query for O(log N) pattern retrieval |
-| L14 | Similarity scoring and candidate aggregation |
-| L18 | Feedback-driven learning and spatial adjustment |
-
-### 8.3 Core Components
-
-```rust
-// src/classification/mod.rs
-
-/// Semantic hash generator for classification signatures
-pub struct SemanticHasher;
-
-/// Feature signature for classification queries
-pub struct ClassificationSignature {
-    pub semantic_hash: u64,
-    pub feature_vector: Vec<f32>,
-    pub token_count: usize,
-}
-
-/// Stored pattern with label for retrieval
-pub struct ClassificationPattern {
-    pub id: Uuid,
-    pub signature: ClassificationSignature,
-    pub label: ClassificationLabel,
-    pub position: Vec3,
-    pub vote_count: u32,
+pub struct ProcessResult {
+    pub predicted_text: String,
     pub confidence: f32,
+    pub used_retrieval: bool,
+    pub trace: ExplainTrace,
 }
-
-/// Main classifier using spatial retrieval
-pub struct ClassificationCalculator {
-    config: ClassificationConfig,
-    spatial_index: SpatialIndex,
+pub struct ExplainTrace {
+    pub intent_profile: IntentProfile,
+    pub layer_notes: Vec<LayerNote>,
+    pub debug_steps: Vec<DebugStep>,
+    pub active_regions: Vec<String>,
+    pub retrieval_query: Option<SanitizedQuery>,
+    pub evidence_sources: Vec<String>,
+    pub score_breakdowns: Vec<ScoredCandidate>,
+    pub selected_unit: Option<String>,
+    pub safety_warnings: Vec<String>,
+    pub feedback_events: Vec<FeedbackEvent>,
+    pub memory_summary: String,
 }
+```
 
-pub enum ClassificationLabel {
-    Intent(IntentKind),
-    Tone(ToneKind),
-    ResolverMode(ResolverMode),
+### Governance Types
+
+```rust
+pub struct GovernanceReport {
+    pub pruned_units: u64,
+    pub pruned_candidates: u64,
+    pub purged_polluted_units: u64,
+    pub purged_polluted_candidates: u64,
+    pub promoted_units: u64,
+    pub anchors_protected: u64,
+    pub layout_adjustments: u64,
+    pub mean_displacement: f32,
+    pub layout_rolled_back: bool,
+    pub snapshot_path: String,
+    pub pruning_reasons: Vec<String>,
+    pub pruned_references: Vec<PrunedUnitReference>,
+    pub pollution_findings: Vec<PollutionFinding>,
 }
+pub struct PollutionFinding {
+    pub polluted_id: Uuid,
+    pub polluted_content: String,
+    pub canonical_id: Uuid,
+    pub canonical_content: String,
+    pub overlap_ratio: f32,
+    pub quality_delta: f32,
+    pub reason: String,
+}
+```
 
+### Channel Isolation Types
+
+```rust
+pub struct ChannelIsolationReport {
+    pub is_valid: bool,
+    pub main_count: usize,
+    pub intent_count: usize,
+    pub reasoning_count: usize,
+    pub violations: Vec<ChannelIsolationViolation>,
+}
+pub enum IsolationViolationType {
+    IntentNotInMain,
+    ReasoningNotInMain,
+    ExcessiveIntentReasoningOverlap,
+}
+```
+
+### Classification Types
+
+```rust
 pub struct ClassificationResult {
-    pub label: ClassificationLabel,
+    pub intent: IntentKind,
+    pub tone: ToneKind,
+    pub resolver_mode: ResolverMode,
     pub confidence: f32,
-    pub method: CalculationMethod,
-    pub nearby_patterns: usize,
+    pub method: CalculationMethod,     // Always MemoryLookup
+    pub candidate_count: usize,
 }
-```
-
-### 8.4 Classification Flow
-
-```
-Input Text
-    │
-    ▼
-┌─────────────────────────┐
-│ SemanticHasher          │
-│ - Token normalization   │
-│ - Feature extraction    │
-│ - Hash generation       │
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│ Spatial Query (L6)      │
-│ - k-NN lookup           │
-│ - Radius search         │
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│ Vote Aggregation        │
-│ - Weighted voting       │
-│ - Confidence scaling    │
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│ ClassificationResult    │
-│ - Intent/Tone/Mode      │
-│ - Confidence score      │
-└─────────────────────────┘
-```
-
-### 8.5 Training Integration
-
-```rust
-pub struct ClassificationTrainer {
-    config: TrainerConfig,
-    patterns: Vec<ClassificationPattern>,
-}
-
-pub struct LabeledDialogue {
-    pub turns: Vec<LabeledTurn>,
-    pub metadata: DialogueMetadata,
-}
-
-pub struct TrainingOutcome {
-    pub patterns_added: usize,
-    pub patterns_updated: usize,
-    pub spatial_adjustments: usize,
-}
-```
-
----
-
-## 9. GPU Acceleration
-
-### 9.1 Overview
-
-The engine supports optional GPU acceleration via `wgpu` for compute-intensive operations. GPU acceleration is automatically used when available and falls back to CPU when disabled or unavailable.
-
-### 9.2 Feature Flag
-
-```toml
-# Cargo.toml
-[features]
-default = []
-gpu = ["wgpu"]
-```
-
-### 9.3 GPU-Accelerated Operations
-
-| Operation | Module | Speedup |
-|-----------|--------|---------|
-| Candidate Scoring | `gpu/compute/candidate_scorer.rs` | 10-50x |
-| Intent Scoring | `gpu/compute/intent_scorer.rs` | 5-20x |
-| Distance Calculation | `gpu/compute/distance.rs` | 20-100x |
-| Force-Directed Layout | `gpu/compute/force_layout.rs` | 10-30x |
-| Tone Detection | `gpu/compute/tone_detector.rs` | 5-15x |
-| Evidence Merging | `gpu/compute/evidence_merger.rs` | 3-10x |
-
-### 9.4 GPU Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     GPU COMPUTE MODULE                       │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │                    Device Manager                        │ │
-│  │  - Device selection (discrete/integrated)               │ │
-│  │  - Memory allocation                                     │ │
-│  │  - Shader compilation                                    │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                              │                               │
-│              ┌───────────────┼───────────────┐              │
-│              ▼               ▼               ▼              │
-│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐      │
-│  │ Candidate     │ │ Intent        │ │ Distance      │      │
-│  │ Scorer        │ │ Scorer        │ │ Calculator    │      │
-│  │               │ │               │ │               │      │
-│  │ - 7-dim score │ │ - Multi-class │ │ - Euclidean   │      │
-│  │ - Batch proc  │ │ - Batch proc  │ │ - Batch proc  │      │
-│  └───────────────┘ └───────────────┘ └───────────────┘      │
-│                              │                               │
-│                              ▼                               │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │                    Shader Pipeline                       │ │
-│  │  - WGSL compute shaders                                  │ │
-│  │  - Bind groups for input/output                          │ │
-│  │  - Dispatch orchestration                                │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 9.5 CPU Fallback Pattern
-
-```rust
-pub fn score_candidates_gpu_accelerated(
-    candidates: &[Unit],
-    context: &ContextMatrix,
-    // ...
-) -> Vec<ScoredCandidate> {
-    #[cfg(feature = "gpu")]
-    {
-        use crate::gpu::compute::candidate_scorer::score_candidates;
-        let mut scored = score_candidates(candidates, context, /* ... */);
-        
-        // Post-processing (GPU doesn't handle this)
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        return scored;
-    }
-    
-    // CPU fallback when GPU feature is disabled
-    #[cfg(not(feature = "gpu"))]
-    {
-        CandidateScorer::score(candidates, context, /* ... */)
-    }
-}
-```
-
-### 9.6 GPU Configuration
-
-```yaml
-# config/config.yaml
-gpu:
-  enabled: true
-  preferred_device: "discrete"  # or "integrated"
-  max_memory_mb: 512
-  batch_size: 256
-  timeout_ms: 100
-```
-
----
-
-## 10. Unified Training Pipeline
-
-### 10.1 Overview
-
-The training pipeline provides unified system training through seed data ingestion, pattern learning, and spatial adjustment. Training runs as a background task with progress tracking.
-
-### 10.2 Training Phases
-
-| Phase | Description | Duration |
-|-------|-------------|----------|
-| Cold Start | Initial pattern seeding | 1-2 min |
-| Growth | Active learning from feedback | Ongoing |
-| Stable | Maintenance and pruning | Ongoing |
-
-### 10.3 Training Configuration
-
-```yaml
-# config/config.yaml
-training:
-  phases:
-    cold_start:
-      batch_size: 100
-      max_iterations: 10
-    growth:
-      batch_size: 50
-      feedback_threshold: 0.7
-    stable:
-      prune_threshold: 0.1
-      consolidate_interval: 3600  # seconds
-
-  execution_modes:
-    - silent_batch    # Background, low priority
-    - interactive     # User-initiated, high priority
-    - drill           # Stress testing mode
-```
-
-### 10.4 Training Data Format
-
-```rust
-pub struct LabeledDialogue {
-    pub turns: Vec<LabeledTurn>,
-    pub metadata: DialogueMetadata,
-}
-
-pub struct LabeledTurn {
-    pub role: String,
-    pub content: String,
-    pub expected_entities: Vec<String>,
-    pub expected_anchors: Vec<String>,
-    pub expected_unit_count: ExpectedUnitCount,
-    pub source_quality: Option<f32>,
-}
-
-pub struct DialogueMetadata {
+pub struct GroundTruth {
+    pub intent: IntentKind,
+    pub tone: ToneKind,
+    pub resolver_mode: ResolverMode,
     pub domain: Option<String>,
-    pub complexity: String,
-    pub memory_target: MemoryTarget,
-    pub channels: Vec<MemoryChannel>,
-    pub corroboration_threshold: f32,
-}
-
-pub struct ExpectedUnitCount {
-    pub phrase: usize,
-    pub sentence: usize,
-    pub word: usize,
 }
 ```
 
-### 10.5 Training API
-
-```rust
-impl Engine {
-    /// Start training with execution mode
-    pub fn start_train(&self, mode: TrainingExecutionMode) -> String;
-    
-    /// Get training job status
-    pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus>;
-    
-    /// Run training plan with job ID
-    pub async fn run_training_plan_with_id(
-        &self,
-        job_id: String,
-        plan: TrainingPlan,
-    ) -> TrainingJobStatus;
-    
-    /// Train with specific scope
-    pub async fn train_with_scope(
-        &self,
-        execution_mode: TrainingExecutionMode,
-        scope: TrainingScope,
-    ) -> TrainingJobStatus;
-}
-```
-
-### 10.6 Training Progress Tracking
+### Training Types
 
 ```rust
 pub struct TrainingJobStatus {
@@ -1460,311 +360,996 @@ pub struct TrainingJobStatus {
     pub intent_distribution: BTreeMap<String, u64>,
     pub warnings: Vec<String>,
 }
-
-pub enum JobState {
-    Queued,
-    Processing,
-    Completed,
-    Failed,
+pub struct UnifiedTrainingReport {
+    pub dialogue_id: String,
+    pub turns_processed: u32,
+    pub units_built: u64,
+    pub entities_extracted: u64,
+    pub anchors_detected: u64,
+    pub classification_outcome: Option<TrainingOutcome>,
+    pub validation_errors: Vec<TrainingValidationError>,
+    pub core_target_staged: bool,
+    pub corroboration_count: u32,
+    pub channels_populated: Vec<String>,
 }
 ```
 
 ---
 
-## 11. API Specifications
+## 5. Configuration System
 
-### 11.1 REST API
+All configuration is defined in `src/config/mod.rs` and loaded from `config/config.yaml`. The top-level struct is `EngineConfig`.
 
-**Base URL:** `http://localhost:8080/api/v1`
+### EngineConfig Fields
 
-#### POST /query
+| Field | Config Key | Type |
+|-------|-----------|------|
+| `builder` | `layer_2_unit_builder` | `UnitBuilderConfig` |
+| `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` |
+| `retrieval` | `layer_9_retrieval_gating` | `RetrievalThresholds` |
+| `evidence_merge` | `layer_13_evidence_merge` | `EvidenceMergeConfig` |
+| `scoring` | `layer_14_candidate_scoring` | `ScoringWeights` |
+| `trust` | `layer_19_trust_heuristics` | `TrustConfig` |
+| `intent` | `intent` | `IntentConfig` |
+| `adaptive_behavior` | `adaptive_behavior` | `AdaptiveBehaviorConfig` |
+| `governance` | `layer_21_memory_governance` | `GovernanceConfig` |
+| `memory_budgets` | `memory_budgets` | `MemoryBudgetConfig` |
+| `document` | `document` | `DocumentIngestionConfig` |
+| `query` | `layer_10_query_builder` | `QueryBuilderConfig` |
+| `retrieval_io` | `layer_11_retrieval` | `RetrievalIoConfig` |
+| `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
+| `telemetry` | `layer_20_telemetry` | `TelemetryConfig` |
+| `training_phases` | `training_phases` | `TrainingPhaseOverridesConfig` |
+| `source_policies` | `source_policies` | `SourcePoliciesConfig` |
+| `silent_training` | `silent_training` | `SilentTrainingConfig` |
+| `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` |
+| `auto_inference` | `auto_inference` | `AutoInferenceConfig` |
+| `gpu` | `gpu` | `GpuConfig` |
+| `multi_engine` | `multi_engine` | `MultiEngineConfig` |
+| `config_sweep` | `config_sweep` | `ConfigSweepConfig` |
+| `classification` | `classification` | `ClassificationConfig` |
 
-Submit a query to the engine.
+### Key Thresholds Reference
 
-**Request:**
-```json
-{
-    "query": "What is the capital of France?",
-    "context": ["Previous conversation context..."]
-}
+| Threshold | Config Path | Default | Purpose |
+|-----------|-------------|---------|---------|
+| Evidence answer confidence | `resolver.evidence_answer_confidence_threshold` | 0.22 | Minimum for evidence answers |
+| Min confidence floor | `resolver.min_confidence_floor` | 0.22 | Minimum candidate score |
+| Intent floor | `intent.intent_floor_threshold` | 0.40 | Minimum intent score |
+| Entropy threshold | `retrieval.entropy_threshold` | 0.85 | High entropy triggers retrieval |
+| Freshness threshold | `retrieval.freshness_threshold` | 0.65 | Stale context triggers retrieval |
+| Retrieval decision | `retrieval.decision_threshold` | 1.1 | Combined score for retrieval |
+| Min source trust | `trust.min_source_trust` | 0.35 | Minimum trust for sources |
+| Prune utility | `governance.prune_utility_threshold` | 0.12 | Utility floor to avoid pruning |
+| Anchor salience | `governance.anchor_salience_threshold` | 0.70 | Salience for anchor status |
+| Pollution similarity | `governance.pollution_similarity_threshold` | 0.65 | Jaccard similarity gate |
+| Pollution overlap | `governance.pollution_overlap_threshold` | 0.70 | Overlap ratio for pollution |
+| Reasoning trigger floor | `auto_inference.reasoning_loop.trigger_confidence_floor` | 0.40 | Below this triggers reasoning |
+| Reasoning exit | `auto_inference.reasoning_loop.exit_confidence_threshold` | 0.60 | Above this exits reasoning |
+| Stochastic floor | `auto_inference.creative_spark.global_stochastic_floor` | 0.15 | 15% non-greedy sampling |
+| Classification low confidence | `classification.low_confidence_threshold` | 0.40 | Below → ambiguous |
+| Classification high confidence | `classification.high_confidence_threshold` | 0.85 | Above → Deterministic upgrade |
+
+### Adaptive Behavior — Intent Profiles
+
+Ten named profiles with tuned scoring weights, escape profiles, and resolver settings:
+
+| Profile | Resolver Mode | Temperature | Stochastic Jump | Beam Width |
+|---------|--------------|-------------|-----------------|------------|
+| `casual` | Exploratory | 0.70 | 0.20 | 7 |
+| `explanatory` | Balanced | 0.30 | 0.10 | 5 |
+| `factual` | Deterministic | 0.10 | 0.05 | 3 |
+| `procedural` | Balanced | 0.22 | 0.08 | 4 |
+| `creative` | Exploratory | 0.75 | 0.22 | 6 |
+| `brainstorm` | Exploratory | 0.90 | 0.35 | 10 |
+| `plan` | Balanced | 0.35 | 0.12 | 5 |
+| `act` | Balanced | 0.25 | 0.08 | 4 |
+| `critique` | Balanced | 0.30 | 0.10 | 5 |
+| `advisory` | Balanced | 0.26 | 0.09 | 4 |
+
+Two trust profiles: `default` (trust=0.50, corroboration=2, no HTTPS) and `high_stakes` (trust=0.30, corroboration=4, HTTPS required).
+
+### Source Policies
+
+Per-format ingestion policies:
+
+| Policy | Extraction Mode | Memory Type | Trust Bonus | Decay Days |
+|--------|----------------|-------------|-------------|------------|
+| `seed_training` | field_select | Core | +0.30 | 30 |
+| `html` | readability | Episodic | 0.00 | 7 |
+| `qa_json` | field_select | Episodic | +0.10 | 14 |
+| `structured_json` | entity_extract | Core | +0.20 | — |
+| `plain_text` | passthrough | Episodic | +0.10 | 30 |
+| `code` | code_strip | Episodic | 0.00 | 14 |
+| `wikipedia_xml` | article_text | Episodic | +0.10 | 30 |
+| `wikidata_truthy` | entity_extract | Core | +0.20 | — |
+| `openapi_spec` | entity_extract | Core | +0.20 | — |
+| `common_crawl_wet` | readability | Episodic | 0.00 | 7 |
+
+### Memory Budget Tiers
+
+| Stage | Episodic | Core | Candidate Pool | Daily Growth |
+|-------|----------|------|----------------|--------------|
+| ColdStart | 50 MB | 10 MB | 20 MB | 10 MB |
+| Growth | 100 MB | 50 MB | 30 MB | 5 MB |
+| Stable | 50 MB | 100 MB | 10 MB | 1 MB |
+
+---
+
+## 6. Engine Pipeline
+
+### Entry Points
+
+1. **`process(text)`** — Main inference entry point. Handles:
+   - Inline document requests (file path detection → document loading via `document.rs`)
+   - Mathematical expression evaluation
+   - Intent-based short-circuits (Forget clears session, Continue resumes, social intents)
+   - Session document follow-up queries (`answer_question` with carry terms)
+   - Personal memory lookup (for Question, Verify, Extract, Explain intents)
+   - Falls through to `process_prompt()` for full pipeline
+
+2. **`process_with_retrieval(text, retrieval_enabled)`** — Explicit retrieval override
+
+3. **`train()` / `train_batch()` / `train_with_scope()`** — Training entry points (see Section 12)
+
+### `process_prompt()` — Full Pipeline
+
+```
+Input: text, optional local_documents, preset_sources, allow_retrieval flag
+
+[L1]  Normalize input → InputPacket (ingest_raw)
+[L2]  Build units via rolling hash → BuildOutput                     ⏱ record(2)
+[L3]  Organize hierarchy → UnitHierarchy (Char..Pattern levels)
+[L4]  Ingest hierarchy into MemoryStore → active_ids
+      Publish memory snapshot (lock-free via ArcSwap)
+
+[L5]  Route active units through 3D semantic space → RoutingResult   ⏱ record(5)
+      Update unit positions, connect neighbors (trust=0.35)
+
+[L6]  Prepare context matrix and sequence state from snapshot
+[L7]  Resolve intent profile via ClassificationCalculator
+[L8]  Resolve adaptive runtime settings from intent profile
+      Route candidate units with escape profile
+
+      Retrieve reasoning support from Reasoning memory channel
+      Merge reasoning unit IDs into candidate pool
+
+[L14] Initial candidate scoring (GPU-accelerated)
+[L9]  Assess retrieval need via IntentDetector::assess               ⏱ record(9)
+
+      --- Conditional Retrieval Path ---
+[L10] Build safe query (PII stripped, expanded)
+[L11] Fetch from external sources via RetrievalPipeline              ⏱ record(11)
+[L12] Validate trust of retrieved documents
+[L13] Merge evidence with candidates                                 ⏱ record(13)
+      --- End Conditional Retrieval ---
+
+      OR: If local_documents provided, merge directly (no L10/L11)
+
+[L14] Final candidate scoring (7-dimensional, GPU-accelerated)       ⏱ record(14)
+      Filter out Char-level units when higher-level units exist
+
+[L15] Select resolver mode:
+      - Retrieval used OR ambiguous OR negative certainty_bias → Balanced
+      - Otherwise → Deterministic
+
+[L16] Fine resolve with intent shaping and anchor protection         ⏱ record(16)
+      FineResolver::select_with_shaping uses anchor_trust_threshold
+      Fallback: first candidate with Deterministic mode
+
+[Reasoning] If auto_inference.reasoning_loop.enabled:
+      execute_reasoning_loop (confidence-gated, max 3 steps)
+
+[L17] Decode output:
+      - Retrieval failed → real-time query message OR "couldn't find" message
+      - Evidence available + Extract intent → list_evidence_answer / grounded_evidence_answer
+      - Evidence available + other intent → grounded_evidence_answer / answer_question
+      - reshape_output_for_intent applies intent-specific formatting
+
+[L21] Update sequence state (recent unit IDs, anchors, task entities)
+      Run maintenance if memory > train_memory_ceiling_kb OR every 5 turns
+
+[L18] Generate feedback events via FeedbackController::learn
+      Enqueue feedback for background worker
+
+      Build ExplainTrace, record test observation
+[L20] Emit TelemetryEvent::Calculation (layer=0, total duration)
+
+      Return ProcessResult
 ```
 
-**Response:**
-```json
-{
-    "answer": "The capital of France is Paris.",
-    "confidence": 0.85,
-    "intent": "Factual",
-    "tone": "NeutralProfessional",
-    "trace_id": "uuid-here"
-}
-```
+### Intent Resolution Flow
 
-### 8.2 OpenAI-Compatible API
+`resolve_intent_profile()` delegates entirely to `ClassificationCalculator`:
 
-**Base URL:** `http://localhost:8080/v1`
-
-#### POST /chat/completions
-
-OpenAI Chat Completions API compatibility.
-
-**Request:**
-```json
-{
-    "model": "spse-default",
-    "messages": [
-        {"role": "user", "content": "What is the capital of France?"}
-    ],
-    "stream": false
-}
-```
-
-**Note:** `temperature`, `top_p`, `max_tokens` are **ignored**. Auto-Mode only.
-
-**Response:**
-```json
-{
-    "id": "chatcmpl-uuid",
-    "object": "chat.completion",
-    "created": 1234567890,
-    "model": "spse-default",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "The capital of France is Paris."
-            },
-            "finish_reason": "stop"
-        }
-    ],
-    "usage": {
-        "prompt_tokens": 10,
-        "completion_tokens": 8,
-        "total_tokens": 18
+```rust
+fn resolve_intent_profile(&self, raw_input, ..) -> IntentProfile {
+    let result = self.classification_calculator.calculate(
+        raw_input, &memory, &spatial, &self.config.classification,
+    );
+    IntentProfile {
+        primary: result.intent,
+        confidence: result.confidence,
+        ambiguous: result.confidence < config.classification.low_confidence_threshold,
+        reasons: vec![format!("classification_method={:?}", result.method)],
+        ..
     }
 }
 ```
 
-### 8.3 Streaming SSE
+### Reasoning Support from Memory
 
-**Request:**
-```json
-{
-    "model": "spse-default",
-    "messages": [...],
-    "stream": true
-}
-```
-
-**Response (SSE):**
-```
-data: {"id":"chatcmpl-uuid","choices":[{"delta":{"content":"The"},"index":0}]}
-
-data: {"id":"chatcmpl-uuid","choices":[{"delta":{"content":" capital"},"index":0}]}
-
-data: {"id":"chatcmpl-uuid","choices":[{"delta":{"content":" of"},"index":0}]}
-
-data: [DONE]
-```
+Before candidate scoring, the engine queries the Reasoning channel for prior reasoning patterns:
+- `snapshot.top_channel_matches(MemoryChannel::Reasoning, &normalized, 12)` — top 12 matches
+- Takes first 8, computes average of (utility + confidence + trust) / 3
+- Contributes 20% of reasoning confidence to `merged.evidence_support`
+- Reasoning unit IDs are added to the candidate pool
 
 ---
 
-## 9. Telemetry & Observability
+## 7. Classification System
 
-### 9.1 Telemetry Events
+Located in `src/classification/` with four submodules: `signature`, `pattern`, `calculator`, `trainer`.
+
+### Architecture Alignment
+
+| Layer | Role |
+|-------|------|
+| L2 | `ClassificationSignature` as specialized unit feature |
+| L4 | `ClassificationPattern` stored in Intent memory channel |
+| L6 | Spatial query for O(log N) pattern retrieval |
+| L14 | Similarity scoring and candidate aggregation |
+| L18 | Feedback-driven learning and spatial adjustment |
+
+### ClassificationSignature (`classification/signature.rs`)
+
+A 14-float CPU-efficient feature vector computed from raw text in microseconds:
+
+| Category | Features | Count |
+|----------|----------|-------|
+| Structural | `byte_length_norm`, `sentence_entropy`, `token_count_norm` | 3 |
+| Punctuation | `question_mark_ratio`, `exclamation_ratio`, `period_ratio` | 3 |
+| Semantic | `semantic_centroid[0..3]` (via `SemanticHasher`) | 3 |
+| Derived | `urgency_score`, `formality_score`, `technical_score`, `domain_hint`, `temporal_cue` | 5 |
+
+`SemanticHasher` produces a deterministic 3D position from text using character-level hashing — no embedding model needed.
+
+### ClassificationPattern (`classification/pattern.rs`)
+
+Stored in Intent memory channel as a specialized Unit:
+
+```rust
+pub struct ClassificationPattern {
+    pub unit_id: Uuid,
+    pub signature: ClassificationSignature,
+    pub intent_kind: IntentKind,
+    pub tone_kind: ToneKind,
+    pub resolver_mode: ResolverMode,
+    pub success_count: u64,            // L18: successful predictions
+    pub failure_count: u64,            // L18: failed predictions
+    pub last_reinforced: DateTime<Utc>,
+    pub domain: Option<String>,
+    pub memory_channels: Vec<MemoryChannel>, // Always includes Intent
+}
+```
+
+### ClassificationCalculator (`classification/calculator.rs`)
+
+Feature weights (configurable via `ClassificationConfig`):
+- Structure: 0.25
+- Punctuation: 0.20
+- Semantic: 0.35
+- Derived: 0.20
+
+Calculation flow:
+1. Compute `ClassificationSignature` from input text
+2. Query `SpatialGrid` for nearby patterns within `spatial_query_radius` (0.5)
+3. If no spatial matches, fall back to `MemoryStore` keyword matching
+4. Compute weighted cosine similarity between input and each pattern signature
+5. Aggregate votes weighted by similarity × (success / (success + failure))
+6. Return `ClassificationResult` with intent, tone, resolver_mode, confidence
+
+### ClassificationTrainer (`classification/trainer.rs`)
+
+Iterative training from labeled seed dialogues (`LabeledDialogue` / `LabeledTurn`):
+- Converts dialogues to `ClassificationPattern` instances
+- Inserts patterns into spatial grid and memory store
+- Runs validation iterations adjusting spatial positions
+- Tracks per-iteration accuracy via `IterationReport`
+- Final report via `FinalReport` with overall accuracy and pattern count
+
+---
+
+## 8. Memory Architecture
+
+### Memory Store (`src/memory/store.rs`)
+
+SQLite-backed storage managing:
+- **Units** — persistent semantic elements with full metadata
+- **Candidates** — observation-stage units awaiting promotion
+- **Channels** — isolated memory lanes (Main, Intent, Reasoning)
+- **Sequence state** — recent unit IDs, anchors, task entities, turn index
+
+Key operations:
+- `ingest_hierarchy()` — channel-aware unit ingestion from L3 output
+- `ingest_hierarchy_with_channels()` — explicit channel targeting (used by reasoning)
+- `update_positions()` — apply L5 spatial routing results
+- `connect_units()` — create links between neighboring units
+- `run_maintenance()` — L21 governance cycle (prune, promote, detect pollution)
+- `audit_pollution()` — scan for duplicate/degraded units
+- `snapshot()` — create immutable `MemorySnapshot` for lock-free reads
+
+### Memory Types
+
+| Type | Behavior |
+|------|----------|
+| `Episodic` | Decays after `episodic_decay_days` (30); pruned by governance |
+| `Core` | Permanent; requires corroboration for promotion from Episodic |
+
+### Memory Channels
+
+| Channel | Purpose | Isolation Rules |
+|---------|---------|-----------------|
+| `Main` | Primary content storage | All user content defaults here |
+| `Intent` | Classification patterns | Blocked from Core promotion (`intent_channel_core_promotion_blocked: true`) |
+| `Reasoning` | Internal reasoning thoughts | Process units with `is_process_unit: true` |
+
+### Memory Snapshot (Lock-Free Read Path)
+
+```
+Write path: memory.lock() → modify → publish_memory_snapshot() → ArcSwap::store()
+Read path:  memory_snapshot.load_full() → Arc<MemorySnapshot> (no lock)
+```
+
+Provides: `all_units()`, `get_units()`, `top_units()`, `sequence_state()`, `memory_summary()`, `top_channel_matches()`
+
+### Candidate Lifecycle
+
+```
+Observation → Candidate → Validated → Active → (pruned or promoted to Core)
+                                    → Rejected
+```
+
+Maturity-stage-dependent thresholds:
+
+| Stage | Unit Threshold | Observation Threshold | Discovery Frequency | Discovery Utility |
+|-------|---------------|----------------------|--------------------|--------------------|
+| ColdStart | < 1,000 | 2 | 1 | 0.18 |
+| Growth | 1,000–10,000 | 3 | 2 | 0.28 |
+| Stable | > 10,000 | 4 | 3 | 0.42 |
+
+### Pollution Detection
+
+1. Normalize content and compute overlap ratio between unit pairs
+2. Apply Jaccard similarity gate (`pollution_similarity_threshold`: 0.65)
+3. Compare quality (utility × confidence × trust) — lower quality = pollutant
+4. Apply `pollution_penalty_factor` (0.25) or purge
+5. Min content length for detection: `pollution_min_length` (4 chars)
+
+### Anchor System
+
+Units earn anchor status when:
+- `frequency >= anchor_reuse_threshold` (3)
+- `salience_score >= anchor_salience_threshold` (0.70)
+
+Anchors are protected from pruning for `anchor_protection_grace_days` (14 days).
+
+### Bloom Filter (`src/bloom_filter.rs`)
+
+`UnitBloomFilter` for O(1) probabilistic membership testing:
+- 3 hash functions, 10× expected items bit count (minimum 1024 bits)
+- Tracks `BloomStats`: queries, maybe_hits, false_positives
+- Used for fast duplicate detection during unit ingestion
+
+### Dynamic Memory Allocator (`src/memory/dynamic.rs`)
+
+On-demand allocation for reasoning buffers:
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `base_memory_limit_mb` | 350 | Idle memory limit |
+| `max_memory_limit_mb` | 550 | Limit during reasoning |
+| `thought_buffer_size_kb` | 64 | Per reasoning step |
+
+- `DynamicMemoryAllocator` uses atomic counters for lock-free tracking
+- `ReasoningGuard` — RAII guard that allocates on creation, releases on drop
+- `ThoughtBuffer` — capacity-limited buffer; rejects additions when full
+
+---
+
+## 9. Dynamic Reasoning
+
+### Trigger Mechanism
+
+Reasoning is **not a user toggle** — triggered automatically when:
+1. `reasoning_loop.enabled` is true (default: true)
+2. Initial confidence from L16 is below `trigger_confidence_floor` (0.40)
+3. `IntentDetector::should_trigger_reasoning(intent, config)` returns true
+
+### Execution Loop
+
+```
+for step in 0..max_internal_steps (default 3):
+    1. Try adapt_reasoning_pattern() from Reasoning channel
+       → Top 5 patterns by similarity, best match adapted
+       → Anchor boost: +0.15; non-anchor: +0.10; plus similarity × 0.2
+    2. Fallback: generate_thought_unit()
+       → Confidence improvement: 0.1 × (1.0 - previous).min(0.3)
+    3. Ingest thought into Reasoning channel as Episodic unit
+       → MemoryType::Episodic, channels: [Reasoning]
+       → NOT Core memory (prevents pollution)
+    4. Track confidence trajectory
+    5. Exit early if confidence >= exit_confidence_threshold (0.60)
+```
+
+### Output
+
+```rust
+ReasoningResult {
+    output: OutputType::FinalAnswer(String),
+    steps_taken: usize,
+    final_confidence: f32,
+    reasoning_triggered: bool,
+    thoughts: Vec<ThoughtUnit>,
+}
+```
+
+`ThoughtUnit` contains: `content`, `step` index, `confidence`, `created_at`.
+
+---
+
+## 10. GPU Acceleration
+
+Located in `src/gpu/`, entirely behind `#[cfg(feature = "gpu")]`.
+
+### Technology
+
+- **Backend**: `wgpu` (cross-platform: macOS Metal, Linux Vulkan, Windows DX12, WebAssembly)
+- **Initialization**: Lazy global device via `once_cell::sync::Lazy`
+- **Fallback**: Transparent CPU path when feature disabled or GPU unavailable
+
+### GPU Operations
+
+| Component | File | Shader(s) |
+|-----------|------|-----------|
+| `GpuCandidateScorer` | `compute/candidate_scorer.rs` | `candidate_scoring.wgsl` |
+| `GpuForceLayout` | `compute/force_layout.rs` | `force_attractive.wgsl`, `force_repulsive.wgsl` |
+| `GpuDistanceCalculator` | `compute/distance.rs` | `distance.wgsl` |
+| GPU Evidence Merge | `compute/evidence_merge.rs` | `evidence_merge.wgsl` |
+| GPU Classification | `compute/classification.rs` | `classification_similarity.wgsl`, `classification_aggregation.wgsl` |
+| GPU Intent Scorer | `compute/intent_scorer.rs` | `intent_scorer.wgsl` |
+| GPU Tone Detector | `compute/tone_detector.rs` | `tone_detector.wgsl` |
+
+Minimum thresholds: `min_candidates_for_gpu`: 256, `min_units_for_gpu_layout`: 100.
+
+### Configuration (`GpuConfig`)
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `enabled` | true | Enable GPU acceleration |
+| `force_cpu` | false | Override to CPU-only |
+| `power_preference` | "high" | GPU power preference |
+| `min_memory_mb` | 512 | Minimum GPU memory required |
+| `batch_size` | 1024 | Batch size for GPU ops |
+| `timeout_ms` | 5000 | GPU operation timeout |
+| `use_for_scoring` | true | GPU candidate scoring |
+| `use_for_layout` | true | GPU force layout |
+| `use_for_distance` | true | GPU distance calc |
+
+### CPU Fallback
+
+```rust
+#[cfg(not(feature = "gpu"))]
+pub fn is_gpu_available() -> bool { false }
+```
+
+`score_candidates_gpu_accelerated()` in `layers/search.rs` automatically uses CPU when GPU is unavailable.
+
+---
+
+## 11. Telemetry & Observability
+
+Located in `src/telemetry/` with five submodules.
+
+### Module Map
+
+| Module | Exports | Purpose |
+|--------|---------|---------|
+| `worker.rs` | `TelemetryWorker`, `TelemetryEvent`, `SqliteHotStore`, `AppendOnlyLog` | Async background event emission |
+| `hot_store.rs` | `HotStore`, `HotStoreConfig`, `ReasoningStepRecord` | Dedicated SQLite store for real-time UI queries |
+| `latency.rs` | `LatencyMonitor`, `LatencyTimer`, `LayerLatencyMetrics` | Per-layer p50/p95/p99 sliding window |
+| `trace.rs` | `TraceContext`, `SessionId`, `TraceId` | Session/trace ID management |
+| `test_observer.rs` | `TestObserver` | Structured observation during tests |
+
+### TelemetryEvent Variants
 
 ```rust
 pub enum TelemetryEvent {
-    // Layer events
-    Calculation { layer: u8, operation: String, duration_ms: u64 },
-    DbPush { unit_id: Uuid, memory_type: MemoryType },
-    Retrieval { source: String, results: usize },
-    
-    // NEW: Reasoning events
-    ReasoningStep { step: usize, thought: String, confidence: f32 },
-    ConfidenceTrajectory { steps: Vec<f32> },
-    ReasoningTriggered { trigger_reason: String },
-    
-    // Intent events
-    IntentLabel { label: IntentKind, channel: MemoryChannel, score: f32 },
-    ToneInferred { tone: ToneKind, signals: HashMap<String, f32> },
+    Calculation { layer: u8, operation: String, duration_ms: u64, session_id, trace_id },
+    DbPush { unit_id: Uuid, memory_type: String, session_id, trace_id },
+    Retrieval { source: String, results: usize, session_id, trace_id },
+    MorphAction { action: String, before: String, after: String, session_id, trace_id },
+    IntentLabel { label: String, channel: String, score: f32, session_id, trace_id },
+    ReasoningStep { step: usize, thought: String, confidence: f32, session_id, trace_id },
+    LatencySpike { layer: u8, latency_ms: u64, threshold_ms: u64, session_id, trace_id },
+    MemoryAllocation { allocated_kb: usize, total_kb: usize, limit_kb: usize, session_id, trace_id },
+    ProcessAnchorProtected { unit_id: Uuid, structure_hash: u64, utility_score: f32, session_id, trace_id },
 }
 ```
 
-### 9.2 Hot/Cold Storage
+### TelemetryWorker
 
-| Storage | Type | Retention | Use Case |
-|---------|------|-----------|----------|
-| Hot | SQLite | Last 10,000 events | Real-time UI, debugging |
-| Cold | Append-only file | Indefinite | Long-term analysis |
+- **Architecture**: Background thread with `SyncSender` channel (capacity: `channel_capacity`, default 10000)
+- **Hot store**: `SqliteHotStore` — WAL-mode SQLite for real-time queries, indexed by session_id/trace_id/timestamp
+- **Cold store**: `AppendOnlyLog` — append-only file for long-term archival
+- **Batching**: Events buffered in batches of `batch_size` (100) or flushed every `flush_interval_ms` (100ms)
+- **Sampling**: `sample_rate` (1.0) for high-frequency event filtering
 
----
+### HotStore
 
-## 10. Deployment Architecture
+- SQLite with WAL mode, `PRAGMA synchronous = NORMAL`, `cache_size = -64000`
+- `max_events`: 100,000 (older events pruned every `prune_interval_secs`: 300s)
+- Stores `ReasoningStepRecord` for reasoning step queries
 
-### 10.1 Single-Process Deployment
+### LatencyMonitor
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      SINGLE PROCESS                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ API Server  │  │   Engine    │  │  Background Tasks   │  │
-│  │ (Axum)      │  │  (Core)     │  │  (Training, Prune)  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│                          │                                   │
-│              ┌───────────┼───────────┐                       │
-│              ▼           ▼           ▼                       │
-│        ┌─────────┐ ┌─────────┐ ┌─────────┐                   │
-│        │ SQLite  │ │ Memory  │ │ Config  │                   │
-│        │ (Disk)  │ │ (RAM)   │ │ (YAML)  │                   │
-│        └─────────┘ └─────────┘ └─────────┘                   │
-└─────────────────────────────────────────────────────────────┘
-```
+- Per-layer sliding window (size: `window_size`, default 1000)
+- Calculates p50, p95, p99 percentiles
+- Alert threshold: `alert_threshold_ms` (200ms) — emits `LatencySpike` event when exceeded
+- `LatencyTimer` — RAII guard that records duration on drop
 
-**MVP Communication Note:** The API server, engine core, and background tasks communicate through a shared memory directory and append-only event log. No direct RPC is required for MVP deployment, which keeps coordination simple in the single-process design.
+### TraceContext
 
-### 10.2 Resource Requirements
-
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| RAM | 2GB | 4GB |
-| CPU | Dual-Core 1.2GHz | Quad-Core 2.0GHz |
-| Storage | 500MB + data | 1GB + data |
-| OS | Linux, macOS, Windows | Linux, macOS |
+- `SessionId` — persists across a user session
+- `TraceId` — per-query identifier, rotated via `start_new_trace()`
+- Both are `Uuid`-based
 
 ---
 
-## 11. Security Considerations
+## 12. Training Pipeline & Seed Generation
 
-### 11.1 Data Privacy
+### Training Pipeline (`src/training.rs`)
 
-- **On-device processing:** All data stays on device
-- **No cloud dependencies:** No external API calls without user consent
-- **Encrypted storage:** SQLite database encrypted at rest (optional)
+#### Training Phases
 
-### 11.2 Input Validation
+| Phase | Purpose | Memory Delta | Growth Limit |
+|-------|---------|-------------|--------------|
+| `DryRun` | Validate pipeline end-to-end | 5.0 MB | 50 MB/day |
+| `Bootstrap` | Initial knowledge seeding | 5.0 MB | 50 MB/day |
+| `Validation` | Quality gate verification | 2.0 MB | 10 MB/day |
+| `Expansion` | Broad knowledge ingestion | 0.5 MB | 1 MB/day |
+| `Lifelong` | Continuous learning | 0.5 MB | 1 MB/day |
 
-- **PII stripping:** Layer 10 strips PII from external queries
-- **Injection prevention:** Safe query construction prevents SQL/code injection
-- **Trust validation:** Layer 12 validates all external sources
+Expansion phase requires: `min_unit_discovery_efficiency ≥ 0.90`, `min_semantic_routing_accuracy ≥ 0.85`.
 
-### 11.3 Trust Heuristics
+#### Training Plan
 
 ```rust
-pub struct TrustHeuristics {
-    min_source_trust: f32,           // 0.35 minimum
-    allowlist: Vec<String>,          // Trusted domains
-    blocklist: Vec<String>,          // Blocked domains
-    require_https: bool,             // true
+pub struct TrainingPlan {
+    pub phases: Vec<TrainingPhasePlan>,
 }
+pub struct TrainingPhasePlan {
+    pub phase: TrainingPhaseKind,
+    pub batches_target: usize,
+    pub sources: Vec<TrainingSource>,
+    pub options: TrainingOptions,
+    pub min_unit_discovery_efficiency: Option<f32>,
+    pub min_semantic_routing_accuracy: Option<f32>,
+}
+```
+
+Plans are built via `build_training_plan_with_config()` which reads `EngineConfig` to determine scope (Full, DryRun) and execution mode (User, Development).
+
+#### Training Methods
+
+| Method | Purpose |
+|--------|---------|
+| `train()` | Full training, User execution mode |
+| `train_with_scope(mode, scope)` | Explicit scope (Full/DryRun) |
+| `train_batch(request)` | Single-batch training from API/test harness |
+| `start_train()` | Returns job_id for async training (spawn in API handler) |
+| `run_phase0_dry_run()` | Validates pipeline + measures inference latency |
+
+#### DryRun Report
+
+`run_phase0_dry_run()` performs:
+1. Run training with `TrainingScope::DryRun`
+2. Warm inference path with probe query ("What does HIIT stand for?")
+3. Measure inference latency per token (byte-span equivalent, not whitespace)
+4. Check layout stability (no rollback warnings)
+
+```rust
+pub struct DryRunReport {
+    pub status: TrainingJobStatus,
+    pub snapshot_path: String,
+    pub snapshot_readable: bool,
+    pub map_stable: bool,
+    pub inference_ok: bool,               // non-empty + < 200ms/token
+    pub inference_latency_ms: u128,
+    pub latency_per_token_ms: u128,
+    pub query_result: String,
+    pub memory_summary: String,
+}
+```
+
+#### Parallel Training
+
+```yaml
+silent_training:
+  parallel:
+    enabled: true
+    worker_count: 0                      # Auto-detect CPU cores
+    queue_capacity: 64
+    commit_batch_size: 8
+    commit_flush_interval_ms: 250
+    total_memory_limit_mb: 2560.0
+    non_worker_memory_reserve_mb: 1280.0
+    local_shard_soft_limit_mb: 96.0
+    local_shard_hard_limit_mb: 128.0
+```
+
+#### HuggingFace Streaming
+
+Adaptive batch sizing for streaming from HuggingFace datasets:
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `initial_rows_per_pull` | 100 | Starting batch size |
+| `min_rows_per_pull` | 100 | Floor |
+| `max_rows_per_pull` | 300 | Ceiling |
+| `fast_pull_threshold_ms` | 1,200 | Increase batch if faster |
+| `slow_pull_threshold_ms` | 3,500 | Decrease batch if slower |
+| `max_retries` | 6 | Retry count with exponential backoff |
+| `retry_max_delay_ms` | 15,000 | Maximum retry delay |
+
+### Seed Dataset Generation (`src/seed/`)
+
+#### Unified Training Example Format
+
+```rust
+pub struct TrainingExample {
+    pub question: String,
+    pub answer: String,
+    pub context: Option<String>,
+    pub reasoning: Option<ReasoningTrace>,
+    pub intent: Option<String>,
+    pub entities: Vec<String>,
+    pub channels: Vec<MemoryChannel>,
+    pub curriculum: CurriculumMetadata,
+    pub quality_gates: QualityGates,
+}
+```
+
+#### Generators
+
+| Generator | File | Purpose |
+|-----------|------|---------|
+| `EntityGenerator` | `seed/entity_generator.rs` | Produces entity-based QA datasets |
+| `DialogueGenerator` | `seed/dialogue_generator.rs` | Produces multi-turn dialogue datasets |
+| `generate_dryrun_datasets()` | `seed/dryrun.rs` | Generates DryRun validation datasets |
+
+### Open Source Catalog (`src/open_sources.rs`)
+
+Pre-defined open data sources:
+
+| Source | Category | License | Default Memory | Integration |
+|--------|----------|---------|----------------|-------------|
+| Wikidata | core_kb | CC0 | Core | wikidata_truthy, wikidata_search |
+| Wikipedia | core_kb | CC-BY-SA | Core | wikipedia_dump, url |
+| DBpedia | core_kb | CC-BY-SA/ODbL | Core | dbpedia_dump, url |
+| Project Gutenberg | literature | Public Domain | Episodic | gutenberg_text |
+| Common Crawl | web_text | Various | Episodic | common_crawl_wet |
+
+Each source defines: `id`, `label`, `category`, `license`, `default_type`, `default_memory`, `default_batch_size`, `default_chunk_char_limit`.
+
+---
+
+## 13. API Specifications
+
+Located in `src/api.rs` and `src/api/openai_compat.rs`.
+
+### REST API Routes
+
+| Method | Path | Handler | Purpose |
+|--------|------|---------|---------|
+| POST | `/api/v1/train/batch` | `train_batch` | Submit batch training job |
+| GET | `/api/v1/train/status/:job_id` | `training_status` | Poll training job status |
+| GET | `/api/v1/status` | `auto_mode_status` | Engine status + auto-mode indicator |
+| POST | `/v1/chat/completions` | `openai_compat::chat_completions` | OpenAI-compatible chat endpoint |
+| GET | `/v1/models` | `openai_compat::list_models` | OpenAI-compatible model listing |
+
+### Content Negotiation
+
+- **JSON** (default): `application/json`
+- **Protobuf**: `application/x-protobuf` — uses `prost::Message` for `proto/api.proto` definitions
+
+### ApiState
+
+```rust
+pub struct ApiState {
+    pub engine: Arc<Engine>,
+    pub auto_mode_config: AutoModeConfig,
+}
+```
+
+### Training Request Flow
+
+1. Client POSTs to `/api/v1/train/batch` with `TrainRequest` (JSON or Protobuf)
+2. Only `mode: "silent"` is accepted; other modes return 400
+3. Request is converted to `TrainBatchRequest` with sources and options
+4. Engine spawns async training, returns `AcceptedJob { job_id }`
+5. Client polls `/api/v1/train/status/:job_id` for `TrainingJobStatus`
+
+### OpenAI Compatibility (`api/openai_compat.rs`)
+
+- `/v1/chat/completions` — accepts OpenAI-format messages, routes through `engine.process()`
+- `/v1/models` — lists available model identifiers
+- Auto-mode enforcement: `ignore_mode_parameter`, `ignore_temperature_parameter`, etc. per `AutoModeConfig`
+
+---
+
+## 14. Priority Scheduler
+
+Located in `src/scheduler.rs`.
+
+### Work Priorities
+
+```rust
+pub enum WorkPriority {
+    Inference,            // Highest — user-facing queries
+    InteractiveTraining,  // User-initiated training
+    SilentBatch,          // Background batch training
+    Maintenance,          // Lowest — governance, cleanup
+}
+```
+
+### PriorityScheduler
+
+- **Mechanism**: `Mutex<SchedulerState>` + `Condvar` for blocking acquisition
+- **Preemption**: Higher-priority work blocks lower-priority acquisition
+- **Starvation prevention**: Queued tasks wait only while higher-priority tasks are active or queued
+- **Tracking**: Per-priority queued + active counts via `QueueDepths`
+
+```rust
+pub struct QueueDepths {
+    pub inference: usize,
+    pub interactive_training: usize,
+    pub silent_batch: usize,
+    pub maintenance: usize,
+}
+```
+
+### WorkPermit
+
+RAII guard — decrements active count and wakes waiting threads on drop.
+
+---
+
+## 15. Security & Trust
+
+### Layer 12/19: Trust Assessment (`layers/safety.rs`)
+
+Trust scoring formula per source:
+```
+trust = default_source_trust (0.50)
+      + https_bonus (0.10)          if HTTPS
+      + allowlist_bonus (0.10)      if domain in allowlist
+      - parser_warning_penalty (0.20) if parser warnings
+      + corroboration_bonus (0.08)  per corroborating source
+      + format_trust_adjustments    per detected format
+```
+
+Format trust adjustments:
+- `html_raw`: -0.30
+- `qa_json_schema_keys`: -0.40
+- `structured_entity`: +0.20
+- `code_syntax`: -0.10
+
+### Content Quality Thresholds
+
+| Threshold | Default | Purpose |
+|-----------|---------|---------|
+| `min_readability_score` | 0.60 | Minimum readability |
+| `max_boilerplate_ratio` | 0.40 | Maximum boilerplate content |
+| `min_unique_words_ratio` | 0.30 | Minimum vocabulary diversity |
+
+### Promotion Rules
+
+- **Block patterns**: JSON schema keys (`question:`, `answer:`), bare punctuation
+- **Allow patterns**: Natural language text ≥ 20 chars with alphabetic content
+
+### PII Stripping (Layer 10)
+
+`SafeQueryBuilder::build()` in `layers/query.rs` strips PII before external queries.
+Aggressiveness level: configurable via `query.pii_stripping_aggressiveness` (default: "standard").
+
+### Allowlist Domains
+
+Default trusted domains: wikimedia.org, wikipedia.org, wikidata.org, archive.org, ncbi.nlm.nih.gov, pmc.ncbi.nlm.nih.gov, nominatim.openstreetmap.org, openstreetmap.org, dbpedia.org, gutenberg.org.
+
+---
+
+## 16. Directory Structure
+
+```
+spse_engine/
+├── src/
+│   ├── main.rs                    # CLI entry point
+│   ├── lib.rs                     # Library exports (24 public modules)
+│   ├── engine.rs                  # Core Engine struct + 21-layer pipeline
+│   ├── types.rs                   # All core type definitions (~1278 lines)
+│   ├── config/
+│   │   └── mod.rs                 # EngineConfig + all sub-configs (~2758 lines)
+│   ├── layers/
+│   │   ├── mod.rs                 # Layer module exports
+│   │   ├── input.rs               # L1: Input normalization
+│   │   ├── builder.rs             # L2: Rolling hash unit discovery
+│   │   ├── hierarchy.rs           # L3: Level grouping
+│   │   ├── router.rs              # L5: 3D spatial routing
+│   │   ├── context.rs             # L6: Context matrix
+│   │   ├── intent.rs              # L7/L9: Intent detection + retrieval gating
+│   │   ├── query.rs               # L10: Safe query building
+│   │   ├── retrieval.rs           # L11: External retrieval
+│   │   ├── safety.rs              # L12/L19: Trust validation
+│   │   ├── merge.rs               # L13: Evidence merging
+│   │   ├── search.rs              # L14: 7D candidate scoring
+│   │   ├── resolver.rs            # L16: Fine resolution + shaping
+│   │   ├── output.rs              # L17: Output decoding
+│   │   └── feedback.rs            # L18: Learning events
+│   ├── memory/
+│   │   ├── mod.rs
+│   │   ├── store.rs               # L4/L21: MemoryStore + governance
+│   │   └── dynamic.rs             # DynamicMemoryAllocator + ThoughtBuffer
+│   ├── telemetry/
+│   │   ├── mod.rs
+│   │   ├── worker.rs              # TelemetryWorker + event types
+│   │   ├── hot_store.rs           # HotStore (SQLite WAL)
+│   │   ├── latency.rs             # LatencyMonitor (p50/p95/p99)
+│   │   ├── trace.rs               # TraceContext (SessionId/TraceId)
+│   │   └── test_observer.rs       # TestObserver
+│   ├── classification/
+│   │   ├── mod.rs
+│   │   ├── signature.rs           # 14-float feature vector
+│   │   ├── pattern.rs             # ClassificationPattern (Intent channel)
+│   │   ├── calculator.rs          # Weighted vote aggregation
+│   │   └── trainer.rs             # Iterative training from seed data
+│   ├── gpu/
+│   │   ├── mod.rs                 # Feature-gated GPU module
+│   │   ├── device.rs              # GpuDevice initialization
+│   │   ├── compute/
+│   │   │   ├── mod.rs
+│   │   │   ├── candidate_scorer.rs
+│   │   │   ├── classification.rs
+│   │   │   ├── distance.rs
+│   │   │   ├── evidence_merge.rs
+│   │   │   ├── force_layout.rs
+│   │   │   ├── intent_scorer.rs
+│   │   │   └── tone_detector.rs
+│   │   └── shaders/               # WGSL compute shaders
+│   │       ├── candidate_scoring.wgsl
+│   │       ├── classification_aggregation.wgsl
+│   │       ├── classification_similarity.wgsl
+│   │       ├── distance.wgsl
+│   │       ├── evidence_merge.wgsl
+│   │       ├── force_attractive.wgsl
+│   │       ├── force_repulsive.wgsl
+│   │       ├── intent_scorer.wgsl
+│   │       └── tone_detector.wgsl
+│   ├── common/
+│   │   ├── mod.rs
+│   │   ├── scoring.rs             # ScoreUtils
+│   │   ├── matching.rs            # KeywordMatcher
+│   │   ├── selection.rs           # TopKSelector
+│   │   ├── similarity.rs          # SimilarityUtils
+│   │   └── dedup.rs               # DedupUtils
+│   ├── api/
+│   │   └── openai_compat.rs       # OpenAI-compatible endpoints
+│   ├── seed/
+│   │   ├── mod.rs                 # TrainingExample + CurriculumMetadata
+│   │   ├── entity_generator.rs    # Entity-based QA datasets
+│   │   ├── dialogue_generator.rs  # Multi-turn dialogue datasets
+│   │   └── dryrun.rs              # DryRun validation datasets
+│   ├── bin/
+│   │   ├── benchmark_eval.rs      # Benchmark evaluation
+│   │   ├── crash_drill.rs         # Crash resilience drills
+│   │   ├── drill_harness.rs       # Drill execution harness
+│   │   ├── pollution_dev.rs       # Pollution detection development tool
+│   │   ├── pollution_dev_lib.rs   # Pollution dev support library
+│   │   ├── stress_drill.rs        # Stress testing drills
+│   │   ├── test_harness.rs        # Config sweep harness
+│   │   └── zero_shot_harness.rs   # Zero-shot scenario testing
+│   ├── api.rs                     # REST API router (axum)
+│   ├── bloom_filter.rs            # UnitBloomFilter
+│   ├── document.rs                # Document processing (PDF, DOCX, text)
+│   ├── open_sources.rs            # Open data source catalog
+│   ├── persistence.rs             # SQLite persistence layer
+│   ├── scheduler.rs               # PriorityScheduler (4 priorities)
+│   ├── spatial_index.rs           # SpatialGrid for O(log N) queries
+│   ├── region_index.rs            # Regional spatial index
+│   ├── training.rs                # Training pipeline orchestration
+│   ├── drill_lib.rs               # Drill framework
+│   ├── stress_drill_lib.rs        # Stress testing drills
+│   └── crash_drill_lib.rs         # Crash resilience drills
+├── config/
+│   ├── config.yaml                # Main configuration file
+│   ├── profiles.json              # Profile manifest
+│   ├── layer_20_schema.json       # L20 telemetry JSON schema
+│   └── profiles/                  # Profile overrides (12 YAML files)
+│       ├── balanced.yaml
+│       ├── deterministic.yaml
+│       ├── confidence_heavy.yaml
+│       └── ...
+├── proto/
+│   └── api.proto                  # Protobuf API definitions
+├── tests/
+│   ├── integration.rs             # Integration tests
+│   ├── config_harness_assets_test.rs
+│   ├── config_sweep_test.rs
+│   ├── gpu_fallback_test.rs
+│   └── layer_boundary_tests.rs
+├── test_data/
+│   ├── large_corpus/              # Test corpus files (14 text files)
+│   ├── controlled_story_dataset.json
+│   └── zero_shot_scenarios.json
+├── scripts/
+│   ├── analyze_results.py
+│   ├── analyze_observations.py
+│   ├── audit_pollution.py
+│   ├── drill_corpus_generator.py
+│   ├── generate_large_corpus.py
+│   ├── test_data_generator.py
+│   └── zero_shot_harness.py
+├── docs/
+│   ├── SPSE_ARCHITECTURE_V11.1.md # This document
+│   ├── CONFIG_TUNING_GUIDE.md
+│   ├── DATASET_GENERATION_GUIDE.md
+│   ├── PRE_PRODUCTION_EXECUTION_PLAN.md
+│   ├── PRE_PRODUCTION_TRAINING_PLAN.md
+│   └── finalized_architecture_documentation_revised_v11.docx
+├── web-ui/                        # Next.js web UI
+│   ├── app/
+│   ├── components/
+│   ├── package.json
+│   └── next.config.js
+├── Cargo.toml
+├── Cargo.lock
+├── build.rs
+├── AGENTS.md                      # Architecture compliance guide
+└── README.md
+
 ```
 
 ---
 
-## 12. Performance Targets
+## 17. Appendices
 
-### 12.1 Latency Targets
-
-| Query Type | TTFT | Total Latency | RAM |
-|------------|------|---------------|-----|
-| Simple | < 100ms | < 200ms | ~350MB |
-| Complex | 500ms-2s | 1-5s | ~550MB |
-
-### 12.2 Throughput Targets
-
-| Metric | Target |
-|--------|--------|
-| Queries/second (simple) | 10+ |
-| Queries/second (complex) | 1-2 |
-| Concurrent sessions | 5+ |
-
-### 12.3 Memory Targets
-
-| State | Target |
-|-------|--------|
-| Idle | ~350MB |
-| Reasoning | ~550MB |
-| Peak | < 600MB |
-
-### 12.4 Evaluation Assumptions
-
-These targets assume an average workload of roughly 200 queries/day, average query length of 50-100 tokens, and an external retrieval rate of approximately 20%. Memory growth, telemetry volume, and cache behavior should be re-baselined if real-world usage materially exceeds those assumptions.
-
----
-
-## 13. Implementation Roadmap
-
-### Phase 1: Creative Mode & Hybrid Intent Profiles ✅ COMPLETE
-
-- Intent-specific config profiles
-- Hybrid intent score validation
-- MemoryChannel::Intent gate validation
-
-### Phase 2: Drill Suite & Pollution Integration ✅ COMPLETE
-
-- Layer-specific drill suite
-- Unified stress drill
-- Snapshot atomicity & recovery
-
-### Phase 3: LLM-Like Core (HIGHEST PRIORITY) - 4-5 weeks
-
-1. **Dynamic Reasoning Type** - Confidence-gated reasoning loop
-2. **Controlled Creative Spark** - 15% stochastic floor with anchor validation
-3. **Internal Tone Inference** - Multi-signal tone detection
-4. **Auto-Mode Enforcement** - Remove all user toggles
-5. **LLM-Like Core Drills** - Comprehensive drill coverage
-
-### Phase 4: Core Infrastructure - 2-3 weeks
-
-1. **Global Logging Engine** - Telemetry with reasoning trace
-2. **Latency Monitoring** - p50/p95/p99 tracking
-3. **Dynamic Memory Allocation** - On-demand thought buffer
-
-### Phase 5: Retrieval & Optimization - 2-3 weeks
-
-1. **Multi-Engine Consensus** - Aggregate multiple sources
-2. **Config Sweeping** - Optimize for low-spec hardware
-
-### Phase 6: User Interface - 2-3 weeks
-
-1. **Web UI** - Auto-Mode interface (no toggles)
-2. **OpenAI-Compatible API** - LLM replacement capability
-
-**Total Duration:** 19-24 weeks
-
----
-
-## 14. Risk Mitigation
-
-| Risk | Mitigation | Fallback |
-| :--- | :--- | :--- |
-| **Dynamic Reasoning Infinite Loop** | Max 3 steps enforced, confidence threshold check | Force final answer with partial reasoning |
-| **Creative Drift Factual Corruption** | Anchor validation gate re-samples greedily on contradiction | Disable drift for mathematical/identity queries |
-| **Auto-Mode Tone Misclassification** | Multi-signal tone detection (keywords + intent + history) | Default to NeutralProfessional on ambiguous signals |
-| **Memory Exhaustion on Low-Spec** | Dynamic allocation with hard limits (350MB base, 550MB max) | Skip reasoning, return direct answer with lower confidence |
-| **Telemetry Performance Overhead** | Async worker with batching, configurable sample rate | Reduce sample rate to 0.1 if needed |
-| **OpenAI API Incompatibility** | Comprehensive API compatibility test suite | Compatibility shims for missing behaviors |
-
----
-
-## Appendix A: Glossary
+### Appendix A: Glossary
 
 | Term | Definition |
-|------|------------|
-| **Unit** | A semantic unit of text with embedding, position, and metadata |
-| **Anchor** | A high-trust unit that should not be modified by creative drift |
-| **SilentThought** | An internal reasoning step not shown to the user |
-| **MemoryChannel** | Routing path for units (Core, Working, Intent) |
-| **StyleAnchor** | An exemplar text used to bias vocabulary selection |
+|------|-----------|
+| **Unit** | Atomic semantic element in memory — the fundamental building block |
+| **Anchor** | High-salience unit protected from pruning; factual reference point |
+| **Candidate** | Observation-stage unit that may be promoted to active |
+| **Channel** | Isolated memory lane (Main, Intent, Reasoning) |
+| **Episodic** | Memory type that decays over time |
+| **Core** | Permanent memory type requiring corroboration for promotion |
+| **Escape** | Stochastic jump in semantic routing to explore non-obvious candidates |
+| **Governance** | L21 maintenance cycle: pruning, promotion, pollution detection |
+| **Pollution** | Duplicate or degraded units that lower memory quality |
+| **Shaping** | Intent-specific output formatting and anchor protection |
+| **StyleAnchor** | Exemplar text used to bias vocabulary selection |
 | **TTFT** | Time To First Token |
 | **Mode C** | Unified Auto+Reasoning architecture with dynamic switching |
+| **SPS** | Semantic Processing System — the tokenizer-free approach |
+| **ThoughtUnit** | Internal reasoning artifact stored in Reasoning channel |
+| **DryRun** | Phase 0 validation pipeline that tests end-to-end readiness |
 
----
+### Appendix B: References
 
-## Appendix B: References
-
-- `AGENTS.md` - Architecture compliance guide
-- `config/config.yaml` - Main configuration file
-- `README.md` - Project overview
-- `docs/PRE_PRODUCTION_EXECUTION_PLAN.md` - Implementation roadmap
+- `AGENTS.md` — Architecture compliance guide and coding standards
+- `config/config.yaml` — Main configuration file
+- `README.md` — Project overview
+- `docs/CONFIG_TUNING_GUIDE.md` — Configuration tuning guide
+- `docs/DATASET_GENERATION_GUIDE.md` — Dataset generation specifications
+- `docs/PRE_PRODUCTION_EXECUTION_PLAN.md` — Implementation roadmap
+- `docs/PRE_PRODUCTION_TRAINING_PLAN.md` — Training plan

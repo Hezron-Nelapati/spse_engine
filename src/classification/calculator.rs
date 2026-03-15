@@ -50,10 +50,6 @@ impl ClassificationCalculator {
         }
     }
     
-    /// Minimum pattern count to justify GPU dispatch overhead
-#[cfg(feature = "gpu")]
-const GPU_THRESHOLD: usize = 64;
-
 /// Main calculation entry point.
     /// Returns classification result with intent, tone, resolver mode, and confidence.
     /// Uses GPU acceleration when available, falls back to CPU otherwise.
@@ -83,11 +79,11 @@ const GPU_THRESHOLD: usize = 64;
         }
         
         // CPU fallback (original implementation)
-        const GPU_THRESHOLD: usize = 64;
         
         // Try GPU acceleration if available and pattern count justifies overhead
         #[cfg(feature = "gpu")]
         {
+            const GPU_THRESHOLD: usize = 64;
             if crate::gpu::is_gpu_available() && candidate_ids.len() >= GPU_THRESHOLD {
                 if let Some(gpu_calc) = crate::gpu::compute::get_gpu_classifier() {
                     // Fetch patterns from memory
@@ -106,19 +102,6 @@ const GPU_THRESHOLD: usize = 64;
         }
         
         // CPU fallback (original implementation)
-        self.calculate_cpu_with_signature(&query_sig, &candidate_ids, memory, spatial, config)
-    }
-    
-    /// CPU implementation of classification calculation.
-    fn calculate_cpu(
-        &self,
-        text: &str,
-        memory: &MemoryStore,
-        spatial: &SpatialGrid,
-        config: &ClassificationConfig,
-    ) -> ClassificationResult {
-        let query_sig = ClassificationSignature::compute(text, &self.semantic_hasher);
-        let candidate_ids = spatial.nearby(query_sig.semantic_centroid, config.spatial_query_radius);
         self.calculate_cpu_with_signature(&query_sig, &candidate_ids, memory, spatial, config)
     }
     
@@ -243,7 +226,7 @@ const GPU_THRESHOLD: usize = 64;
         // Select max with confidence
         let (intent, intent_score) = self.max_score(intent_scores);
         let (tone, tone_score) = self.max_score(tone_scores);
-        let (resolver, resolver_score) = self.max_score(resolver_scores);
+        let (resolver, _resolver_score) = self.max_score(resolver_scores);
         
         // Overall confidence is average of intent and tone scores
         let confidence = (intent_score + tone_score) / 2.0;
@@ -363,7 +346,6 @@ impl Default for ClassificationCalculator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::ClassificationPattern;
     use crate::config::ClassificationConfig;
     use crate::memory::MemoryStore;
     use crate::spatial_index::SpatialGrid;

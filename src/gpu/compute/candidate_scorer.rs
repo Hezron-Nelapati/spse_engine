@@ -4,10 +4,10 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, Buffer, BindGroup, BindGroupLayout, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, BindGroupDescriptor, BindingType, ShaderStages, BufferBindingType, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{Device, Queue, BindGroupLayout, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, BindingType, ShaderStages, BufferBindingType, ShaderModuleDescriptor, ShaderSource};
 
 use crate::config::ScoringWeights;
-use crate::types::{Unit, ScoredCandidate, ScoreBreakdown, ContextMatrix, SequenceState, MergedState, MemoryType};
+use crate::types::{Unit, ScoredCandidate, ScoreBreakdown, ContextMatrix, SequenceState, MergedState};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
 use once_cell::sync::Lazy;
@@ -345,7 +345,7 @@ pub fn score_candidates(
                     .into_iter()
                     .zip(candidates.iter())
                     .map(|(result, unit)| {
-                        let uuid = uuid::Uuid::from_u128(
+                        let _uuid = uuid::Uuid::from_u128(
                             (result.unit_id_high as u128) << 32 | result.unit_id_low as u128
                         );
                         ScoredCandidate {
@@ -459,7 +459,7 @@ fn context_match(lowered: &str, context: &ContextMatrix) -> f32 {
     }
 }
 
-fn evidence_match(lowered: &str, merged: &MergedState) -> f32 {
+fn evidence_match(_lowered: &str, merged: &MergedState) -> f32 {
     // Use evidence_support as proxy for evidence match
     if merged.evidence_support > 0.5 {
         0.8
