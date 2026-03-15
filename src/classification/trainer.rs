@@ -314,6 +314,20 @@ pub struct LabeledDialogue {
     pub metadata: DialogueMetadata,
 }
 
+/// Expected unit counts per level for validation
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExpectedUnitCount {
+    /// Expected phrase-level units
+    #[serde(default)]
+    pub phrase: Option<u32>,
+    /// Expected sentence-level units
+    #[serde(default)]
+    pub sentence: Option<u32>,
+    /// Expected word-level units
+    #[serde(default)]
+    pub word: Option<u32>,
+}
+
 /// Labeled turn in a dialogue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LabeledTurn {
@@ -321,6 +335,31 @@ pub struct LabeledTurn {
     pub role: String,
     /// Turn content
     pub content: String,
+    /// Expected entities to be extracted (for core training validation)
+    #[serde(default)]
+    pub expected_entities: Vec<String>,
+    /// Expected anchor phrases (for Layer 8 anchor validation)
+    #[serde(default)]
+    pub expected_anchors: Vec<String>,
+    /// Expected unit counts per level (for Layer 2 validation)
+    #[serde(default)]
+    pub expected_unit_count: ExpectedUnitCount,
+    /// Source quality hint for trust scoring (assistant turns)
+    #[serde(default)]
+    pub source_quality: Option<f32>,
+}
+
+/// Memory target for core training (Layer 21 compliance)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryTarget {
+    /// Staging episodic - high utility, requires corroboration for Core promotion
+    #[default]
+    StagingEpisodic,
+    /// Direct to Core (only via consolidate_immediately or explicit corroboration)
+    Core,
+    /// Standard episodic memory
+    Episodic,
 }
 
 /// Dialogue metadata.
@@ -330,6 +369,107 @@ pub struct DialogueMetadata {
     pub domain: Option<String>,
     /// Complexity level
     pub complexity: String,
+    /// Target memory type (Core requires Layer 21 corroboration gate)
+    #[serde(default)]
+    pub memory_target: MemoryTarget,
+    /// Memory channels to route to (Layer 4)
+    #[serde(default)]
+    pub channels: Vec<String>,
+    /// Minimum corroboration count for Core promotion (default 2 per Appendix B5)
+    #[serde(default = "default_corroboration_threshold")]
+    pub corroboration_threshold: u32,
+}
+
+fn default_corroboration_threshold() -> u32 {
+    2
+}
+
+/// Convert from dialogue_generator::Dialogue to LabeledDialogue for unified training
+impl From<&crate::seed::Dialogue> for LabeledDialogue {
+    fn from(dialogue: &crate::seed::Dialogue) -> Self {
+        use crate::types::{IntentKind, ToneKind, ResolverMode};
+        
+        // Parse intent string to enum (default to Unknown if invalid)
+        let intent = match dialogue.intent.as_str() {
+            "Greeting" => IntentKind::Greeting,
+            "Gratitude" => IntentKind::Gratitude,
+            "Farewell" => IntentKind::Farewell,
+            "Help" => IntentKind::Help,
+            "Clarify" => IntentKind::Clarify,
+            "Rewrite" => IntentKind::Rewrite,
+            "Verify" => IntentKind::Verify,
+            "Continue" => IntentKind::Continue,
+            "Forget" => IntentKind::Forget,
+            "Question" => IntentKind::Question,
+            "Summarize" => IntentKind::Summarize,
+            "Explain" => IntentKind::Explain,
+            "Compare" => IntentKind::Compare,
+            "Extract" => IntentKind::Extract,
+            "Analyze" => IntentKind::Analyze,
+            "Plan" => IntentKind::Plan,
+            "Act" => IntentKind::Act,
+            "Recommend" => IntentKind::Recommend,
+            "Classify" => IntentKind::Classify,
+            "Translate" => IntentKind::Translate,
+            "Debug" => IntentKind::Debug,
+            "Critique" => IntentKind::Critique,
+            "Brainstorm" => IntentKind::Brainstorm,
+            _ => IntentKind::Unknown,
+        };
+        
+        // Parse tone (default to NeutralProfessional)
+        let expected_tone = dialogue.expected_tone
+            .as_ref()
+            .and_then(|t| match t.as_str() {
+                "Casual" => Some(ToneKind::Casual),
+                "NeutralProfessional" => Some(ToneKind::NeutralProfessional),
+                "Technical" => Some(ToneKind::Technical),
+                "Formal" => Some(ToneKind::Formal),
+                "Direct" => Some(ToneKind::Direct),
+                "Empathetic" => Some(ToneKind::Empathetic),
+                _ => None,
+            })
+            .unwrap_or(ToneKind::NeutralProfessional);
+        
+        // Parse resolver mode (default to Balanced)
+        let resolver_mode = dialogue.resolver_mode
+            .as_ref()
+            .and_then(|r| match r.as_str() {
+                "Deterministic" => Some(ResolverMode::Deterministic),
+                "Balanced" => Some(ResolverMode::Balanced),
+                "Exploratory" => Some(ResolverMode::Exploratory),
+                _ => None,
+            })
+            .unwrap_or(ResolverMode::Balanced);
+        
+        // Convert turns with extended fields
+        let turns = dialogue.turns.iter().map(|t| LabeledTurn {
+            role: t.role.clone(),
+            content: t.content.clone(),
+            expected_entities: t.expected_entities.clone(),
+            expected_anchors: t.expected_anchors.clone(),
+            expected_unit_count: t.expected_unit_count.clone(),
+            source_quality: t.source_quality,
+        }).collect();
+        
+        // Convert metadata with memory_target from dialogue
+        let metadata = DialogueMetadata {
+            domain: Some(dialogue.metadata.domain.clone()),
+            complexity: dialogue.metadata.complexity.clone(),
+            memory_target: dialogue.metadata.memory_target,
+            channels: dialogue.metadata.memory_channels.clone(),
+            corroboration_threshold: dialogue.metadata.corroboration_threshold,
+        };
+        
+        Self {
+            id: dialogue.id.clone(),
+            intent,
+            expected_tone,
+            resolver_mode,
+            turns,
+            metadata,
+        }
+    }
 }
 
 #[cfg(test)]

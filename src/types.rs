@@ -1137,3 +1137,55 @@ pub struct ReasoningResult {
     /// All thoughts generated (for telemetry)
     pub thoughts: Vec<ThoughtUnit>,
 }
+
+/// Validation error from unified training expected_* fields
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TrainingValidationError {
+    /// Field that failed validation
+    pub field: String,
+    /// Expected value
+    pub expected: String,
+    /// Actual value
+    pub actual: String,
+    /// Error category for Layer 18 feedback
+    pub category: ValidationErrorCategory,
+}
+
+/// Category of validation error for Layer 18 feedback routing
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationErrorCategory {
+    /// Unit building mismatch (Layer 2)
+    UnitFragmentation,
+    /// Anchor detection mismatch (Layer 8)
+    AnchorDetection,
+    /// Entity extraction mismatch
+    EntityExtraction,
+    /// Trust quality mismatch
+    TrustQuality,
+}
+
+/// Result of unified training dialogue ingestion
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct UnifiedTrainingReport {
+    /// Dialogue ID processed
+    pub dialogue_id: String,
+    /// Total turns processed
+    pub turns_processed: u32,
+    /// Units built from all turns
+    pub units_built: u64,
+    /// Entities extracted
+    pub entities_extracted: u64,
+    /// Anchors detected
+    pub anchors_detected: u64,
+    /// Classification training outcome (if classification training enabled)
+    pub classification_outcome: Option<crate::classification::TrainingOutcome>,
+    /// Validation errors from expected_* fields
+    pub validation_errors: Vec<TrainingValidationError>,
+    /// Whether memory_target: Core was treated as staging (Layer 21 compliance)
+    pub core_target_staged: bool,
+    /// Corroboration count for promoted units
+    pub corroboration_count: u32,
+    /// Memory channels populated
+    pub channels_populated: Vec<String>,
+}

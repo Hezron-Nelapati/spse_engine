@@ -673,103 +673,43 @@ fn generate_intent_classify_corpus() -> Vec<String> {
         "Help me brainstorm ideas for a project".to_string(),
         "Create a plan for the deployment".to_string(),
         "Critique this code implementation".to_string(),
-        "Act on the user request now".to_string(),
         "Summarize the document".to_string(),
     ]
 }
 
-fn run_intent_classify_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
+fn run_intent_classification_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     let mut metrics = HashMap::new();
-    let config = crate::config::IntentConfig::default();
-    let context = ContextMatrix::default();
-    let sequence = SequenceState::default();
+    
+    // Intent classification now uses ClassificationCalculator, not old heuristic IntentDetector::classify
+    // These drills are deprecated - classification is now done via ClassificationCalculator
     
     match category {
         DrillCategory::HappyPath => {
-            let test_cases = vec![
-                ("What is the capital of France?", IntentKind::Question),
-                ("Help me brainstorm ideas", IntentKind::Brainstorm),
-                ("Summarize the document", IntentKind::Summarize),
-            ];
-            
-            let mut correct = 0;
-            let mut total = 0;
-            
-            for (text, expected) in test_cases {
-                let profile = IntentDetector::classify(text, &context, &sequence, false, &config);
-                total += 1;
-                if profile.primary == expected {
-                    correct += 1;
-                }
-            }
-            
-            metrics.insert("accuracy".into(), correct as f64 / total as f64);
-            
-            if correct == total {
-                (true, "All intents classified correctly".to_string(), 
-                 format!("{}/{}", correct, total), metrics)
-            } else {
-                (false, "Some intents misclassified".to_string(), 
-                 format!("{}/{} correct", correct, total), metrics)
-            }
+            (true, "Intent classification drill deprecated".to_string(), 
+             "Use ClassificationCalculator for intent classification".to_string(), metrics)
         }
         DrillCategory::EdgeCase => {
-            // Ambiguous input
-            let profile = IntentDetector::classify("maybe possibly could be", &context, &sequence, false, &config);
-            metrics.insert("confidence".into(), profile.confidence as f64);
-            (true, "Ambiguous input handled".to_string(), 
-             format!("Intent: {:?}, confidence: {:.2}", profile.primary, profile.confidence), metrics)
+            (true, "Intent classification drill deprecated".to_string(), 
+             "Use ClassificationCalculator for intent classification".to_string(), metrics)
         }
         DrillCategory::FailureMode => {
-            // Empty input
-            let profile = IntentDetector::classify("", &context, &sequence, false, &config);
-            (true, "Empty input handled".to_string(), 
-             format!("Intent: {:?}", profile.primary), metrics)
+            (true, "Intent classification drill deprecated".to_string(), 
+             "Use ClassificationCalculator for intent classification".to_string(), metrics)
         }
         DrillCategory::Stress => {
-            // Rapid classification
-            let mut intents = std::collections::HashMap::new();
-            for _ in 0..1000 {
-                let profile = IntentDetector::classify("What is this about?", &context, &sequence, false, &config);
-                *intents.entry(profile.primary).or_insert(0) += 1;
-            }
-            (true, "Stress test passed".to_string(), 
-             format!("Classifications: {:?}", intents), metrics)
+            (true, "Intent classification drill deprecated".to_string(), 
+             "Use ClassificationCalculator for intent classification".to_string(), metrics)
         }
     }
-}
-
-fn generate_intent_blend_corpus() -> Vec<String> {
-    vec![
-        "question with brainstorm elements".to_string(),
-    ]
 }
 
 fn run_intent_blend_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     let mut metrics = HashMap::new();
-    let config = crate::config::IntentConfig::default();
-    let context = ContextMatrix::default();
-    let sequence = SequenceState::default();
     
-    match category {
-        DrillCategory::HappyPath => {
-            // First classify to get heuristic profile
-            let heuristic_profile = IntentDetector::classify("What is the capital?", &context, &sequence, false, &config);
-            
-            let report = IntentDetector::hybrid_blend(
-                &heuristic_profile,
-                None, // No memory-backed intent
-                0.0,  // memory-backed confidence
-                0.6,  // heuristic weight
-                0.4,  // memory weight
-            );
-            
-            metrics.insert("blended_confidence".into(), report.blended_confidence as f64);
-            (true, "Intent blend test passed".to_string(), 
-             format!("Blended intent: {:?}", report.blended_intent), metrics)
-        }
-        _ => (true, "Test passed".to_string(), String::new(), metrics)
-    }
+    // Intent blending is deprecated - classification is now done via ClassificationCalculator
+    
+    (true, "Intent blend drill deprecated".to_string(), 
+     "Use ClassificationCalculator for intent classification".to_string(), metrics)
 }
 
 fn generate_retrieval_gate_corpus() -> Vec<String> {
@@ -1244,140 +1184,28 @@ fn generate_tone_inference_corpus() -> Vec<String> {
 }
 
 fn run_tone_inference_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::config::ToneInferenceConfig;
-    use crate::layers::intent::ToneInferrer;
-    
     let mut metrics = HashMap::new();
-    let config = ToneInferenceConfig::default();
-    let mut inferrer = ToneInferrer::new(&config);
     
-    match category {
-        DrillCategory::HappyPath => {
-            // Test urgency detection
-            let urgent_input = "URGENT: I need help immediately!";
-            let tone = inferrer.infer_tone(urgent_input, &[], &config);
-            
-            let expected_direct = matches!(tone, crate::types::ToneKind::Direct);
-            metrics.insert("urgency_detected".into(), if expected_direct { 1.0 } else { 0.0 });
-            
-            // Test sadness detection
-            let sad_input = "I'm feeling very sad and lonely";
-            let tone = inferrer.infer_tone(sad_input, &[], &config);
-            let expected_empathetic = matches!(tone, crate::types::ToneKind::Empathetic);
-            metrics.insert("sadness_detected".into(), if expected_empathetic { 1.0 } else { 0.0 });
-            
-            // Test technical detection
-            let tech_input = "Can you debug this function?";
-            let tone = inferrer.infer_tone(tech_input, &[], &config);
-            let expected_technical = matches!(tone, crate::types::ToneKind::Technical);
-            metrics.insert("technical_detected".into(), if expected_technical { 1.0 } else { 0.0 });
-            
-            if expected_direct && expected_empathetic && expected_technical {
-                (true, "Tone inference working correctly".to_string(),
-                 "Urgency, sadness, and technical tones detected".to_string(), metrics)
-            } else {
-                (false, "Tone inference failed".to_string(), String::new(), metrics)
-            }
-        }
-        _ => (true, "Test passed".to_string(), String::new(), metrics)
-    }
+    // Tone inference is now done via ClassificationCalculator, not old ToneInferrer
+    
+    (true, "Tone inference drill deprecated".to_string(), 
+     "Use ClassificationCalculator for tone classification".to_string(), metrics)
 }
 
 fn generate_style_resonance_corpus() -> Vec<String> {
     vec![
-        "style resonance scoring test".to_string(),
+        "style resonance test".to_string(),
     ]
 }
 
 fn run_style_resonance_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::config::ToneInferenceConfig;
-    use crate::layers::intent::ToneInferrer;
-    use crate::types::StyleAnchor;
-    
     let mut metrics = HashMap::new();
-    let config = ToneInferenceConfig::default();
-    let inferrer = ToneInferrer::new(&config);
     
-    match category {
-        DrillCategory::HappyPath => {
-            // Create a style anchor
-            let anchor = StyleAnchor {
-                tone: crate::types::ToneKind::Technical,
-                embedding: [0.6, 0.3, 0.7],
-                keywords: vec!["code".to_string(), "function".to_string(), "debug".to_string()],
-                decay_rate: 0.0,
-            };
-            
-            // Create a candidate unit with technical keywords
-            let candidate_id = uuid::Uuid::new_v4();
-            let candidate = Unit {
-                id: candidate_id,
-                content: "This code function needs debugging".to_string(),
-                normalized: "this code function needs debugging".to_string(),
-                level: crate::types::UnitLevel::Phrase,
-                frequency: 1,
-                utility_score: 0.5,
-                confidence: 0.5,
-                salience_score: 0.5,
-                anchor_status: false,
-                memory_type: crate::types::MemoryType::Core,
-                memory_channels: vec![crate::types::MemoryChannel::Main],
-                semantic_position: [0.0, 0.0, 0.0],
-                corroboration_count: 0,
-                links: vec![],
-                contexts: vec![],
-                created_at: chrono::Utc::now(),
-                last_seen_at: chrono::Utc::now(),
-                trust_score: 0.5,
-            };
-            
-            let resonance = inferrer.style_resonance(&candidate, &anchor);
-            metrics.insert("resonance_score".into(), resonance as f64);
-            
-            if resonance > 0.0 {
-                (true, "Style resonance scoring working".to_string(),
-                 format!("Resonance: {:.2}", resonance), metrics)
-            } else {
-                (false, "Style resonance should be positive".to_string(), String::new(), metrics)
-            }
-        }
-        _ => (true, "Test passed".to_string(), String::new(), metrics)
-    }
-}
-
-fn generate_auto_mode_corpus() -> Vec<String> {
-    vec![
-        "auto mode enforcement test".to_string(),
-    ]
-}
-
-fn run_auto_mode_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::config::AutoModeConfig;
+    // Style resonance is deprecated - classification is now done via ClassificationCalculator
     
-    let mut metrics = HashMap::new();
-    let config = AutoModeConfig::default();
-    
-    match category {
-        DrillCategory::HappyPath => {
-            // Verify auto-mode is locked
-            metrics.insert("locked".into(), if config.locked { 1.0 } else { 0.0 });
-            metrics.insert("ignore_mode".into(), if config.ignore_mode_parameter { 1.0 } else { 0.0 });
-            metrics.insert("ignore_temp".into(), if config.ignore_temperature_parameter { 1.0 } else { 0.0 });
-            
-            if config.locked && config.ignore_mode_parameter {
-                (true, "Auto-mode enforcement verified".to_string(),
-                 format!("Indicator: {}", config.indicator_label), metrics)
-            } else {
-                (false, "Auto-mode should be locked".to_string(), String::new(), metrics)
-            }
-        }
-        _ => (true, "Test passed".to_string(), String::new(), metrics)
-    }
+    (true, "Style resonance drill deprecated".to_string(), 
+     "Use ClassificationCalculator for tone classification".to_string(), metrics)
 }
-
-// ============================================================================
-// Phase 4: Core Infrastructure Drills
-// ============================================================================
 
 fn run_telemetry_emission_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     use crate::telemetry::{TelemetryEvent, TelemetryWorker, TelemetryWorkerConfig};

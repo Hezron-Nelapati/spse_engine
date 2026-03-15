@@ -117,15 +117,23 @@ fn bootstrap_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
+    // Use generated high-density seed datasets for bootstrap training
+    let mut intent_source = source("dryrun_intent_core");
+    intent_source.stream.max_input_bytes = Some(3 * 1024 * 1024 * 1024); // 3GB limit
+    intent_source.stream.item_limit = Some(100_000);
+    intent_source.stream.batch_size = Some(500);
+    intent_source.stream.chunk_char_limit = Some(8_000);
+
+    let mut entity_source = source("dryrun_entity_seed");
+    entity_source.stream.max_input_bytes = Some(300 * 1024 * 1024); // 300MB limit
+    entity_source.stream.item_limit = Some(50_000);
+    entity_source.stream.batch_size = Some(500);
+    entity_source.stream.chunk_char_limit = Some(6_000);
+
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Bootstrap,
-        sources: curriculum_order(vec![
-            source("dolly_15k"),
-            source("gsm8k_train"),
-            source("wikidata"),
-            source("wikipedia"),
-        ]),
-        batches_target: 1,
+        sources: curriculum_order(vec![entity_source, intent_source]),
+        batches_target: 4,
         options: phase_options(config, execution_mode, &config.training_phases.bootstrap),
         min_unit_discovery_efficiency: config
             .training_phases
@@ -186,16 +194,23 @@ fn dry_run_phase(
     config: &EngineConfig,
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
-    let mut source = source("dolly_15k");
-    source.stream.max_input_bytes = Some(10 * 1024 * 1024);
-    source.stream.item_limit = Some(2_048);
-    source.stream.batch_size = Some(32);
-    source.stream.chunk_char_limit = Some(6_000);
+    // Use generated high-density seed datasets
+    let mut intent_source = source("dryrun_intent_core");
+    intent_source.stream.max_input_bytes = Some(3 * 1024 * 1024 * 1024); // 3GB limit
+    intent_source.stream.item_limit = Some(100_000);
+    intent_source.stream.batch_size = Some(500);
+    intent_source.stream.chunk_char_limit = Some(8_000);
+
+    let mut entity_source = source("dryrun_entity_seed");
+    entity_source.stream.max_input_bytes = Some(300 * 1024 * 1024); // 300MB limit
+    entity_source.stream.item_limit = Some(50_000);
+    entity_source.stream.batch_size = Some(500);
+    entity_source.stream.chunk_char_limit = Some(6_000);
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::DryRun,
-        sources: vec![source],
-        batches_target: 1,
+        sources: vec![entity_source, intent_source],
+        batches_target: 4,
         options: phase_options(config, execution_mode, &config.training_phases.dry_run),
         min_unit_discovery_efficiency: config.training_phases.dry_run.min_unit_discovery_efficiency,
         min_semantic_routing_accuracy: config.training_phases.dry_run.min_semantic_routing_accuracy,

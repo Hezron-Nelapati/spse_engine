@@ -2,7 +2,6 @@ use crate::config::{
     AdaptiveTrustProfile, EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
     ReasoningLoopConfig, RetrievalThresholds, ScoringWeights, TrustConfig,
 };
-use crate::datasets::{self, DatasetSinkControl, DatasetTextChunk, PreparationReport};
 use crate::document::{
     answer_question, is_supported_document_path, load_document_bytes,
     load_documents_from_paths_with_config, load_path_content_with_config,
@@ -61,99 +60,6 @@ use uuid::Uuid;
 struct SessionDocuments {
     documents: Vec<RetrievedDocument>,
     query_state: DocumentQueryState,
-}
-
-#[derive(Default)]
-struct ChunkIngestionReport {
-    chunks_committed: u64,
-    activated_units_observed: u64,
-    new_units_discovered: u64,
-    reused_units_observed: u64,
-    candidate_observations: u64,
-    candidate_promotions: u64,
-    anchors_observed: u64,
-    map_adjustments: u64,
-    mean_displacement: f32,
-    cache_hits: u64,
-    cache_lookups: u64,
-    intent_counts: BTreeMap<String, u64>,
-}
-
-struct PreparedTrainingChunk {
-    context_label: String,
-    packet_summary: String,
-    hierarchy: UnitHierarchy,
-    activated_units_observed: u64,
-    anchors_observed: u64,
-    intent_key: Option<String>,
-}
-
-struct ShardTrainingResult {
-    shard_index: usize,
-    local_report: ChunkIngestionReport,
-    segments: Vec<ShardSegmentResult>,
-}
-
-struct ShardSegmentResult {
-    shard_index: usize,
-    segment_index: usize,
-    shard_db_path: PathBuf,
-    pattern_cache_hits: u64,
-    pattern_cache_lookups: u64,
-    pruning_report: crate::types::GovernanceReport,
-}
-
-#[derive(Default)]
-struct PhaseMetricAccumulator {
-    activated_units_observed: u64,
-    new_units_discovered: u64,
-    reused_units_observed: u64,
-    candidate_observations: u64,
-    candidate_promotions: u64,
-    map_adjustments: u64,
-    anchors_observed: u64,
-    mean_displacement_sum: f32,
-    cache_hits: u64,
-    cache_lookups: u64,
-    chunks_seen: u64,
-}
-
-impl PhaseMetricAccumulator {
-    fn observe(&mut self, report: &ChunkIngestionReport) {
-        self.activated_units_observed += report.activated_units_observed;
-        self.new_units_discovered += report.new_units_discovered;
-        self.reused_units_observed += report.reused_units_observed;
-        self.candidate_observations += report.candidate_observations;
-        self.candidate_promotions += report.candidate_promotions;
-        self.map_adjustments += report.map_adjustments;
-        self.anchors_observed += report.anchors_observed;
-        self.mean_displacement_sum += report.mean_displacement;
-        self.cache_hits += report.cache_hits;
-        self.cache_lookups += report.cache_lookups;
-        self.chunks_seen += report.chunks_committed.max(1);
-    }
-
-    fn finalize(&self, memory_delta_kb: i64) -> TrainingMetrics {
-        let activated = self.activated_units_observed.max(1) as f32;
-        let new_unit_rate = (self.new_units_discovered as f32 / activated).clamp(0.0, 1.0);
-        let unit_discovery_efficiency =
-            (self.reused_units_observed as f32 / activated).clamp(0.0, 1.0);
-        let mean_displacement = if self.chunks_seen == 0 {
-            0.0
-        } else {
-            self.mean_displacement_sum / self.chunks_seen as f32
-        };
-        let semantic_routing_accuracy = (1.0 / (1.0 + mean_displacement)).clamp(0.0, 1.0);
-
-        TrainingMetrics {
-            new_unit_rate,
-            unit_discovery_efficiency,
-            semantic_routing_accuracy,
-            prediction_error: new_unit_rate,
-            memory_delta_kb,
-            search_trigger_precision: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -781,47 +687,8 @@ impl Engine {
     ) -> TrainingJobStatus {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
         let job_id = format!("train_{}", Uuid::new_v4().simple());
-        let plan = match self.resolve_training_plan_sources(
-            training::build_training_plan_with_config(&self.config, execution_mode, scope),
-            scope,
-        ) {
-            Ok(plan) => plan,
-            Err(err) => {
-                let mut status = TrainingJobStatus::queued(job_id, 0);
-                status.status = JobState::Failed;
-                status.warnings.push(format!("fatal:{err}"));
-                self.store_job(status.clone());
-                return status;
-            }
-        };
-        self.run_training_plan_with_id(job_id, plan).await
-    }
-
-    pub async fn prepare_training_sources(
-        &self,
-        execution_mode: TrainingExecutionMode,
-        scope: TrainingScope,
-    ) -> Result<PreparationReport, String> {
-        let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
         let plan = training::build_training_plan_with_config(&self.config, execution_mode, scope);
-        let mut report = PreparationReport {
-            scope: format!("{scope:?}").to_ascii_lowercase(),
-            ..PreparationReport::default()
-        };
-        let mut seen = std::collections::HashSet::new();
-
-        for source in plan.phases.iter().flat_map(|phase| phase.sources.iter()) {
-            let resolved = open_sources::resolve_training_source(source)?;
-            let record = datasets::prepare_training_source(&resolved).await?;
-            if seen.insert(record.key.clone()) {
-                report.sources.push(record);
-            }
-        }
-
-        report
-            .sources
-            .sort_by(|lhs, rhs| lhs.source_name.cmp(&rhs.source_name));
-        Ok(report)
+        self.run_training_plan_with_id(job_id, plan).await
     }
 
     pub async fn run_phase0_dry_run(&self, execution_mode: TrainingExecutionMode) -> DryRunReport {
@@ -892,24 +759,6 @@ impl Engine {
             query_result: result.predicted_text,
             memory_summary: self.memory_summary(),
         }
-    }
-
-    fn resolve_training_plan_sources(
-        &self,
-        mut plan: training::TrainingPlan,
-        scope: TrainingScope,
-    ) -> Result<training::TrainingPlan, String> {
-        for phase in &mut plan.phases {
-            for source in &mut phase.sources {
-                let resolved = open_sources::resolve_training_source(source)?;
-                *source = if matches!(scope, TrainingScope::HuggingFace) {
-                    datasets::localize_remote_capable_source(&resolved)?
-                } else {
-                    datasets::localize_prepared_source(&resolved)?
-                };
-            }
-        }
-        Ok(plan)
     }
 
     async fn process_prompt(
@@ -1508,1524 +1357,6 @@ impl Engine {
         }
     }
 
-    #[doc(hidden)]
-    pub async fn train_batch(&self, request: TrainBatchRequest) -> TrainingJobStatus {
-        let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
-        let job_id = format!("train_{}", Uuid::new_v4().simple());
-        self.run_train_batch_with_id(job_id, request).await
-    }
-
-    pub fn start_train(self: Arc<Self>, execution_mode: TrainingExecutionMode) -> String {
-        self.start_train_with_scope(execution_mode, TrainingScope::Full)
-    }
-
-    pub fn start_train_with_scope(
-        self: Arc<Self>,
-        execution_mode: TrainingExecutionMode,
-        scope: TrainingScope,
-    ) -> String {
-        let job_id = format!("train_{}", Uuid::new_v4().simple());
-        let plan = training::build_training_plan_with_config(&self.config, execution_mode, scope);
-        let total_sources = plan.phases.iter().map(|phase| phase.sources.len()).sum();
-        self.store_job(TrainingJobStatus::queued(job_id.clone(), total_sources));
-
-        let engine = self.clone();
-        let spawned_job_id = job_id.clone();
-        tokio::spawn(async move {
-            let _permit = engine.scheduler.acquire(WorkPriority::SilentBatch);
-            let _ = engine.run_training_plan_with_id(spawned_job_id, plan).await;
-        });
-
-        job_id
-    }
-
-    async fn run_training_plan_with_id(
-        &self,
-        job_id: String,
-        plan: training::TrainingPlan,
-    ) -> TrainingJobStatus {
-        let total_sources = plan.phases.iter().map(|phase| phase.sources.len()).sum();
-        let mut status = TrainingJobStatus::queued(job_id.clone(), total_sources);
-        status.status = JobState::Processing;
-        status.phase_statuses = plan
-            .phases
-            .iter()
-            .map(|phase| {
-                TrainingPhaseStatus::new(phase.phase, phase.batches_target, phase.sources.len())
-            })
-            .collect();
-        self.store_job(status.clone());
-
-        let mut total_elapsed = 0u128;
-        let mut completed_sources = 0usize;
-
-        for phase in &plan.phases {
-            if !self.phase_ready(phase, &status) {
-                if let Some(phase_status) = status
-                    .phase_statuses
-                    .iter_mut()
-                    .find(|entry| entry.phase == phase.phase)
-                {
-                    phase_status.status = JobState::Completed;
-                }
-                status.warnings.push(format!(
-                    "phase_skipped:{}:bootstrap_metrics_below_threshold",
-                    phase_label(phase.phase)
-                ));
-                self.store_job(status.clone());
-                continue;
-            }
-
-            status.active_phase = Some(phase.phase);
-            if let Some(phase_status) = status
-                .phase_statuses
-                .iter_mut()
-                .find(|entry| entry.phase == phase.phase)
-            {
-                phase_status.status = JobState::Processing;
-            }
-            self.store_job(status.clone());
-
-            let started = Instant::now();
-            self.run_training_phase(phase, &mut status).await;
-            total_elapsed += started.elapsed().as_millis();
-
-            if let Some(phase_status) = status
-                .phase_statuses
-                .iter()
-                .find(|entry| entry.phase == phase.phase)
-            {
-                completed_sources += phase_status.sources_processed;
-            }
-            status.progress.sources_processed = completed_sources;
-            status.progress.percent_complete =
-                (completed_sources as f32 / total_sources.max(1) as f32).clamp(0.0, 1.0);
-            self.store_job(status.clone());
-        }
-
-        status.active_phase = None;
-        status.status = if status
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("fatal:"))
-        {
-            JobState::Failed
-        } else {
-            JobState::Completed
-        };
-        status.performance.avg_ms_per_source = if total_sources == 0 {
-            0
-        } else {
-            (total_elapsed / total_sources as u128) as u64
-        };
-        self.store_job(status.clone());
-        status
-    }
-
-    async fn run_train_batch_with_id(
-        &self,
-        job_id: String,
-        request: TrainBatchRequest,
-    ) -> TrainingJobStatus {
-        let mut status = TrainingJobStatus::queued(job_id.clone(), request.sources.len());
-        status.status = JobState::Processing;
-        self.store_job(status.clone());
-
-        let memory_before = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.estimate_memory_kb()
-        };
-
-        let mut total_elapsed = 0u128;
-        let mut last_memory_kb = memory_before;
-        let mut phase_metrics = PhaseMetricAccumulator::default();
-        for (index, source) in request.sources.iter().enumerate() {
-            let started = Instant::now();
-            let should_halt = match self
-                .process_training_source(
-                    source,
-                    &request.options,
-                    &mut status,
-                    memory_before,
-                    &mut last_memory_kb,
-                    &mut phase_metrics,
-                )
-                .await
-            {
-                Ok(should_halt) => should_halt,
-                Err(err) if is_skippable_training_error(&err) => {
-                    status.warnings.push(format!(
-                        "skipped_source:{}:{}",
-                        training_source_label(source),
-                        err.trim_start_matches("fatal:")
-                    ));
-                    false
-                }
-                Err(err) => {
-                    status.warnings.push(err);
-                    false
-                }
-            };
-
-            total_elapsed += started.elapsed().as_millis();
-            status.progress.sources_processed = index + 1;
-            status.progress.percent_complete = (status.progress.sources_processed as f32
-                / status.progress.sources_total.max(1) as f32)
-                .clamp(0.0, 1.0);
-            self.store_job(status.clone());
-            if should_halt {
-                break;
-            }
-        }
-
-        if request.options.consolidate_immediately {
-            let report = {
-                let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                memory.run_maintenance(&self.config.governance)
-            };
-            self.publish_memory_snapshot();
-            status.learning_metrics.units_pruned += report.pruned_units;
-            status.learning_metrics.anchors_protected += report.anchors_protected;
-            status.learning_metrics.map_adjustments += report.layout_adjustments;
-            record_pruning_event(
-                &mut status.learning_metrics,
-                &report,
-                "batch_consolidation_maintenance",
-            );
-            if report.layout_rolled_back {
-                status.warnings.push("layout_rollback:batch".to_string());
-            }
-        }
-
-        status.status = if status.warnings.iter().any(|warning| {
-            warning.starts_with("fatal:") || warning == "daily_memory_limit_exceeded"
-        }) {
-            JobState::Failed
-        } else {
-            JobState::Completed
-        };
-        status.performance.avg_ms_per_source = if request.sources.is_empty() {
-            0
-        } else {
-            (total_elapsed / request.sources.len() as u128) as u64
-        };
-        self.store_job(status.clone());
-        status
-    }
-
-    async fn run_training_phase(&self, phase: &TrainingPhasePlan, status: &mut TrainingJobStatus) {
-        let phase_governance =
-            self.effective_phase_governance(phase.phase, phase.options.execution_mode);
-        self.apply_phase_governance(phase.phase, phase.options.execution_mode);
-        let memory_before = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.estimate_memory_kb()
-        };
-        let mut last_memory_kb = memory_before;
-        let mut metrics_accumulator = PhaseMetricAccumulator::default();
-        let mut processed_sources = 0usize;
-
-        for source in &phase.sources {
-            let should_halt = match self
-                .process_training_source(
-                    source,
-                    &phase.options,
-                    status,
-                    memory_before,
-                    &mut last_memory_kb,
-                    &mut metrics_accumulator,
-                )
-                .await
-            {
-                Ok(should_halt) => should_halt,
-                Err(err) if is_skippable_training_error(&err) => {
-                    status.warnings.push(format!(
-                        "skipped_source:{}:{}",
-                        training_source_label(source),
-                        err.trim_start_matches("fatal:")
-                    ));
-                    false
-                }
-                Err(err) => {
-                    status.warnings.push(err);
-                    false
-                }
-            };
-            processed_sources += 1;
-            if let Some(phase_status) = status
-                .phase_statuses
-                .iter_mut()
-                .find(|entry| entry.phase == phase.phase)
-            {
-                phase_status.sources_processed = processed_sources;
-            }
-            let completed_before_phase = status
-                .phase_statuses
-                .iter()
-                .filter(|entry| entry.phase != phase.phase)
-                .map(|entry| entry.sources_processed)
-                .sum::<usize>();
-            status.progress.sources_processed = completed_before_phase + processed_sources;
-            status.progress.percent_complete = (status.progress.sources_processed as f32
-                / status.progress.sources_total.max(1) as f32)
-                .clamp(0.0, 1.0);
-            status.progress.active_source = None;
-            status.progress.chunks_processed = 0;
-            status.progress.bytes_processed = 0;
-            status.progress.worker_count = 0;
-            status.progress.active_workers = 0;
-            status.progress.queued_chunks = 0;
-            status.progress.prepared_chunks = 0;
-            status.progress.committed_batches = 0;
-            self.store_job(status.clone());
-            if should_halt {
-                break;
-            }
-        }
-
-        if phase.options.consolidate_immediately {
-            let report = {
-                let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                memory.run_maintenance(&phase_governance)
-            };
-            self.publish_memory_snapshot();
-            status.learning_metrics.units_pruned += report.pruned_units;
-            status.learning_metrics.anchors_protected += report.anchors_protected;
-            status.learning_metrics.map_adjustments += report.layout_adjustments;
-            record_pruning_event(
-                &mut status.learning_metrics,
-                &report,
-                &format!("phase_consolidation:{}", phase_label(phase.phase)),
-            );
-            if report.layout_rolled_back {
-                status
-                    .warnings
-                    .push(format!("layout_rollback:{}", phase_label(phase.phase)));
-            }
-        }
-
-        let memory_after = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.estimate_memory_kb()
-        };
-        let mut phase_metrics = metrics_accumulator.finalize(memory_after - memory_before);
-        if matches!(phase.phase, TrainingPhaseKind::Validation) {
-            phase_metrics.search_trigger_precision = Some(
-                phase_metrics
-                    .unit_discovery_efficiency
-                    .min(phase_metrics.semantic_routing_accuracy),
-            );
-        }
-
-        if let Some(phase_status) = status
-            .phase_statuses
-            .iter_mut()
-            .find(|entry| entry.phase == phase.phase)
-        {
-            phase_status.batches_completed = 1;
-            phase_status.metrics = phase_metrics;
-            phase_status.status = JobState::Completed;
-        }
-        status.progress.active_source = None;
-        status.progress.chunks_processed = 0;
-        status.progress.bytes_processed = 0;
-        status.progress.worker_count = 0;
-        status.progress.active_workers = 0;
-        status.progress.queued_chunks = 0;
-        status.progress.prepared_chunks = 0;
-        status.progress.committed_batches = 0;
-        self.restore_runtime_governance();
-    }
-
-    fn phase_ready(&self, phase: &TrainingPhasePlan, status: &TrainingJobStatus) -> bool {
-        if !matches!(phase.phase, TrainingPhaseKind::Expansion) {
-            return true;
-        }
-        let Some(bootstrap) = status
-            .phase_statuses
-            .iter()
-            .find(|entry| entry.phase == TrainingPhaseKind::Bootstrap)
-        else {
-            return false;
-        };
-        let min_unit_discovery_efficiency = phase.min_unit_discovery_efficiency.unwrap_or(0.0);
-        let min_semantic_routing_accuracy = phase.min_semantic_routing_accuracy.unwrap_or(0.0);
-        bootstrap.metrics.unit_discovery_efficiency >= min_unit_discovery_efficiency
-            && bootstrap.metrics.semantic_routing_accuracy >= min_semantic_routing_accuracy
-    }
-
-    pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus> {
-        if let Some(status) = self
-            .jobs
-            .lock()
-            .expect("jobs mutex poisoned")
-            .get(job_id)
-            .cloned()
-        {
-            return Some(status);
-        }
-
-        let db = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.db()
-        };
-        let statuses = db.load_training_jobs().ok()?;
-        let status = statuses
-            .into_iter()
-            .find(|status| status.job_id == job_id)?;
-        if let Ok(mut jobs) = self.jobs.lock() {
-            jobs.insert(job_id.to_string(), status.clone());
-        }
-        Some(status)
-    }
-
-    /// Phase 3.4: Expose config for auto-mode enforcement
-    pub fn config(&self) -> &EngineConfig {
-        &self.config
-    }
-
-    fn apply_phase_governance(
-        &self,
-        phase: TrainingPhaseKind,
-        execution_mode: TrainingExecutionMode,
-    ) {
-        let governance = self.effective_phase_governance(phase, execution_mode);
-        if let Ok(mut memory) = self.memory.lock() {
-            memory.apply_governance(&governance);
-        }
-    }
-
-    fn restore_runtime_governance(&self) {
-        if let Ok(mut memory) = self.memory.lock() {
-            memory.apply_governance(&self.config.governance);
-        }
-    }
-
-    fn effective_phase_governance(
-        &self,
-        phase: TrainingPhaseKind,
-        execution_mode: TrainingExecutionMode,
-    ) -> crate::config::GovernanceConfig {
-        let mut config = self.config.clone();
-        if matches!(execution_mode, TrainingExecutionMode::Development)
-            && matches!(
-                phase,
-                TrainingPhaseKind::DryRun | TrainingPhaseKind::Bootstrap
-            )
-        {
-            config = config.with_bootstrap_overrides();
-        }
-        config.governance
-    }
-
-    fn resolve_adaptive_runtime(
-        &self,
-        intent_profile: &IntentProfile,
-        queue_depths: QueueDepths,
-    ) -> AdaptiveRuntimeSettings {
-        let mut settings = AdaptiveRuntimeSettings::from_config(&self.config);
-        let profile_blend = dynamic_intent_profile_blend(intent_profile);
-        settings.intent_profile_name =
-            dominant_behavior_profile_name(&profile_blend).map(str::to_string);
-        settings.scoring = blend_scoring_weights(&self.config, &profile_blend);
-        settings.escape = blend_escape_profile(&self.config, &profile_blend);
-        let (resolver, resolver_mode) = blend_resolver_profile(&self.config, &profile_blend);
-        settings.resolver = resolver;
-        settings.resolver_mode = resolver_mode;
-        settings.shaping = blend_shaping_config(&self.config, &profile_blend);
-
-        let trust_signal = dynamic_trust_signal(intent_profile);
-        if trust_signal.harden {
-            settings.trust_signal_name = Some(trust_signal.reason.clone());
-            if let Some(trust_profile) = self.config.adaptive_behavior.trust_profile("high_stakes")
-            {
-                settings.trust_profile_name = Some("high_stakes".to_string());
-                apply_adaptive_trust_profile(&mut settings.trust, trust_profile);
-            }
-        }
-
-        let additive_penalty = self.compute_load_cost_penalty(queue_depths);
-        settings.additional_cost_penalty = additive_penalty;
-        settings.retrieval.cost_penalty =
-            (settings.retrieval.cost_penalty + additive_penalty).clamp(0.0, 2.0);
-
-        settings
-    }
-
-    fn compute_load_cost_penalty(&self, queue_depths: QueueDepths) -> f32 {
-        let config = &self.config.adaptive_behavior.load_cost;
-        let saturation = config.queue_saturation_depth.max(1.0);
-        let normalized = |depth: usize| ((depth as f32) / saturation).clamp(0.0, 1.0);
-        let penalty = (normalized(queue_depths.inference) * config.inference_queue_weight)
-            + (normalized(queue_depths.interactive_training) * config.interactive_training_weight)
-            + (normalized(queue_depths.silent_batch) * config.silent_batch_weight)
-            + (normalized(queue_depths.maintenance) * config.maintenance_weight);
-        penalty.clamp(0.0, config.max_additive_penalty)
-    }
-
-    fn prepare_context_and_candidates(
-        &self,
-        hierarchy: &UnitHierarchy,
-        routing: &RoutingResult,
-    ) -> (ContextMatrix, SequenceState, Vec<Unit>) {
-        let snapshot = self.load_memory_snapshot();
-        let prior_state = snapshot.sequence_state();
-        let active_units = snapshot.get_units(
-            &routing
-                .position_updates
-                .iter()
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>(),
-        );
-        let neighbor_units = snapshot.get_units(&routing.neighbor_ids);
-        let all_units = snapshot.all_units();
-
-        let (context_matrix, sequence_state) = ContextManager::update(
-            routing,
-            hierarchy,
-            &prior_state,
-            &active_units,
-            &neighbor_units,
-        );
-        (context_matrix, sequence_state, all_units)
-    }
-
-    async fn process_training_source(
-        &self,
-        source: &TrainingSource,
-        options: &TrainingOptions,
-        status: &mut TrainingJobStatus,
-        memory_before: i64,
-        last_memory_kb: &mut i64,
-        phase_metrics: &mut PhaseMetricAccumulator,
-    ) -> Result<bool, String> {
-        let resolved_source =
-            open_sources::resolve_training_source(source).map_err(|err| format!("fatal:{err}"))?;
-        let target_memory = datasets::effective_memory_type(&resolved_source, &self.config)
-            .or(resolved_source.target_memory)
-            .unwrap_or_else(|| default_memory_for_training_source(resolved_source.source_type));
-        let memory_channels = resolved_source
-            .memory_channels
-            .clone()
-            .unwrap_or_else(|| vec![MemoryChannel::Main]);
-        status.progress.active_source = Some(training_source_label(source));
-        status.progress.chunks_processed = 0;
-        status.progress.bytes_processed = 0;
-        status.progress.worker_count = 0;
-        status.progress.active_workers = 0;
-        status.progress.queued_chunks = 0;
-        status.progress.prepared_chunks = 0;
-        status.progress.committed_batches = 0;
-        self.store_job(status.clone());
-
-        if matches!(
-            resolved_source.source_type,
-            TrainingSourceType::HuggingFaceDataset
-                | TrainingSourceType::StructuredJson
-                | TrainingSourceType::OpenApiSpec
-                | TrainingSourceType::CodeRepository
-                | TrainingSourceType::WikipediaDump
-                | TrainingSourceType::WikidataTruthy
-                | TrainingSourceType::OpenWebText
-                | TrainingSourceType::DbpediaDump
-                | TrainingSourceType::ProjectGutenberg
-                | TrainingSourceType::CommonCrawlWet
-                | TrainingSourceType::QaJson
-        ) {
-            let (should_halt, warnings) =
-                if self.parallel_training_enabled_for_source(&resolved_source) {
-                    self.process_parallel_streaming_training_source(
-                        &resolved_source,
-                        options,
-                        status,
-                        memory_before,
-                        last_memory_kb,
-                        phase_metrics,
-                        target_memory,
-                        &memory_channels,
-                    )
-                    .await?
-                } else {
-                    self.process_serial_streaming_training_source(
-                        &resolved_source,
-                        options,
-                        status,
-                        memory_before,
-                        last_memory_kb,
-                        phase_metrics,
-                        target_memory,
-                        &memory_channels,
-                    )
-                    .await?
-                };
-            status.warnings.extend(warnings);
-            return Ok(should_halt);
-        }
-
-        let content = match resolved_source.source_type {
-            TrainingSourceType::Url => {
-                let url = resolved_source
-                    .value
-                    .as_deref()
-                    .ok_or_else(|| "fatal:missing_url_value".to_string())?;
-                let content = self
-                    .retriever
-                    .fetch_training_source(TrainingSourceType::Url, url)
-                    .await?;
-                let assessment = self.safety.assess(url, &content, &self.config.trust);
-                if !assessment.accepted {
-                    return Err(format!(
-                        "discarded_untrusted_source:{url}:{}",
-                        assessment.warnings.join("|")
-                    ));
-                }
-                content
-            }
-            TrainingSourceType::Document => {
-                if let Some(value) = resolved_source.value.as_deref() {
-                    let path = Path::new(value);
-                    if is_supported_document_path(path) {
-                        if let Some(mime) = resolved_source.mime.as_deref() {
-                            validate_document_mime(path, mime)
-                                .map_err(|err| format!("fatal:{err}"))?;
-                        }
-                        load_path_content_with_config(path, &self.config.document)
-                            .map_err(|err| format!("fatal:{err}"))?
-                    } else {
-                        let decoded = decode_document_bytes(value, resolved_source.mime.as_deref());
-                        load_document_bytes(
-                            &decoded,
-                            resolved_source.mime.as_deref(),
-                            &self.config.document,
-                        )
-                        .map_err(|err| format!("fatal:{err}"))?
-                    }
-                } else {
-                    let content = resolved_source
-                        .content
-                        .as_deref()
-                        .ok_or_else(|| "fatal:missing_document_content".to_string())?;
-                    let decoded = decode_document_bytes(content, resolved_source.mime.as_deref());
-                    load_document_bytes(
-                        &decoded,
-                        resolved_source.mime.as_deref(),
-                        &self.config.document,
-                    )
-                    .map_err(|err| format!("fatal:{err}"))?
-                }
-            }
-            TrainingSourceType::Dataset
-            | TrainingSourceType::HuggingFaceDataset
-            | TrainingSourceType::StructuredJson
-            | TrainingSourceType::OpenApiSpec
-            | TrainingSourceType::CodeRepository
-            | TrainingSourceType::WikipediaDump
-            | TrainingSourceType::WikidataTruthy
-            | TrainingSourceType::OpenWebText
-            | TrainingSourceType::DbpediaDump
-            | TrainingSourceType::ProjectGutenberg
-            | TrainingSourceType::CommonCrawlWet
-            | TrainingSourceType::QaJson => unreachable!("dataset sources handled above"),
-        };
-
-        let source_kind = match resolved_source.source_type {
-            TrainingSourceType::Url => SourceKind::TrainingUrl,
-            TrainingSourceType::Document => SourceKind::TrainingDocument,
-            TrainingSourceType::Dataset
-            | TrainingSourceType::HuggingFaceDataset
-            | TrainingSourceType::StructuredJson
-            | TrainingSourceType::OpenApiSpec
-            | TrainingSourceType::CodeRepository
-            | TrainingSourceType::WikipediaDump
-            | TrainingSourceType::WikidataTruthy
-            | TrainingSourceType::OpenWebText
-            | TrainingSourceType::DbpediaDump
-            | TrainingSourceType::ProjectGutenberg
-            | TrainingSourceType::CommonCrawlWet
-            | TrainingSourceType::QaJson => unreachable!("dataset sources handled above"),
-        };
-        let context_label = resolved_source
-            .value
-            .as_deref()
-            .map(|value| format!("training_source:{value}"))
-            .or_else(|| {
-                resolved_source
-                    .name
-                    .as_deref()
-                    .map(|name| format!("training_source:{name}"))
-            })
-            .unwrap_or_else(|| "training_source:inline".to_string());
-        let report = self.ingest_training_text_chunk(
-            &content,
-            source_kind,
-            target_memory,
-            &memory_channels,
-            &context_label,
-            options.tag_intent,
-            options.merge_to_core,
-        )?;
-        phase_metrics.observe(&report);
-        status.progress.chunks_processed = 1;
-        status.progress.bytes_processed = content.len() as u64;
-        let should_halt = self.apply_training_chunk_report(
-            report,
-            options,
-            status,
-            memory_before,
-            last_memory_kb,
-        );
-        self.store_job(status.clone());
-        Ok(should_halt)
-    }
-
-    fn parallel_training_enabled_for_source(&self, source: &TrainingSource) -> bool {
-        self.config.silent_training.parallel.enabled
-            && self.parallel_training_worker_count() > 1
-            && matches!(
-                source.source_type,
-                TrainingSourceType::HuggingFaceDataset
-                    | TrainingSourceType::StructuredJson
-                    | TrainingSourceType::OpenApiSpec
-                    | TrainingSourceType::CodeRepository
-                    | TrainingSourceType::WikipediaDump
-                    | TrainingSourceType::WikidataTruthy
-                    | TrainingSourceType::OpenWebText
-                    | TrainingSourceType::DbpediaDump
-                    | TrainingSourceType::ProjectGutenberg
-                    | TrainingSourceType::CommonCrawlWet
-                    | TrainingSourceType::QaJson
-            )
-    }
-
-    fn parallel_training_worker_count(&self) -> usize {
-        let configured = self.config.silent_training.parallel.worker_count;
-        let cpu_based = std::thread::available_parallelism()
-            .map(|parallelism| parallelism.get().saturating_sub(1).max(1))
-            .unwrap_or(1);
-        let ram_based = self.parallel_training_worker_count_for_budget();
-        let auto = cpu_based.min(ram_based).max(1);
-        if configured > 0 {
-            configured.min(auto).max(1)
-        } else {
-            auto
-        }
-    }
-
-    fn parallel_training_worker_count_for_budget(&self) -> usize {
-        let parallel = &self.config.silent_training.parallel;
-        let total_kb = (parallel.total_memory_limit_mb.max(0.0) * 1024.0) as i64;
-        let reserve_kb = (parallel.non_worker_memory_reserve_mb.max(0.0) * 1024.0) as i64;
-        let per_worker_kb = (parallel.local_shard_hard_limit_mb.max(1.0) * 1024.0) as i64;
-        if total_kb <= 0 || per_worker_kb <= 0 {
-            return 1;
-        }
-        let available_kb = (total_kb - reserve_kb).max(per_worker_kb);
-        ((available_kb / per_worker_kb).max(1)) as usize
-    }
-
-    fn parallel_training_queue_capacity(&self, worker_count: usize) -> usize {
-        let parallel = &self.config.silent_training.parallel;
-        let requested = parallel.queue_capacity.max(worker_count);
-        let per_worker_cap = parallel
-            .queue_capacity_per_worker
-            .max(1)
-            .saturating_mul(worker_count.max(1));
-        requested.min(per_worker_cap).max(worker_count)
-    }
-
-    fn local_shard_soft_limit_kb(&self) -> i64 {
-        (self
-            .config
-            .silent_training
-            .parallel
-            .local_shard_soft_limit_mb
-            .max(1.0)
-            * 1024.0) as i64
-    }
-
-    fn local_shard_hard_limit_kb(&self) -> i64 {
-        (self
-            .config
-            .silent_training
-            .parallel
-            .local_shard_hard_limit_mb
-            .max(self.config.silent_training.parallel.local_shard_soft_limit_mb.max(1.0))
-            * 1024.0) as i64
-    }
-
-    async fn process_serial_streaming_training_source(
-        &self,
-        source: &TrainingSource,
-        options: &TrainingOptions,
-        status: &mut TrainingJobStatus,
-        memory_before: i64,
-        last_memory_kb: &mut i64,
-        phase_metrics: &mut PhaseMetricAccumulator,
-        target_memory: MemoryType,
-        memory_channels: &[MemoryChannel],
-    ) -> Result<(bool, Vec<String>), String> {
-        let mut should_halt = false;
-        let max_input_bytes = source.stream.max_input_bytes;
-        let mut streamed_bytes = 0usize;
-        let mut streamed_chunks = 0u64;
-        let mut last_progress_flush = Instant::now();
-        status.progress.worker_count = 0;
-        status.progress.active_workers = 0;
-        status.progress.queued_chunks = 0;
-        status.progress.prepared_chunks = 0;
-        status.progress.committed_batches = 0;
-
-        let stream_result = datasets::stream_training_source(source, &self.config, |chunk| {
-            streamed_bytes += chunk.content.len();
-            streamed_chunks += 1;
-            let report = self.ingest_training_text_chunk(
-                &chunk.content,
-                SourceKind::TrainingDocument,
-                target_memory,
-                memory_channels,
-                &chunk.context_label,
-                options.tag_intent,
-                options.merge_to_core,
-            )?;
-            phase_metrics.observe(&report);
-            should_halt = self.apply_training_chunk_report(
-                report,
-                options,
-                status,
-                memory_before,
-                last_memory_kb,
-            ) || max_input_bytes
-                .map(|limit| streamed_bytes >= limit)
-                .unwrap_or(false);
-            status.progress.chunks_processed = streamed_chunks;
-            status.progress.bytes_processed = streamed_bytes as u64;
-            if should_halt
-                || last_progress_flush.elapsed().as_secs() >= options.progress_interval_sec
-            {
-                self.store_job(status.clone());
-                last_progress_flush = Instant::now();
-            }
-            Ok(if should_halt {
-                DatasetSinkControl::Halt
-            } else {
-                DatasetSinkControl::Continue
-            })
-        })
-        .await
-        .map_err(|err| format!("fatal:{err}"))?;
-
-        status.progress.worker_count = 0;
-        status.progress.active_workers = 0;
-        status.progress.queued_chunks = 0;
-        Ok((should_halt, stream_result.warnings))
-    }
-
-    async fn process_parallel_streaming_training_source(
-        &self,
-        source: &TrainingSource,
-        options: &TrainingOptions,
-        status: &mut TrainingJobStatus,
-        memory_before: i64,
-        last_memory_kb: &mut i64,
-        phase_metrics: &mut PhaseMetricAccumulator,
-        target_memory: MemoryType,
-        memory_channels: &[MemoryChannel],
-    ) -> Result<(bool, Vec<String>), String> {
-        let worker_count = self.parallel_training_worker_count();
-        let queue_capacity = self.parallel_training_queue_capacity(worker_count);
-        let max_input_bytes = source.stream.max_input_bytes;
-        let local_shard_soft_limit_kb = self.local_shard_soft_limit_kb();
-        let local_shard_hard_limit_kb = self.local_shard_hard_limit_kb();
-        let tag_intent = options.tag_intent;
-        let config = Arc::new(self.config.clone());
-        let halt = Arc::new(AtomicBool::new(false));
-        let active_workers = Arc::new(AtomicUsize::new(0));
-        let processed_chunks = Arc::new(AtomicU64::new(0));
-        let committed_batches = Arc::new(AtomicU64::new(0));
-        let streamed_bytes = Arc::new(AtomicU64::new(0));
-
-        let source_name = source
-            .name
-            .clone()
-            .or_else(|| source.value.clone())
-            .unwrap_or_else(|| "training_source".to_string());
-        let (raw_tx, raw_rx) = crossbeam_channel::bounded::<DatasetTextChunk>(queue_capacity);
-
-        let mut worker_handles = Vec::with_capacity(worker_count);
-        for shard_index in 0..worker_count {
-            let raw_rx = raw_rx.clone();
-            let config = config.clone();
-            let halt = halt.clone();
-            let active_workers = active_workers.clone();
-            let processed_chunks = processed_chunks.clone();
-            let source_name = source_name.clone();
-            let target_memory = target_memory;
-            let memory_channels = memory_channels.to_vec();
-            let merge_to_core = options.merge_to_core;
-            worker_handles.push(thread::spawn(move || -> Result<ShardTrainingResult, String> {
-                let mut segment_index = 0usize;
-                let mut shard_db_path =
-                    training_shard_db_path(&source_name, shard_index, segment_index);
-                let mut shard_db_path_str = shard_db_path.to_string_lossy().to_string();
-                let mut local_store = MemoryStore::new_training_shard(
-                    &shard_db_path_str,
-                    &config.governance,
-                    &config.semantic_map,
-                );
-                let mut local_snapshot = local_store.snapshot();
-                let mut local_report = ChunkIngestionReport::default();
-                let mut segments = Vec::new();
-                while let Ok(chunk) = raw_rx.recv() {
-                    if halt.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    active_workers.fetch_add(1, Ordering::SeqCst);
-                    let database_health = local_store.database_health();
-                    let prepared = prepare_training_chunk_for_ingest(
-                        &chunk,
-                        &config,
-                        &database_health,
-                        Some(&local_snapshot),
-                        tag_intent,
-                    );
-                    let outcome = prepared.and_then(|prepared| {
-                        ingest_prepared_training_batch_into_store(
-                            &mut local_store,
-                            &[prepared],
-                            SourceKind::TrainingDocument,
-                            target_memory,
-                            &memory_channels,
-                            merge_to_core,
-                        )
-                    });
-                    active_workers.fetch_sub(1, Ordering::SeqCst);
-                    match outcome {
-                        Ok((report, _active_ids)) => {
-                            accumulate_chunk_ingestion_report(&mut local_report, &report);
-                            processed_chunks.fetch_add(report.chunks_committed.max(1), Ordering::SeqCst);
-                            local_snapshot = local_store.snapshot();
-                            let estimated_kb = local_store.estimate_memory_kb();
-                            if estimated_kb >= local_shard_soft_limit_kb
-                                || estimated_kb >= local_shard_hard_limit_kb
-                            {
-                                let pruning_report =
-                                    local_store.run_shard_pruning(&config.governance);
-                                let (pattern_cache_hits, pattern_cache_lookups) =
-                                    local_store.pattern_cache_stats();
-                                let has_payload = {
-                                    let health = local_store.database_health();
-                                    health.total_units > 0 || health.candidate_units > 0
-                                };
-                                drop(local_store);
-                                if has_payload {
-                                    segments.push(ShardSegmentResult {
-                                        shard_index,
-                                        segment_index,
-                                        shard_db_path: shard_db_path.clone(),
-                                        pattern_cache_hits,
-                                        pattern_cache_lookups,
-                                        pruning_report,
-                                    });
-                                } else {
-                                    cleanup_training_shard_db(&shard_db_path);
-                                }
-
-                                segment_index += 1;
-                                shard_db_path =
-                                    training_shard_db_path(&source_name, shard_index, segment_index);
-                                shard_db_path_str = shard_db_path.to_string_lossy().to_string();
-                                local_store = MemoryStore::new_training_shard(
-                                    &shard_db_path_str,
-                                    &config.governance,
-                                    &config.semantic_map,
-                                );
-                                local_snapshot = local_store.snapshot();
-                            }
-                        }
-                        Err(err) => {
-                            cleanup_training_shard_db(&shard_db_path);
-                            return Err(err);
-                        }
-                    }
-                }
-                let pruning_report = local_store.run_shard_pruning(&config.governance);
-                let (pattern_cache_hits, pattern_cache_lookups) = local_store.pattern_cache_stats();
-                let has_payload = {
-                    let health = local_store.database_health();
-                    health.total_units > 0 || health.candidate_units > 0
-                };
-                drop(local_store);
-                if has_payload {
-                    segments.push(ShardSegmentResult {
-                        shard_index,
-                        segment_index,
-                        shard_db_path,
-                        pattern_cache_hits,
-                        pattern_cache_lookups,
-                        pruning_report,
-                    });
-                } else {
-                    cleanup_training_shard_db(&shard_db_path);
-                }
-                Ok(ShardTrainingResult {
-                    shard_index,
-                    local_report,
-                    segments,
-                })
-            }));
-        }
-        drop(raw_rx);
-
-        let mut sent_chunks = 0u64;
-        let mut should_halt = false;
-        let mut warnings = Vec::new();
-        let mut last_progress_flush = Instant::now();
-        apply_parallel_training_progress(
-            status,
-            worker_count,
-            active_workers.as_ref(),
-            raw_tx.len(),
-            processed_chunks.as_ref(),
-            committed_batches.as_ref(),
-            0,
-            streamed_bytes.load(Ordering::Relaxed),
-        );
-        self.store_job(status.clone());
-
-        let stream_result = datasets::stream_training_source(source, &self.config, |chunk| {
-            if should_halt || halt.load(Ordering::Relaxed) {
-                return Ok(DatasetSinkControl::Halt);
-            }
-
-            let chunk_len = chunk.content.len() as u64;
-            let mut pending = Some(chunk);
-            loop {
-                match raw_tx.try_send(pending.take().expect("pending chunk")) {
-                    Ok(()) => {
-                        sent_chunks += 1;
-                        let total_bytes =
-                            streamed_bytes.fetch_add(chunk_len, Ordering::SeqCst) + chunk_len;
-                        if max_input_bytes
-                            .map(|limit| total_bytes >= limit as u64)
-                            .unwrap_or(false)
-                        {
-                            should_halt = true;
-                        }
-                        apply_parallel_training_progress(
-                            status,
-                            worker_count,
-                            active_workers.as_ref(),
-                            raw_tx.len(),
-                            processed_chunks.as_ref(),
-                            committed_batches.as_ref(),
-                            0,
-                            streamed_bytes.load(Ordering::Relaxed),
-                        );
-                        if last_progress_flush.elapsed().as_secs() >= options.progress_interval_sec
-                        {
-                            self.store_job(status.clone());
-                            last_progress_flush = Instant::now();
-                        }
-                        break;
-                    }
-                    Err(TrySendError::Full(chunk)) => {
-                        pending = Some(chunk);
-                        thread::sleep(Duration::from_millis(5));
-                        apply_parallel_training_progress(
-                            status,
-                            worker_count,
-                            active_workers.as_ref(),
-                            raw_tx.len(),
-                            processed_chunks.as_ref(),
-                            committed_batches.as_ref(),
-                            0,
-                            streamed_bytes.load(Ordering::Relaxed),
-                        );
-                        if should_halt {
-                            halt.store(true, Ordering::SeqCst);
-                            return Ok(DatasetSinkControl::Halt);
-                        }
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        return Err("parallel_training_channel_closed".to_string());
-                    }
-                }
-            }
-
-            if should_halt {
-                halt.store(true, Ordering::SeqCst);
-                Ok(DatasetSinkControl::Halt)
-            } else {
-                Ok(DatasetSinkControl::Continue)
-            }
-        })
-        .await
-        .map_err(|err| format!("fatal:{err}"));
-
-        if should_halt || stream_result.is_err() {
-            halt.store(true, Ordering::SeqCst);
-        }
-        drop(raw_tx);
-
-        let mut shard_reports = Vec::with_capacity(worker_count);
-        for handle in worker_handles {
-            match handle.join() {
-                Ok(Ok(result)) => shard_reports.push(result),
-                Ok(Err(err)) => return Err(format!("fatal:{err}")),
-                Err(_) => return Err("fatal:parallel_training_worker_panicked".to_string()),
-            }
-        }
-        shard_reports.sort_by_key(|shard| shard.shard_index);
-
-        let mut aggregate_report = ChunkIngestionReport {
-            chunks_committed: processed_chunks.load(Ordering::Relaxed),
-            ..ChunkIngestionReport::default()
-        };
-        let mut merged_active_ids = Vec::new();
-
-        for shard in shard_reports {
-            aggregate_report.activated_units_observed += shard.local_report.activated_units_observed;
-            aggregate_report.anchors_observed += shard.local_report.anchors_observed;
-            for (intent_key, count) in &shard.local_report.intent_counts {
-                *aggregate_report
-                    .intent_counts
-                    .entry(intent_key.clone())
-                    .or_insert(0) += count;
-            }
-            let batch_size = self
-                .config
-                .silent_training
-                .parallel
-                .commit_batch_size
-                .max(1);
-            for segment in shard.segments {
-                let local_removed = removed_count_from_governance(&segment.pruning_report);
-                if local_removed > 0 {
-                    status.learning_metrics.units_pruned += local_removed;
-                    status.learning_metrics.anchors_protected +=
-                        segment.pruning_report.anchors_protected;
-                }
-                record_pruning_event(
-                    &mut status.learning_metrics,
-                    &segment.pruning_report,
-                    &format!("local_shard:{}:{}", segment.shard_index, segment.segment_index),
-                );
-
-                let merge_result = {
-                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                    memory.merge_training_shard_db(&segment.shard_db_path, batch_size)
-                };
-                cleanup_training_shard_db(&segment.shard_db_path);
-                let merge_report = merge_result?;
-                aggregate_report.new_units_discovered +=
-                    merge_report.new_units + merge_report.candidate_observations;
-                aggregate_report.reused_units_observed += merge_report.reused_units;
-                aggregate_report.candidate_observations += merge_report.candidate_observations;
-                aggregate_report.candidate_promotions += merge_report.candidate_promotions;
-                aggregate_report.cache_hits +=
-                    merge_report.cache_hits + segment.pattern_cache_hits;
-                aggregate_report.cache_lookups +=
-                    merge_report.cache_lookups + segment.pattern_cache_lookups;
-                merged_active_ids.extend(merge_report.active_ids);
-
-                committed_batches.fetch_add(1, Ordering::SeqCst);
-                apply_parallel_training_progress(
-                    status,
-                    worker_count,
-                    active_workers.as_ref(),
-                    0,
-                    processed_chunks.as_ref(),
-                    committed_batches.as_ref(),
-                    processed_chunks.load(Ordering::Relaxed),
-                    streamed_bytes.load(Ordering::Relaxed),
-                );
-                self.store_job(status.clone());
-            }
-        }
-
-        if !merged_active_ids.is_empty() {
-            merged_active_ids.sort();
-            merged_active_ids.dedup();
-            let (active_units, all_units) = {
-                let memory = self.memory.lock().expect("memory mutex poisoned");
-                (memory.get_units(&merged_active_ids), memory.all_units())
-            };
-            let routing = route_units(&active_units, &all_units, &self.config.semantic_map);
-            aggregate_report.map_adjustments = routing.map_adjustments as u64;
-            aggregate_report.mean_displacement =
-                mean_displacement_for_training_routing(&active_units, &routing.position_updates);
-            {
-                let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                memory.update_positions(&routing.position_updates);
-                let governance_report = memory.run_maintenance(&self.config.governance);
-                let global_removed = removed_count_from_governance(&governance_report);
-                if global_removed > 0 {
-                    status.learning_metrics.units_pruned += global_removed;
-                    status.learning_metrics.anchors_protected += governance_report.anchors_protected;
-                }
-                record_pruning_event(
-                    &mut status.learning_metrics,
-                    &governance_report,
-                    "global_shard_merge",
-                );
-                if governance_report.layout_rolled_back {
-                    status
-                        .warnings
-                        .push("layout_rollback:global_shard_merge".to_string());
-                }
-            }
-        }
-
-        phase_metrics.observe(&aggregate_report);
-        should_halt = self.apply_training_chunk_report(
-            aggregate_report,
-            options,
-            status,
-            memory_before,
-            last_memory_kb,
-        ) || should_halt;
-
-        apply_parallel_training_progress(
-            status,
-            worker_count,
-            active_workers.as_ref(),
-            0,
-            processed_chunks.as_ref(),
-            committed_batches.as_ref(),
-            processed_chunks.load(Ordering::Relaxed),
-            streamed_bytes.load(Ordering::Relaxed),
-        );
-        status.progress.active_workers = 0;
-        status.progress.queued_chunks = 0;
-        self.store_job(status.clone());
-
-        let stream_result = stream_result?;
-        warnings.extend(stream_result.warnings);
-        Ok((should_halt, warnings))
-    }
-
-    fn ingest_training_text_chunk(
-        &self,
-        content: &str,
-        source_kind: SourceKind,
-        target_memory: MemoryType,
-        memory_channels: &[MemoryChannel],
-        context_label: &str,
-        collect_intent_telemetry: bool,
-        merge_to_core: bool,
-    ) -> Result<ChunkIngestionReport, String> {
-        let normalized = input::normalize_text(content);
-        if normalized.is_empty() {
-            return Ok(ChunkIngestionReport::default());
-        }
-
-        let intent_key = if collect_intent_telemetry {
-            let telemetry_window = normalized
-                .split_whitespace()
-                .take(96)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let intent_profile = IntentDetector::classify(
-                &telemetry_window,
-                &ContextMatrix::default(),
-                &SequenceState::default(),
-                false,
-                &self.config.intent,
-            );
-            Some(format!("{:?}", intent_profile.primary).to_lowercase())
-        } else {
-            None
-        };
-
-        let packet = input::ingest_raw(&normalized, true);
-        let build_output = self.build_units(&packet);
-        let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &self.config.builder);
-        let effective_memory = if merge_to_core {
-            target_memory
-        } else {
-            MemoryType::Episodic
-        };
-        let packet_summary = summarize_packet(&packet);
-        let mut context_segments = Vec::new();
-        if !context_label.is_empty() {
-            context_segments.push(context_label.to_string());
-        }
-        context_segments.push(packet_summary);
-        if memory_channels.contains(&MemoryChannel::Intent) {
-            if let Some(intent_key) = intent_key.as_deref() {
-                context_segments.push(format!("intent_label:{intent_key}"));
-            }
-        }
-        let context_summary = context_segments.join(" | ");
-
-        let active_ids = {
-            let mut memory = self.memory.lock().expect("memory mutex poisoned");
-            let ingest_report = memory.ingest_hierarchy_with_channels_report(
-                &hierarchy,
-                source_kind,
-                &context_summary,
-                effective_memory,
-                memory_channels,
-            );
-            (
-                ingest_report.active_ids,
-                ingest_report.new_units,
-                ingest_report.reused_units,
-                ingest_report.candidate_observations,
-                ingest_report.candidate_promotions,
-                ingest_report.cache_hits,
-                ingest_report.cache_lookups,
-            )
-        };
-
-        let (
-            active_ids,
-            new_units_discovered,
-            reused_units_observed,
-            candidate_observations,
-            candidate_promotions,
-            cache_hits,
-            cache_lookups,
-        ) = active_ids;
-
-        let (active_units, all_units) = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            (memory.get_units(&active_ids), memory.all_units())
-        };
-
-        let routing = route_units(&active_units, &all_units, &self.config.semantic_map);
-
-        let displacement_mean = if routing.position_updates.is_empty() {
-            let positions = active_units
-                .iter()
-                .map(|unit| unit.semantic_position)
-                .collect::<Vec<_>>();
-            if positions.is_empty() {
-                0.0
-            } else {
-                let mut total = [0.0, 0.0, 0.0];
-                for position in &positions {
-                    total[0] += position[0];
-                    total[1] += position[1];
-                    total[2] += position[2];
-                }
-                let count = positions.len() as f32;
-                let center = [total[0] / count, total[1] / count, total[2] / count];
-                positions
-                    .iter()
-                    .map(|position| euclidean_distance(*position, center))
-                    .sum::<f32>()
-                    / positions.len() as f32
-            }
-        } else {
-            let previous_positions = active_units
-                .iter()
-                .map(|unit| (unit.id, unit.semantic_position))
-                .collect::<HashMap<_, _>>();
-            let total = routing
-                .position_updates
-                .iter()
-                .map(|(id, next)| {
-                    previous_positions
-                        .get(id)
-                        .map(|prev| euclidean_distance(*prev, *next))
-                        .unwrap_or(0.0)
-                })
-                .sum::<f32>();
-            total / routing.position_updates.len() as f32
-        };
-
-        {
-            let mut memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.update_positions(&routing.position_updates);
-        }
-        self.publish_memory_snapshot();
-
-        Ok(ChunkIngestionReport {
-            chunks_committed: 1,
-            activated_units_observed: build_output.activated_units.len() as u64,
-            new_units_discovered: new_units_discovered + candidate_observations,
-            reused_units_observed,
-            candidate_observations,
-            candidate_promotions,
-            anchors_observed: hierarchy.anchors.len() as u64,
-            map_adjustments: routing.map_adjustments as u64,
-            mean_displacement: displacement_mean,
-            cache_hits,
-            cache_lookups,
-            intent_counts: intent_key
-                .into_iter()
-                .map(|key| (key, 1))
-                .collect::<BTreeMap<_, _>>(),
-        })
-    }
-
-    fn apply_training_chunk_report(
-        &self,
-        report: ChunkIngestionReport,
-        options: &TrainingOptions,
-        status: &mut TrainingJobStatus,
-        memory_before: i64,
-        last_memory_kb: &mut i64,
-    ) -> bool {
-        status.learning_metrics.new_units_discovered += report.new_units_discovered;
-        status.learning_metrics.map_adjustments += report.map_adjustments;
-        status.learning_metrics.anchors_protected += report.anchors_observed;
-        for (intent_key, count) in report.intent_counts {
-            *status.intent_distribution.entry(intent_key).or_insert(0) += count;
-        }
-
-        let (
-            current_memory,
-            database_health,
-            bloom_false_positive_rate,
-            cache_hit_rate,
-            pruned_candidates_total,
-            candidate_promotions_total,
-            memory_breakdown,
-            daily_growth_mb,
-        ) = {
-            let mut memory = self.memory.lock().expect("memory mutex poisoned");
-            let stage = memory.database_health().maturity_stage;
-            let stage_budget = self.memory_budget_for(stage);
-            let current = memory.estimate_memory_kb();
-            let max_memory_kb = (options.max_memory_delta_mb.max(0.0) * 1024.0) as i64;
-            let daily_growth_limit_mb = match options.execution_mode {
-                TrainingExecutionMode::User => options
-                    .daily_growth_limit_mb
-                    .unwrap_or(self.config.governance.daily_growth_limit_mb),
-                TrainingExecutionMode::Development => options
-                    .daily_growth_limit_mb
-                    .unwrap_or(stage_budget.daily_growth_limit_mb)
-                    .min(stage_budget.daily_growth_limit_mb),
-            }
-            .max(0.0);
-            let current_daily_growth_kb = memory.growth_for_today();
-            let remaining_daily_growth_kb =
-                ((daily_growth_limit_mb * 1024.0) - current_daily_growth_kb).max(0.0) as i64;
-            let job_budget_target_kb = memory_before + max_memory_kb;
-            let daily_budget_target_kb = *last_memory_kb + remaining_daily_growth_kb;
-            let target_memory_kb = job_budget_target_kb.min(daily_budget_target_kb);
-            let job_budget_bound = job_budget_target_kb <= daily_budget_target_kb;
-            let daily_budget_bound = daily_budget_target_kb <= job_budget_target_kb;
-
-            if current > target_memory_kb {
-                let pruned_candidates_before = memory.pruned_candidates_total();
-                let report = memory.prune_to_memory_budget(target_memory_kb.max(memory_before));
-                let pruned_candidate_delta =
-                    memory.pruned_candidates_total() - pruned_candidates_before;
-                status.learning_metrics.units_pruned +=
-                    report.pruned_units + pruned_candidate_delta;
-                status.learning_metrics.anchors_protected += report.anchors_protected;
-                let mut trigger_parts = Vec::new();
-                if job_budget_bound {
-                    status
-                        .warnings
-                        .push("memory_budget_triggered_pruning".to_string());
-                    trigger_parts.push("memory_budget_limit");
-                }
-                if daily_budget_bound {
-                    status
-                        .warnings
-                        .push("daily_memory_limit_triggered_pruning".to_string());
-                    trigger_parts.push("daily_memory_limit");
-                }
-                record_pruning_event(
-                    &mut status.learning_metrics,
-                    &report,
-                    &if trigger_parts.is_empty() {
-                        "memory_budget_limit".to_string()
-                    } else {
-                        trigger_parts.join("+")
-                    },
-                );
-            }
-            let estimated = memory.estimate_memory_kb();
-            let delta_since_last = (estimated - *last_memory_kb).max(0) as f32;
-            if delta_since_last > 0.0 {
-                let _ = memory.record_daily_growth(delta_since_last);
-            }
-            status.learning_metrics.memory_delta_kb = estimated - memory_before;
-            *last_memory_kb = estimated;
-            let database_health = memory.database_health();
-            let bloom = memory.bloom_stats();
-            let (cache_hits, cache_lookups) = memory.pattern_cache_stats();
-            let memory_breakdown = memory.memory_usage_breakdown_mb();
-            let bloom_false_positive_rate = if bloom.maybe_hits == 0 {
-                0.0
-            } else {
-                bloom.false_positives as f32 / bloom.maybe_hits as f32
-            };
-            let cache_hit_rate = if cache_lookups == 0 {
-                0.0
-            } else {
-                cache_hits as f32 / cache_lookups as f32
-            };
-            (
-                estimated,
-                database_health,
-                bloom_false_positive_rate,
-                cache_hit_rate,
-                memory.pruned_candidates_total(),
-                memory.candidate_promotions_total(),
-                memory_breakdown,
-                memory.growth_for_today() / 1024.0,
-            )
-        };
-        self.publish_memory_snapshot();
-
-        status.learning_metrics.memory_delta_kb = current_memory - memory_before;
-        status.learning_metrics.database_health = database_health.clone();
-        let effective_delta_kb = status.learning_metrics.memory_delta_kb.max(1) as f32;
-        let total_observed =
-            status.learning_metrics.new_units_discovered + status.learning_metrics.units_pruned;
-        status.learning_metrics.efficiency.units_discovered_per_kb =
-            status.learning_metrics.new_units_discovered as f32 / effective_delta_kb;
-        status.learning_metrics.efficiency.units_discovered_per_mb =
-            status.learning_metrics.new_units_discovered as f32
-                / (effective_delta_kb / 1024.0).max(0.001);
-        status.learning_metrics.efficiency.pruned_units_percent =
-            status.learning_metrics.units_pruned as f32 / total_observed.max(1) as f32;
-        status.learning_metrics.efficiency.anchor_density =
-            database_health.anchor_units as f32 / database_health.total_units.max(1) as f32;
-        status.learning_metrics.efficiency.candidate_to_active_ratio =
-            database_health.candidate_units as f32 / database_health.active_units.max(1) as f32;
-        status.learning_metrics.efficiency.pruned_candidates_percent = pruned_candidates_total
-            as f32
-            / (pruned_candidates_total
-                + candidate_promotions_total
-                + database_health.candidate_units)
-                .max(1) as f32;
-        status
-            .learning_metrics
-            .efficiency
-            .avg_observations_to_promotion = if database_health.active_candidates == 0 {
-            0.0
-        } else {
-            (report
-                .candidate_observations
-                .max(report.candidate_promotions)) as f32
-                / database_health.active_candidates as f32
-        };
-        status.learning_metrics.efficiency.map_rebuild_frequency =
-            status.learning_metrics.map_adjustments as f32
-                / status.progress.chunks_processed.max(1) as f32;
-        status.learning_metrics.efficiency.cache_hit_rate = cache_hit_rate;
-        status
-            .learning_metrics
-            .efficiency
-            .bloom_filter_false_positive_rate = bloom_false_positive_rate;
-        status.learning_metrics.memory_governance.episodic_memory_mb = memory_breakdown.0;
-        status.learning_metrics.memory_governance.core_memory_mb = memory_breakdown.1;
-        status.learning_metrics.memory_governance.candidate_pool_mb = memory_breakdown.2;
-        status.learning_metrics.memory_governance.daily_growth_mb = daily_growth_mb;
-        status
-            .learning_metrics
-            .memory_governance
-            .pruning_rate_per_hour = status.learning_metrics.units_pruned as f32;
-        false
-    }
-
     fn store_job(&self, status: TrainingJobStatus) {
         let statuses = {
             let mut jobs = self.jobs.lock().expect("jobs mutex poisoned");
@@ -3544,6 +1875,202 @@ impl Engine {
         }
         let _ = self.feedback_tx.try_send(feedback);
     }
+    
+    /// Ingest a labeled dialogue for unified training (classification + core memory).
+    /// 
+    /// # Layer 9 Compliance (Silent Training Boundary)
+    /// The presence of the JSON implies authorized ingestion. Intent field is used for
+    /// memory tagging, not to gate ingestion. Layer 9 retrieval decisioning is bypassed.
+    /// 
+    /// # Layer 21 Compliance (Core Memory Gate)
+    /// If memory_target is Core, units are placed in StagingEpisodic state with elevated
+    /// utility score. Core promotion requires:
+    /// - Survival through a pruning cycle, OR
+    /// - N independent dialogues (corroboration_count >= threshold), OR
+    /// - Explicit consolidate_immediately pass
+    pub fn ingest_labeled_dialogue(
+        &self,
+        dialogue: &crate::classification::LabeledDialogue,
+        options: &UnifiedTrainingOptions,
+    ) -> crate::types::UnifiedTrainingReport {
+        use crate::classification::MemoryTarget;
+        use crate::types::{MemoryType, MemoryChannel, TrainingValidationError, ValidationErrorCategory};
+        
+        let mut report = crate::types::UnifiedTrainingReport {
+            dialogue_id: dialogue.id.clone(),
+            turns_processed: dialogue.turns.len() as u32,
+            ..Default::default()
+        };
+        
+        // Determine memory type based on memory_target (Layer 21 compliance)
+        let (default_memory_type, utility_boost) = match dialogue.metadata.memory_target {
+            MemoryTarget::Core => {
+                // StagingEpisodic: high utility but requires corroboration
+                report.core_target_staged = true;
+                (MemoryType::Episodic, self.config.governance.staging_episodic_utility_boost)
+            }
+            MemoryTarget::StagingEpisodic => {
+                (MemoryType::Episodic, self.config.governance.staging_episodic_utility_boost)
+            }
+            MemoryTarget::Episodic => {
+                (MemoryType::Episodic, self.config.governance.bootstrap_seed_utility_floor)
+            }
+        };
+        
+        // Parse memory channels
+        let channels: Vec<MemoryChannel> = dialogue.metadata.channels.iter()
+            .filter_map(|c| match c.as_str() {
+                "Main" => Some(MemoryChannel::Main),
+                "Intent" => Some(MemoryChannel::Intent),
+                "Reasoning" => Some(MemoryChannel::Reasoning),
+                _ => None,
+            })
+            .collect();
+        let channels = if channels.is_empty() {
+            vec![MemoryChannel::Main]
+        } else {
+            channels
+        };
+        report.channels_populated = dialogue.metadata.channels.clone();
+        
+        // Process each turn
+        for turn in &dialogue.turns {
+            // Build units from turn content (Layer 2)
+            let packet = crate::types::InputPacket {
+                original_text: turn.content.clone(),
+                normalized_text: turn.content.to_lowercase(),
+                bytes: turn.content.as_bytes().to_vec(),
+                training_mode: true,
+                timestamp: chrono::Utc::now(),
+            };
+            let build_output = UnitBuilder::ingest_with_governance_snapshot(
+                &packet,
+                &self.config.builder,
+                &self.config.governance,
+                &self.current_database_health(),
+                Some(&self.load_memory_snapshot()),
+            );
+            // Convert activated units to hierarchy for ingestion
+            let hierarchy = crate::types::UnitHierarchy {
+                levels: {
+                    let mut levels = std::collections::BTreeMap::new();
+                    for unit in &build_output.activated_units {
+                        let key = format!("{:?}", unit.level).to_lowercase();
+                        levels.entry(key).or_insert_with(Vec::new).push(unit.clone());
+                    }
+                    levels
+                },
+                anchors: Vec::new(),
+                entities: Vec::new(),
+            };
+            
+            // Track unit counts for validation
+            let phrase_count = hierarchy.levels.get("phrase").map(|v| v.len() as u32).unwrap_or(0);
+            let sentence_count = hierarchy.levels.get("sentence").map(|v| v.len() as u32).unwrap_or(0);
+            let word_count = hierarchy.levels.get("word").map(|v| v.len() as u32).unwrap_or(0);
+            
+            // Validate expected_unit_count (Layer 18 feedback)
+            if let Some(expected_phrase) = turn.expected_unit_count.phrase {
+                if phrase_count != expected_phrase {
+                    report.validation_errors.push(TrainingValidationError {
+                        field: "phrase_count".to_string(),
+                        expected: expected_phrase.to_string(),
+                        actual: phrase_count.to_string(),
+                        category: ValidationErrorCategory::UnitFragmentation,
+                    });
+                }
+            }
+            if let Some(expected_sentence) = turn.expected_unit_count.sentence {
+                if sentence_count != expected_sentence {
+                    report.validation_errors.push(TrainingValidationError {
+                        field: "sentence_count".to_string(),
+                        expected: expected_sentence.to_string(),
+                        actual: sentence_count.to_string(),
+                        category: ValidationErrorCategory::UnitFragmentation,
+                    });
+                }
+            }
+            
+            // Ingest into memory with intent tagging (bypass Layer 9 gating)
+            let context_label = format!("unified_training:{}:{}", dialogue.id, turn.role);
+            let active_ids = {
+                let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                memory.ingest_hierarchy_with_tiering(
+                    &hierarchy,
+                    crate::types::SourceKind::TrainingDocument,
+                    &context_label,
+                    default_memory_type,
+                    utility_boost,
+                    &channels,
+                )
+            };
+            
+            report.units_built += active_ids.len() as u64;
+            
+            // Classification training if enabled
+            if options.train_classification {
+                let outcome = {
+                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                    let mut spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
+                    // Create new trainer with calculator from config weights
+                    let mut trainer = crate::classification::ClassificationTrainer::new(
+                        crate::classification::ClassificationCalculator::with_weights(
+                            self.config.classification.w_structure,
+                            self.config.classification.w_punctuation,
+                            self.config.classification.w_semantic,
+                            self.config.classification.w_derived,
+                        ),
+                        self.config.classification.clone(),
+                    );
+                    trainer.ingest_labeled_turn(
+                        &turn.content,
+                        &crate::types::GroundTruth::from(dialogue),
+                        &mut memory,
+                        &mut spatial,
+                    )
+                };
+                report.classification_outcome = Some(outcome);
+            }
+        }
+        
+        // Emit validation errors as Layer 18 feedback
+        if !report.validation_errors.is_empty() {
+            let feedback: Vec<crate::types::FeedbackEvent> = report.validation_errors.iter()
+                .map(|err| crate::types::FeedbackEvent {
+                    layer: 18,
+                    event: match err.category {
+                        ValidationErrorCategory::UnitFragmentation => "unit_fragmentation_error",
+                        ValidationErrorCategory::AnchorDetection => "anchor_detection_error",
+                        ValidationErrorCategory::EntityExtraction => "entity_extraction_error",
+                        ValidationErrorCategory::TrustQuality => "trust_quality_error",
+                    }.to_string(),
+                    impact: 0.5,
+                    target_unit_id: None,
+                })
+                .collect();
+            self.enqueue_feedback(feedback);
+        }
+        
+        report
+    }
+}
+
+/// Options for unified training ingestion
+#[derive(Debug, Clone)]
+pub struct UnifiedTrainingOptions {
+    /// Whether to train classification patterns
+    pub train_classification: bool,
+    /// Whether to consolidate immediately (bypass Layer 21 staging)
+    pub consolidate_immediately: bool,
+}
+
+impl Default for UnifiedTrainingOptions {
+    fn default() -> Self {
+        Self {
+            train_classification: true,
+            consolidate_immediately: false,
+        }
+    }
 }
 
 fn record_pruning_event(
@@ -4049,246 +2576,6 @@ fn summarize_packet(packet: &InputPacket) -> String {
         .take(12)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn prepare_training_chunk_for_ingest(
-    chunk: &DatasetTextChunk,
-    config: &EngineConfig,
-    database_health: &DatabaseHealthMetrics,
-    snapshot: Option<&MemorySnapshot>,
-    collect_intent_telemetry: bool,
-) -> Result<PreparedTrainingChunk, String> {
-    let normalized = input::normalize_text(&chunk.content);
-    if normalized.is_empty() {
-        return Ok(PreparedTrainingChunk {
-            context_label: chunk.context_label.clone(),
-            packet_summary: String::new(),
-            hierarchy: UnitHierarchy::default(),
-            activated_units_observed: 0,
-            anchors_observed: 0,
-            intent_key: None,
-        });
-    }
-
-    let intent_key = if collect_intent_telemetry {
-        let telemetry_window = normalized
-            .split_whitespace()
-            .take(96)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let intent_profile = IntentDetector::classify(
-            &telemetry_window,
-            &ContextMatrix::default(),
-            &SequenceState::default(),
-            false,
-            &config.intent,
-        );
-        Some(format!("{:?}", intent_profile.primary).to_lowercase())
-    } else {
-        None
-    };
-
-    let packet = input::ingest_raw(&normalized, true);
-    let build_output = UnitBuilder::ingest_with_governance_snapshot(
-        &packet,
-        &config.builder,
-        &config.governance,
-        database_health,
-        snapshot,
-    );
-    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config.builder);
-    let anchors_observed = hierarchy.anchors.len() as u64;
-
-    Ok(PreparedTrainingChunk {
-        context_label: chunk.context_label.clone(),
-        packet_summary: summarize_packet(&packet),
-        hierarchy,
-        activated_units_observed: build_output.activated_units.len() as u64,
-        anchors_observed,
-        intent_key,
-    })
-}
-
-fn ingest_prepared_training_batch_into_store(
-    store: &mut MemoryStore,
-    batch: &[PreparedTrainingChunk],
-    source_kind: SourceKind,
-    target_memory: MemoryType,
-    memory_channels: &[MemoryChannel],
-    merge_to_core: bool,
-) -> Result<(ChunkIngestionReport, Vec<Uuid>), String> {
-    if batch.is_empty() {
-        return Ok((ChunkIngestionReport::default(), Vec::new()));
-    }
-
-    let effective_memory = if merge_to_core {
-        target_memory
-    } else {
-        MemoryType::Episodic
-    };
-    let mut report = ChunkIngestionReport {
-        chunks_committed: batch.len() as u64,
-        ..ChunkIngestionReport::default()
-    };
-    let mut active_ids = Vec::new();
-
-    for prepared in batch {
-        let mut context_segments = Vec::new();
-        if !prepared.context_label.is_empty() {
-            context_segments.push(prepared.context_label.clone());
-        }
-        context_segments.push(prepared.packet_summary.clone());
-        if memory_channels.contains(&MemoryChannel::Intent) {
-            if let Some(intent_key) = prepared.intent_key.as_deref() {
-                context_segments.push(format!("intent_label:{intent_key}"));
-            }
-        }
-        let context_summary = context_segments.join(" | ");
-        let ingest_report = store.ingest_hierarchy_with_channels_report(
-            &prepared.hierarchy,
-            source_kind,
-            &context_summary,
-            effective_memory,
-            memory_channels,
-        );
-        report.activated_units_observed += prepared.activated_units_observed;
-        report.new_units_discovered +=
-            ingest_report.new_units + ingest_report.candidate_observations;
-        report.reused_units_observed += ingest_report.reused_units;
-        report.candidate_observations += ingest_report.candidate_observations;
-        report.candidate_promotions += ingest_report.candidate_promotions;
-        report.anchors_observed += prepared.anchors_observed;
-        report.cache_hits += ingest_report.cache_hits;
-        report.cache_lookups += ingest_report.cache_lookups;
-        if let Some(intent_key) = prepared.intent_key.as_ref() {
-            *report.intent_counts.entry(intent_key.clone()).or_insert(0) += 1;
-        }
-        active_ids.extend(ingest_report.active_ids);
-    }
-
-    Ok((report, active_ids))
-}
-
-fn accumulate_chunk_ingestion_report(
-    target: &mut ChunkIngestionReport,
-    report: &ChunkIngestionReport,
-) {
-    target.chunks_committed += report.chunks_committed;
-    target.activated_units_observed += report.activated_units_observed;
-    target.new_units_discovered += report.new_units_discovered;
-    target.reused_units_observed += report.reused_units_observed;
-    target.candidate_observations += report.candidate_observations;
-    target.candidate_promotions += report.candidate_promotions;
-    target.anchors_observed += report.anchors_observed;
-    target.map_adjustments += report.map_adjustments;
-    target.mean_displacement += report.mean_displacement;
-    target.cache_hits += report.cache_hits;
-    target.cache_lookups += report.cache_lookups;
-    for (intent_key, count) in &report.intent_counts {
-        *target.intent_counts.entry(intent_key.clone()).or_insert(0) += count;
-    }
-}
-
-fn removed_count_from_governance(report: &crate::types::GovernanceReport) -> u64 {
-    report.pruned_units
-        + report.pruned_candidates
-        + report.purged_polluted_units
-        + report.purged_polluted_candidates
-}
-
-fn mean_displacement_for_training_routing(
-    active_units: &[Unit],
-    position_updates: &[(Uuid, [f32; 3])],
-) -> f32 {
-    if position_updates.is_empty() {
-        let positions = active_units
-            .iter()
-            .map(|unit| unit.semantic_position)
-            .collect::<Vec<_>>();
-        if positions.is_empty() {
-            return 0.0;
-        }
-        let mut total = [0.0, 0.0, 0.0];
-        for position in &positions {
-            total[0] += position[0];
-            total[1] += position[1];
-            total[2] += position[2];
-        }
-        let count = positions.len() as f32;
-        let center = [total[0] / count, total[1] / count, total[2] / count];
-        return positions
-            .iter()
-            .map(|position| euclidean_distance(*position, center))
-            .sum::<f32>()
-            / positions.len() as f32;
-    }
-
-    let previous_positions = active_units
-        .iter()
-        .map(|unit| (unit.id, unit.semantic_position))
-        .collect::<HashMap<_, _>>();
-    let total = position_updates
-        .iter()
-        .map(|(id, next)| {
-            previous_positions
-                .get(id)
-                .map(|prev| euclidean_distance(*prev, *next))
-                .unwrap_or(0.0)
-        })
-        .sum::<f32>();
-    total / position_updates.len() as f32
-}
-
-fn apply_parallel_training_progress(
-    status: &mut TrainingJobStatus,
-    worker_count: usize,
-    active_workers: &AtomicUsize,
-    queued_chunks: usize,
-    prepared_chunks: &AtomicU64,
-    committed_batches: &AtomicU64,
-    committed_chunks: u64,
-    bytes_processed: u64,
-) {
-    status.progress.worker_count = worker_count;
-    status.progress.active_workers = active_workers.load(Ordering::Relaxed);
-    status.progress.queued_chunks = queued_chunks;
-    status.progress.prepared_chunks = prepared_chunks.load(Ordering::Relaxed);
-    status.progress.committed_batches = committed_batches.load(Ordering::Relaxed);
-    status.progress.chunks_processed = committed_chunks;
-    status.progress.bytes_processed = bytes_processed;
-}
-
-fn sanitize_training_shard_name(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>();
-    sanitized.trim_matches('_').to_string()
-}
-
-fn training_shard_db_path(
-    source_name: &str,
-    shard_index: usize,
-    segment_index: usize,
-) -> std::path::PathBuf {
-    let directory = format!(
-        "spse_training_shard_{}_{}_{}_{}",
-        sanitize_training_shard_name(source_name),
-        shard_index,
-        segment_index,
-        Uuid::new_v4()
-    );
-    let dir = std::env::temp_dir().join(directory);
-    let _ = fs::create_dir_all(&dir);
-    dir.join("shard.db")
-}
-
-fn cleanup_training_shard_db(path: &std::path::Path) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::remove_dir_all(parent);
-    } else {
-        let _ = fs::remove_file(path);
-    }
 }
 
 fn decode_document_bytes(content: &str, mime: Option<&str>) -> Vec<u8> {

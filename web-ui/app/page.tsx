@@ -19,6 +19,7 @@ interface ChatState {
   isLoading: boolean
   inferredTone: string | null
   backendStatus: 'unknown' | 'connected' | 'disconnected'
+  retrievalEnabled: boolean
 }
 
 export default function Home() {
@@ -27,6 +28,7 @@ export default function Home() {
     isLoading: false,
     inferredTone: null,
     backendStatus: 'unknown',
+    retrievalEnabled: false,
   })
   const [input, setInput] = useState('')
   const [uploadedDocs, setUploadedDocs] = useState<File[]>([])
@@ -119,6 +121,7 @@ export default function Home() {
             content: m.content,
           })),
           documents: currentDocs.map(f => f.name),
+          retrieval_enabled: state.retrievalEnabled,
         }),
       })
 
@@ -367,7 +370,19 @@ export default function Home() {
           
           {/* Status Bar */}
           <div className="mt-2 flex items-center justify-between text-xs text-gray-400">
-            <span>Press Enter to send, Shift+Enter for new line</span>
+            <div className="flex items-center gap-4">
+              <span>Press Enter to send, Shift+Enter for new line</span>
+              {/* Retrieval Toggle */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={state.retrievalEnabled}
+                  onChange={(e) => setState(prev => ({ ...prev, retrievalEnabled: e.target.checked }))}
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span className="text-gray-600">Enable Retrieval</span>
+              </label>
+            </div>
             {state.inferredTone && (
               <span className="text-gray-500">
                 Inferred tone: <span className="font-medium text-gray-600">{state.inferredTone}</span>

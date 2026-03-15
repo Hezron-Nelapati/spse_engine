@@ -1045,6 +1045,10 @@ pub struct GovernanceConfig {
     /// Whether to block Intent-channel units from being promoted to Core memory.
     /// Prevents noisy intent signals from polluting long-term core memory.
     pub intent_channel_core_promotion_blocked: bool,
+    /// Utility boost for StagingEpisodic units (memory_target: Core in unified training).
+    /// These units get higher initial utility but still require corroboration for Core promotion.
+    /// Layer 21 compliance: prevents transient overfitting by requiring governance cycle.
+    pub staging_episodic_utility_boost: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2025,6 +2029,7 @@ impl Default for GovernanceConfig {
             pollution_quality_margin: 0.08,
             pollution_audit_limit: 64,
             intent_channel_core_promotion_blocked: true,
+            staging_episodic_utility_boost: 0.35,
         }
     }
 }

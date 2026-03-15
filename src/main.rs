@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use spse_engine::api;
-use spse_engine::datasets::PreparationReport;
 use spse_engine::engine::Engine;
+use spse_engine::seed::{generate_dryrun_datasets, DryRunDatasetConfig};
 use spse_engine::training::TrainingScope;
 use spse_engine::types::{DryRunReport, JobState, TrainingExecutionMode, TrainingJobStatus};
 use std::io::{self, Write};
@@ -35,14 +35,6 @@ enum Commands {
         #[arg(long, default_value = "full")]
         scope: String,
     },
-    Prepare {
-        #[arg(long)]
-        json: bool,
-        #[arg(long, default_value = "development")]
-        execution_mode: String,
-        #[arg(long, default_value = "full")]
-        scope: String,
-    },
     TrainStatus {
         job_id: String,
     },
@@ -55,6 +47,14 @@ enum Commands {
     Serve {
         #[arg(long, default_value_t = 3000)]
         port: u16,
+    },
+    GenerateSeed {
+        #[arg(long, default_value = "dryrun")]
+        phase: String,
+        #[arg(long, default_value = "datasets/dryrun")]
+        output_dir: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -122,32 +122,6 @@ async fn main() {
                 }
             }
         }
-        Commands::Prepare {
-            json,
-            execution_mode,
-            scope,
-        } => {
-            let engine = Engine::new();
-            let execution_mode = parse_execution_mode(&execution_mode);
-            let scope = parse_training_scope(&scope);
-            match engine.prepare_training_sources(execution_mode, scope).await {
-                Ok(report) => {
-                    if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&report)
-                                .expect("serialize preparation report")
-                        );
-                    } else {
-                        print_preparation_report(&report);
-                    }
-                }
-                Err(err) => {
-                    eprintln!("failed to prepare training sources: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
         Commands::TrainStatus { job_id } => {
             let engine = Engine::new();
             let status = engine.training_status(&job_id);
@@ -194,12 +168,49 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::GenerateSeed { phase, output_dir, json } => {
+            match phase.as_str() {
+                "dryrun" => {
+                    let config = DryRunDatasetConfig {
+                        output_dir,
+                        ..Default::default()
+                    };
+                    let result = generate_dryrun_datasets(&config);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result).expect("serialize result"));
+                    } else {
+                        println!("Generated DryRun datasets:");
+                        println!("  Intent dataset: {} ({} dialogues)", result.intent_dataset_path, result.intent_dialogue_count);
+                        println!("  Entity dataset: {} ({} entities)", result.entity_dataset_path, result.entity_count);
+                        println!("  Intents covered: {}", result.intents_covered.len());
+                        if result.quality_passed {
+                            println!("  Quality: PASSED");
+                        } else {
+                            println!("  Quality: NEEDS ATTENTION");
+                        }
+                        if !result.warnings.is_empty() {
+                            println!("  Warnings:");
+                            for w in &result.warnings {
+                                println!("    - {}", w);
+                            }
+                        }
+                    }
+                    if !result.quality_passed {
+                        std::process::exit(1);
+                    }
+                }
+                other => {
+                    eprintln!("Unknown phase: {}. Supported phases: dryrun", other);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
 async fn run_interactive(engine: &Engine) {
     println!("--- SPSE Engine (Full Architecture) ---");
-    println!("Type a question, paste a local .docx/.pdf path, use '/prepare', '/train', '/clear', '/debug <text>', '/trace <text>', or 'exit'.");
+    println!("Type a question, paste a local .docx/.pdf path, use '/train', '/clear', '/debug <text>', '/trace <text>', or 'exit'.");
 
     loop {
         print!("User > ");
@@ -215,25 +226,6 @@ async fn run_interactive(engine: &Engine) {
             break;
         }
         if input.is_empty() {
-            continue;
-        }
-
-        if input == "/prepare" {
-            match engine
-                .prepare_training_sources(TrainingExecutionMode::Development, TrainingScope::Full)
-                .await
-            {
-                Ok(report) => {
-                    println!(
-                        "System > Prepared {} training sources for {}.",
-                        report.sources.len(),
-                        report.scope
-                    );
-                }
-                Err(err) => {
-                    println!("System > Failed to prepare sources: {err}");
-                }
-            }
             continue;
         }
 
@@ -483,29 +475,6 @@ fn print_dry_run_report(report: &DryRunReport) {
         report.map_stable,
         report.inference_ok,
         report.inference_latency_ms,
-        report.latency_per_token_ms
-    );
-    println!("  snapshot_path={}", report.snapshot_path);
-    println!("  memory={}", report.memory_summary);
-}
-
-fn print_preparation_report(report: &PreparationReport) {
-    println!(
-        "prepared sources={}, scope={}",
-        report.sources.len(),
-        report.scope
-    );
-    for source in &report.sources {
-        println!(
-            "  {} -> {} ({} bytes)",
-            source.source_name.as_deref().unwrap_or("unnamed"),
-            source.local_value,
-            source.size_bytes
-        );
-    }
-    if !report.warnings.is_empty() {
-        println!("  warnings={}", report.warnings.join(", "));
-    }
 }
 
 fn parse_execution_mode(value: &str) -> TrainingExecutionMode {

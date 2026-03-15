@@ -3,7 +3,6 @@ pub mod bloom_filter;
 pub mod classification;
 pub mod common;
 pub mod config;
-pub mod datasets;
 pub mod document;
 pub mod drill_lib;
 pub mod engine;

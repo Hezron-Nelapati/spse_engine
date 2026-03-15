@@ -750,14 +750,68 @@ impl MemoryStore {
         source: SourceKind,
         context_summary: &str,
         default_memory_type: MemoryType,
+        utility_boost: f32,
+        memory_channels: &[MemoryChannel],
     ) -> Vec<Uuid> {
-        self.ingest_hierarchy_with_channels(
+        self.ingest_hierarchy_with_tiering_report(
             hierarchy,
             source,
             context_summary,
             default_memory_type,
-            &[MemoryChannel::Main],
+            utility_boost,
+            memory_channels,
         )
+        .active_ids
+    }
+
+    pub fn ingest_hierarchy_with_tiering_report(
+        &mut self,
+        hierarchy: &UnitHierarchy,
+        source: SourceKind,
+        context_summary: &str,
+        default_memory_type: MemoryType,
+        utility_boost: f32,
+        memory_channels: &[MemoryChannel],
+    ) -> IngestReport {
+        let mut report = IngestReport::default();
+        let trust_delta = match source {
+            SourceKind::UserInput => 0.08,
+            SourceKind::Retrieval => 0.04,
+            SourceKind::TrainingDocument => 0.06,
+            SourceKind::TrainingUrl => 0.05,
+        };
+
+        for units in hierarchy.levels.values() {
+            for activation in units {
+                match self.ingest_activation_with_utility_boost(
+                    activation,
+                    source,
+                    context_summary,
+                    trust_delta,
+                    default_memory_type,
+                    utility_boost,
+                    memory_channels,
+                ) {
+                    ActivationOutcome::Active { id, is_new } => {
+                        if is_new {
+                            report.new_units += 1;
+                        } else {
+                            report.reused_units += 1;
+                        }
+                        report.active_ids.push(id);
+                    }
+                    ActivationOutcome::Candidate => {
+                        report.candidate_observations += 1;
+                    }
+                }
+            }
+        }
+
+        let promoted = self.promote_candidates_batch(default_memory_type, context_summary);
+        report.candidate_promotions = promoted.len() as u64;
+        report.new_units += promoted.len() as u64;
+        report.active_ids.extend(promoted);
+        report
     }
 
     pub fn ingest_hierarchy_with_channels(
@@ -914,6 +968,108 @@ impl MemoryStore {
         };
         unit.memory_channels = normalized_channels(memory_channels);
         if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl) {
+            unit.corroboration_count = 1;
+        }
+        Self::record_context(&mut unit, context_summary);
+        Self::apply_anchor_heuristics(
+            &mut unit,
+            self.anchor_reuse_threshold,
+            self.anchor_salience_threshold,
+        );
+        let id = unit.id;
+        self.bloom_filter.insert(&key);
+        self.content_index.insert(key, id);
+        self.reindex_channels(&unit);
+        self.persist(&unit);
+        self.cache.insert(id, unit);
+        ActivationOutcome::Active { id, is_new: true }
+    }
+
+    /// Ingest activation with utility boost for StagingEpisodic units (Layer 21 compliance).
+    /// Used by unified training to give memory_target: Core units higher initial utility
+    /// while still requiring corroboration for actual Core promotion.
+    fn ingest_activation_with_utility_boost(
+        &mut self,
+        activation: &ActivatedUnit,
+        source: SourceKind,
+        context_summary: &str,
+        trust_delta: f32,
+        default_memory_type: MemoryType,
+        utility_boost: f32,
+        memory_channels: &[MemoryChannel],
+    ) -> ActivationOutcome {
+        // Intent channel gate: block Intent-channel units from Core memory promotion
+        let is_intent_channel = memory_channels.contains(&MemoryChannel::Intent);
+        let promote_to_core = default_memory_type == MemoryType::Core
+            && !(self.intent_channel_core_promotion_blocked && is_intent_channel);
+        let bloom_maybe = self.bloom_filter.contains(activation.normalized.as_str());
+        if let Some(id) = self
+            .content_index
+            .get(activation.normalized.as_str())
+            .copied()
+        {
+            let anchor_reuse_threshold = self.anchor_reuse_threshold;
+            let anchor_salience_threshold = self.anchor_salience_threshold;
+            let mut persisted = None;
+            if let Some(existing) = self.cache.get_mut(&id) {
+                existing.frequency += activation.frequency.max(1);
+                // Apply utility boost for StagingEpisodic units
+                existing.utility_score = ((existing.utility_score * 0.7) + (activation.utility_score * 0.3)).max(utility_boost);
+                existing.salience_score =
+                    (existing.salience_score * 0.6) + (activation.salience * 0.4);
+                existing.confidence = (existing.confidence * 0.7) + (activation.confidence * 0.3);
+                existing.last_seen_at = Utc::now();
+                existing.trust_score = (existing.trust_score + trust_delta).min(1.0);
+                if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument) {
+                    existing.corroboration_count += 1;
+                }
+                if promote_to_core {
+                    existing.memory_type = MemoryType::Core;
+                }
+                merge_channels(&mut existing.memory_channels, memory_channels);
+                Self::record_context(existing, context_summary);
+                Self::apply_anchor_heuristics(
+                    existing,
+                    anchor_reuse_threshold,
+                    anchor_salience_threshold,
+                );
+                persisted = Some(existing.clone());
+            }
+            if let Some(unit) = persisted.as_ref() {
+                self.reindex_channels(unit);
+                self.persist(unit);
+            }
+            return ActivationOutcome::Active { id, is_new: false };
+        } else if bloom_maybe {
+            self.bloom_filter.record_false_positive();
+        }
+
+        if self.should_stage_candidate(source, default_memory_type) {
+            self.observe_candidate(activation, default_memory_type, memory_channels);
+            return ActivationOutcome::Candidate;
+        }
+
+        let key = activation.normalized.clone();
+        let mut unit = Unit::new(
+            activation.content.clone(),
+            activation.normalized.clone(),
+            activation.level,
+            // Apply utility boost for new StagingEpisodic units
+            activation.utility_score.max(utility_boost),
+            activation.confidence.max(0.2),
+            hashed_position(&activation.normalized, activation.level),
+        );
+        unit.salience_score = activation.salience;
+        unit.trust_score = 0.45 + trust_delta;
+        // Use promote_to_core result to determine actual memory type
+        // Intent-channel units should stay Episodic when blocked
+        unit.memory_type = if promote_to_core {
+            MemoryType::Core
+        } else {
+            MemoryType::Episodic
+        };
+        unit.memory_channels = normalized_channels(memory_channels);
+        if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument) {
             unit.corroboration_count = 1;
         }
         Self::record_context(&mut unit, context_summary);

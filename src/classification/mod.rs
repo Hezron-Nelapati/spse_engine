@@ -21,7 +21,7 @@ pub mod trainer;
 pub use signature::{ClassificationSignature, SemanticHasher};
 pub use pattern::ClassificationPattern;
 pub use calculator::ClassificationCalculator;
-pub use trainer::{ClassificationTrainer, TrainingOutcome, IterationReport, FinalReport, LabeledDialogue, LabeledTurn, DialogueMetadata};
+pub use trainer::{ClassificationTrainer, TrainingOutcome, IterationReport, FinalReport, LabeledDialogue, LabeledTurn, DialogueMetadata, ExpectedUnitCount, MemoryTarget};
 
 // Re-export types from crate::types for convenience
 pub use crate::types::{ClassificationResult, CalculationMethod};

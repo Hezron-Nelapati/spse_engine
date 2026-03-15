@@ -410,6 +410,34 @@ const OPEN_SOURCES: &[OpenSourceDefinition] = &[
         default_chunk_char_limit: Some(6_000),
     },
     OpenSourceDefinition {
+        id: "dryrun_intent_core",
+        label: "DryRun Intent Core Dataset",
+        category: "intent_dialogue",
+        license: "Internal",
+        integration: "structured_json",
+        summary: "High-density intent classification dialogues with reasoning chains, multi-turn conversations, and tone/resolver labels for all 24 intent kinds.",
+        default_type: TrainingSourceType::StructuredJson,
+        default_value: Some("datasets/dryrun/dryrun_intent_core.jsonl"),
+        default_memory: MemoryType::Episodic,
+        default_item_limit: Some(100_000),
+        default_batch_size: Some(500),
+        default_chunk_char_limit: Some(8_000),
+    },
+    OpenSourceDefinition {
+        id: "dryrun_entity_seed",
+        label: "DryRun Entity Seed Dataset",
+        category: "core_kb",
+        license: "Internal",
+        integration: "structured_json",
+        summary: "High-density entity definitions with rich attributes, cross-references, and domain contexts for core knowledge base seeding.",
+        default_type: TrainingSourceType::StructuredJson,
+        default_value: Some("datasets/dryrun/dryrun_entity_seed.jsonl"),
+        default_memory: MemoryType::Core,
+        default_item_limit: Some(50_000),
+        default_batch_size: Some(500),
+        default_chunk_char_limit: Some(6_000),
+    },
+    OpenSourceDefinition {
         id: "dolly_15k",
         label: "Databricks Dolly 15K",
         category: "intent_dialogue",
@@ -647,6 +675,10 @@ pub fn reference_url(id: &str) -> Option<&'static str> {
         Some("https://whyu.me/reclor/")
     } else if id.eq_ignore_ascii_case("oasst1") {
         Some("https://huggingface.co/datasets/OpenAssistant/oasst1")
+    } else if id.eq_ignore_ascii_case("dryrun_intent_core") {
+        Some("datasets/dryrun/dryrun_intent_core.jsonl")
+    } else if id.eq_ignore_ascii_case("dryrun_entity_seed") {
+        Some("datasets/dryrun/dryrun_entity_seed.jsonl")
     } else if id.eq_ignore_ascii_case("dolly_15k") {
         Some("https://huggingface.co/datasets/databricks/databricks-dolly-15k")
     } else if id.eq_ignore_ascii_case("openorca") {

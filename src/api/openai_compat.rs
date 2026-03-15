@@ -43,6 +43,9 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     /// Stop sequences - ignored in Auto-Mode
     pub stop: Option<Vec<String>>,
+    /// SPSE-specific: Enable external retrieval for this request
+    #[serde(default)]
+    pub retrieval_enabled: Option<bool>,
 }
 
 /// OpenAI Message
@@ -238,9 +241,16 @@ async fn process_chat_completion(
     let last_message = request.messages.last().unwrap();
     let query = &last_message.content;
 
-    // Process through engine (async)
+    // Check if retrieval is explicitly enabled for this request
+    let retrieval_enabled = request.retrieval_enabled.unwrap_or(false);
+    
+    // Process through engine with retrieval override
     // Note: In Auto-Mode, temperature, top_p, etc. are ignored
-    let result = engine.process(query).await;
+    let result = if retrieval_enabled {
+        engine.process_with_retrieval(query, true).await
+    } else {
+        engine.process(query).await
+    };
 
     // Build response
     let response_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());

@@ -494,6 +494,15 @@ training_phases:
     min_semantic_routing_accuracy:
 
 source_policies:
+  seed_training:
+    extraction_mode: "field_select"
+    fields_to_extract: ["turns", "messages", "dialogue", "conversation", "content", "role", "text", "name", "definition", "category", "intent", "domain"]
+    fields_to_skip: ["id", "metadata", "timestamp", "links", "aliases", "attributes", "contexts"]
+    flatten_structure: true
+    merge_to_core: true
+    trust_bonus: 0.30
+    memory_type: core
+    min_unique_words_ratio: 0.01
   html:
     extraction_mode: "readability"
     strip_elements: ["nav", "footer", "script", "style", "aside", "ads"]
@@ -504,7 +513,7 @@ source_policies:
     decay_days: 7
   qa_json:
     extraction_mode: "field_select"
-    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation"]
+    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation", "content", "role", "text", "message", "utterance"]
     fields_to_skip: ["answer", "answers", "wellFormedAnswers", "output", "completion", "target", "label", "id", "metadata", "options", "choices", "candidates"]
     flatten_structure: true
     merge_to_core: false
@@ -514,7 +523,7 @@ source_policies:
     usage_tag: "intent_training"
   structured_json:
     extraction_mode: "entity_extract"
-    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "label", "description", "aliases", "claims", "summary", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation", "steps", "instructions", "procedure", "actions", "workflow", "plan", "output", "response", "completion", "target"]
+    fields_to_extract: ["question", "context", "instruction", "prompt", "input", "query", "label", "description", "definition", "name", "category", "aliases", "claims", "summary", "reasoning", "rationale", "explanation", "analysis", "solution", "proof", "messages", "turns", "dialogue", "conversation", "steps", "instructions", "procedure", "actions", "workflow", "plan", "output", "response", "completion", "target"]
     fields_to_skip: ["id", "metadata", "timestamp"]
     skip_internal_ids: true
     merge_to_core: true
