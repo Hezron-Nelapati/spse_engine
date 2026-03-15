@@ -519,7 +519,7 @@ pub fn ingest_reasoning_trace(
         hierarchy.levels.insert("Phrase".to_string(), vec![activation.clone()]);
 
         // Ingest into Reasoning channel only (not Core)
-        memory.ingest_hierarchy_with_channels(
+        let ingested_ids = memory.ingest_hierarchy_with_channels(
             &hierarchy,
             SourceKind::UserInput,
             &format!("reasoning_trace_{:?}", trace.structure_hash.unwrap_or(0)),
@@ -527,22 +527,29 @@ pub fn ingest_reasoning_trace(
             &[MemoryChannel::Reasoning],
         );
 
-        // Find the created unit and mark it as a process unit
-        if let Some(unit) = memory
-            .units_in_channel(MemoryChannel::Reasoning)
-            .iter()
-            .find(|u| u.content == step.content && !u.is_process_unit)
-        {
-            // Compute structure hash for process anchor registration
-            let mut hasher = DefaultHasher::new();
-            step.content.hash(&mut hasher);
-            let structure_hash = hasher.finish();
+        // Use returned IDs directly — O(1) lookup instead of O(n) channel scan
+        let unit_id = ingested_ids.first().copied().or_else(|| {
+            // Fallback: look up by normalized content via content_index (O(1) hash lookup)
+            memory.find_unit_id_by_content(&step.content)
+        });
 
-            // Register as process unit and reasoning pattern
-            memory.register_process_anchor(structure_hash, unit.id);
-            memory.register_reasoning_pattern(trace.reasoning_type, unit.id);
+        if let Some(id) = unit_id {
+            // Verify unit exists and is not already a process unit
+            let should_register = memory
+                .get_unit(&id)
+                .map(|u| !u.is_process_unit)
+                .unwrap_or(false);
 
-            unit_ids.push(unit.id);
+            if should_register {
+                let mut hasher = DefaultHasher::new();
+                step.content.hash(&mut hasher);
+                let structure_hash = hasher.finish();
+
+                memory.register_process_anchor(structure_hash, id);
+                memory.register_reasoning_pattern(trace.reasoning_type, id);
+
+                unit_ids.push(id);
+            }
         }
     }
 

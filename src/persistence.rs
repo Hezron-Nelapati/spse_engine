@@ -188,15 +188,48 @@ impl Db {
         Ok(())
     }
 
-    /// Batch upsert units in a single transaction for efficiency
+    /// Batch upsert units in a single transaction for efficiency.
+    /// Uses a prepared statement to avoid re-parsing SQL for each unit.
     pub fn batch_upsert_units(&self, units: &[Unit]) -> SqlResult<()> {
         if units.is_empty() {
             return Ok(());
         }
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
-        for unit in units {
-            upsert_unit_in_table(&tx, "units", unit)?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO units (
+                    id, content, normalized, level, frequency, utility_score, pos_x, pos_y, pos_z,
+                    anchor_status, memory_type, memory_channels_json, created_at, last_seen_at, salience_score, confidence,
+                    trust_score, corroboration_count, links_json, contexts_json
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                 )",
+            )?;
+            for unit in units {
+                stmt.execute(params![
+                    unit.id.to_string(),
+                    unit.content,
+                    unit.normalized,
+                    level_to_str(unit.level),
+                    unit.frequency as i64,
+                    unit.utility_score,
+                    unit.semantic_position[0],
+                    unit.semantic_position[1],
+                    unit.semantic_position[2],
+                    i64::from(unit.anchor_status),
+                    memory_type_to_str(unit.memory_type),
+                    memory_channels_to_json(&unit.memory_channels),
+                    unit.created_at.to_rfc3339(),
+                    unit.last_seen_at.to_rfc3339(),
+                    unit.salience_score,
+                    unit.confidence,
+                    unit.trust_score,
+                    unit.corroboration_count as i64,
+                    serde_json::to_string(&unit.links).unwrap_or_else(|_| "[]".to_string()),
+                    serde_json::to_string(&unit.contexts).unwrap_or_else(|_| "[]".to_string()),
+                ])?;
+            }
         }
         tx.commit()?;
         Ok(())

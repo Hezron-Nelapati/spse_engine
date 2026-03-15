@@ -983,10 +983,16 @@ impl Engine {
                     }
                 }
 
-                // Disable training mode and flush remaining writes
+                // Disable training mode and bulk-flush cache to SQLite
                 {
+                    run_logger.log_progress("  [sqlite] flushing to database...");
+                    let flush_start = Instant::now();
                     let mut memory = self.memory.lock().expect("memory mutex poisoned");
                     memory.set_training_mode(false);
+                    run_logger.log_progress(&format!(
+                        "  [sqlite] flushed in {:.1}s",
+                        flush_start.elapsed().as_secs_f64()
+                    ));
                 }
 
                 total_examples += examples_ingested;

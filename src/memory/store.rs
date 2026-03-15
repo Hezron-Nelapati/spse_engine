@@ -554,6 +554,12 @@ impl MemoryStore {
         self.cache.get(id)
     }
 
+    /// O(1) content_index lookup by normalized text. Used to find unit IDs
+    /// without scanning entire channels.
+    pub fn find_unit_id_by_content(&self, normalized: &str) -> Option<Uuid> {
+        self.content_index.get(normalized).copied()
+    }
+
     pub fn get_units(&self, ids: &[Uuid]) -> Vec<Unit> {
         ids.iter()
             .filter_map(|id| self.cache.get(id).cloned())
@@ -2632,6 +2638,11 @@ impl MemoryStore {
     }
 
     fn persist(&mut self, unit: &Unit) {
+        // In training mode, skip all persistence — cache is source of truth.
+        // Bulk flush happens when training_mode is disabled.
+        if self.training_mode {
+            return;
+        }
         if self.write_deferred {
             self.pending_writes.push(unit.clone());
             if self.pending_writes.len() >= self.pending_writes_threshold {
@@ -2661,16 +2672,30 @@ impl MemoryStore {
 
     /// Enable or disable training mode.
     /// When enabled: skips candidate staging (direct insert), skips pattern combination
-    /// recording, and increases deferred write batch size for throughput.
+    /// recording, skips per-unit persistence (cache is source of truth).
+    /// When disabled: bulk-flushes entire cache to SQLite in one transaction.
     pub fn set_training_mode(&mut self, enabled: bool) {
         self.training_mode = enabled;
         if enabled {
             self.pending_writes_threshold = 5000;
             self.write_deferred = true;
         } else {
-            self.pending_writes_threshold = 500;
+            // Flush any pending writes from before training mode
             self.flush_pending_writes();
+            // Bulk-write all cached units to SQLite
+            self.flush_cache_to_db();
+            self.pending_writes_threshold = 500;
         }
+    }
+
+    /// Bulk-write all units from the in-memory cache to SQLite.
+    /// Used when exiting training mode to persist everything in one transaction.
+    fn flush_cache_to_db(&self) {
+        if self.cache.is_empty() {
+            return;
+        }
+        let units: Vec<Unit> = self.cache.values().cloned().collect();
+        let _ = self.db.batch_upsert_units(&units);
     }
 
     fn remove_from_channels(&mut self, unit: &Unit) {
