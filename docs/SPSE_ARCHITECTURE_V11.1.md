@@ -1,8 +1,8 @@
 # Structured Predictive Search (SPS) Architecture
 
-**Document Version:** 12.0  
+**Document Version:** 13.0  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction
 
 ---
 
@@ -32,14 +32,14 @@ The SPS (Structured Predictive Search) Engine — implemented as the SPSE codeba
 
 1. **Classification System** — Ingests raw text, discovers dynamic semantic units, classifies intent/tone/uncertainty, and gates downstream processing.
 2. **Reasoning System** — Manages dual memory (Core vs. Episodic), retrieves and merges external evidence, scores candidate concepts, and orchestrates learning.
-3. **Predictive System** — Navigates a regularized 3D semantic map via force-directed layout to resolve the next unit through local geometric search rather than global softmax.
+3. **Predictive System** — Maintains a **Word Graph** embedded in 3D space: every word is a node, training creates directed weighted edges ("roads") between words, and prediction is a 3-tier spatial graph walk (near edges → far edges → on-the-fly pathfinding through hub nodes) rather than global softmax.
 
-These three systems consolidate the engine's 21 internal processing layers into coherent functional domains while preserving the core mechanisms: tokenizer-free units, 3D semantic routing, dual memory governance, gated retrieval, and 7-dimensional candidate scoring.
+These three systems consolidate the engine's 21 internal processing layers into coherent functional domains while preserving the core mechanisms: tokenizer-free units, word-level graph navigation in 3D space, dual memory governance, gated retrieval, and 7-dimensional candidate scoring.
 
 ### Key Architectural Differentiators
 
 - **Decoupled Intent vs. Prediction** — In standard Transformers, intent is implicit in attention heads. Here, **Classification** is an explicit, memory-backed stage that gates the expensive Reasoning and Predictive stages.
-- **Spatial vs. Dense** — The Predictive System replaces dense softmax over a vocabulary with sparse geometric search over a 3D map. Words that co-occur are literal spatial neighbors, making prediction a local navigation problem.
+- **Graph Walk vs. Dense** — The Predictive System replaces dense softmax over a vocabulary with **directed graph navigation** through a 3D-embedded word graph. Words connected by training form explicit weighted edges ("roads"); frequently-walked paths harden into variable-length highways. Prediction walks these roads with spatial proximity as the priority signal, falling back to on-the-fly pathfinding through function-word hubs for novel combinations — making it generalize like an LLM without a neural network.
 - **Reasoning as Evidence Merge** — The Reasoning System explicitly manages truth (internal memory vs. external web evidence) *before* any words are predicted, preventing hallucination by resolving conflicts upstream of generation.
 
 ### Design Principles
@@ -79,7 +79,7 @@ The engine's 21 internal processing layers are organized into three functional s
 |--------|----------|----------------|---------------|
 | **Classification** | Identify *what* the input means and *whether* external help is needed | Hybrid heuristic classification reinforced by memory-backed intent channels | L1, L2, L3, L9, L10, L19 |
 | **Reasoning** | Determine the response strategy by managing memory, evidence, and truth | Dual-memory governance (Core vs. Episodic), trust-aware evidence merging, adaptive candidate scoring | L4, L7, L8, L11, L12, L13, L14, L18, L21 |
-| **Predictive** | Navigate a spatial word map to select the next unit via local geometric search | Regularized 3D coarse map with force-directed energy minimization and hierarchical region indexing | L5, L6, L15, L16, L17 |
+| **Predictive** | Navigate a Word Graph to select the next word via 3-tier spatial graph walk | Directed weighted word graph in 3D space; edges (roads) + highways; near → far → pathfinding through function-word hubs | L5, L6, L15, L16, L17 |
 
 ### Cross-Cutting Concerns
 
@@ -101,7 +101,8 @@ pub mod document         // Document ingestion (PDF, DOCX, plain text)
 pub mod drill_lib        // Drill framework for system testing
 pub mod engine           // Core Engine struct — orchestrates all three systems
 pub mod gpu              // GPU acceleration (feature-gated wgpu)
-pub mod layers           // 14 layer implementation files across all systems
+pub mod predictive       // Predictive System: Word Graph (L5), Step Resolver (L16), Sequence Assembler (L17)
+pub mod reasoning        // Reasoning System: Context (L7), Retrieval (L11), Merge (L13), Search (L14), Feedback (L18)
 pub mod memory           // Reasoning System: MemoryStore (L4/L21) + DynamicMemoryAllocator
 pub mod open_sources     // Internal dataset catalog
 pub mod persistence      // SQLite persistence layer
@@ -140,8 +141,8 @@ pub struct Engine {
     safety: TrustSafetyValidator,                  // L12/L19 — trust assessment
     spatial_grid: Arc<Mutex<SpatialGrid>>,         // Classification pattern retrieval
 
-    // --- Predictive System ---
-    decoder: OutputDecoder,                        // L17 — answer finalization
+    // --- Predictive System (Word Graph) ---
+    decoder: OutputDecoder,                        // L17 — sequence assembly
 
     // --- Cross-Cutting ---
     scheduler: Arc<PriorityScheduler>,             // 4-priority work queue
@@ -200,46 +201,46 @@ graph TD
 
     ReasonSys -- "Ranked Candidate Concepts" --> PredSys[Predictive System]
 
-    subgraph "3. Predictive System"
-        L5[L5: 3D Semantic Map]
-        L6[L6: Region Index]
-        L15[L15: Candidate Router]
-        L16[L16: Fine Resolver]
-        L17[L17: Output Decoder]
+    subgraph "3. Predictive System (Word Graph)"
+        L5[L5: Word Graph Manager]
+        L6[L6: Spatial + Path Index]
+        L15[L15: Graph Walker 3-Tier]
+        L16[L16: Step Resolver]
+        L17[L17: Sequence Assembler]
 
         L5 <--> L6
-        L15 -- "Local Neighbors" --> L16
+        L15 -- "Edge Selection" --> L16
         L16 --> L17
         L17 --> Output[Final Text]
     end
 
     L17 -- "Prediction Error Stats" --> L18
-    L18 -- "Spatial Corrections" --> L5
+    L18 -- "Edge Strengthening" --> L5
 ```
 
 ### Layer-to-System Mapping (Complete Reference)
 
 | Layer | Name | System | Source File | Config Section |
 |-------|------|--------|------------|----------------|
-| L1 | Input Ingestion | Classification | `layers/input.rs` | — |
-| L2 | Unit Builder | Classification | `layers/builder.rs` | `layer_2_unit_builder` |
-| L3 | Hierarchy Organizer | Classification | `layers/hierarchy.rs` | (uses builder config) |
+| L1 | Input Ingestion | Classification | `classification/input.rs` | — |
+| L2 | Unit Builder | Classification | `classification/builder.rs` | `layer_2_unit_builder` |
+| L3 | Hierarchy Organizer | Classification | `classification/hierarchy.rs` | (uses builder config) |
 | L4 | Memory Ingestion | Reasoning | `memory/store.rs` | `layer_21_memory_governance` |
-| L5 | Semantic Router | Predictive | `layers/router.rs` | `layer_5_semantic_map` |
-| L6 | Context Manager | Predictive | `layers/context.rs` | — |
-| L7 | Intent Detector | Reasoning | `layers/intent.rs` | `intent` |
+| L5 | Word Graph Manager | Predictive | `predictive/router.rs` | `layer_5_semantic_map` |
+| L6 | Spatial + Path Index | Predictive | `reasoning/context.rs` + `spatial_index.rs` | — |
+| L7 | Intent Detector | Reasoning | `classification/intent.rs` | `intent` |
 | L8 | Adaptive Runtime | Reasoning | `engine.rs` | `adaptive_behavior` |
-| L9 | Retrieval Decision | Classification | `layers/intent.rs` | `layer_9_retrieval_gating` |
-| L10 | Query Builder | Classification | `layers/query.rs` | `layer_10_query_builder` |
-| L11 | Retrieval Pipeline | Reasoning | `layers/retrieval.rs` | `layer_11_retrieval` |
-| L12 | Safety Validator | Reasoning | `layers/safety.rs` | `layer_19_trust_heuristics` |
-| L13 | Evidence Merger | Reasoning | `layers/merge.rs` | `layer_13_evidence_merge` |
-| L14 | Candidate Scorer | Reasoning | `layers/search.rs` | `layer_14_candidate_scoring` |
+| L9 | Retrieval Decision | Classification | `classification/intent.rs` | `layer_9_retrieval_gating` |
+| L10 | Query Builder | Classification | `classification/query.rs` | `layer_10_query_builder` |
+| L11 | Retrieval Pipeline | Reasoning | `reasoning/retrieval.rs` | `layer_11_retrieval` |
+| L12 | Safety Validator | Reasoning | `classification/safety.rs` | `layer_19_trust_heuristics` |
+| L13 | Evidence Merger | Reasoning | `reasoning/merge.rs` | `layer_13_evidence_merge` |
+| L14 | Candidate Scorer | Reasoning | `reasoning/search.rs` | `layer_14_candidate_scoring` |
 | L15 | Resolver Mode | Predictive | `engine.rs` | `adaptive_behavior` |
-| L16 | Fine Resolver | Predictive | `layers/resolver.rs` | `layer_16_fine_resolver` |
-| L17 | Output Decoder | Predictive | `layers/output.rs` | — |
-| L18 | Feedback Controller | Reasoning | `layers/feedback.rs` | — |
-| L19 | Trust/Safety | Classification | `layers/safety.rs` | `layer_19_trust_heuristics` |
+| L16 | Step Resolver | Predictive | `predictive/resolver.rs` | `layer_16_fine_resolver` |
+| L17 | Sequence Assembler | Predictive | `predictive/output.rs` | — |
+| L18 | Feedback Controller | Reasoning | `reasoning/feedback.rs` | — |
+| L19 | Trust/Safety | Classification | `classification/safety.rs` | `layer_19_trust_heuristics` |
 | L20 | Telemetry | Cross-Cutting | `telemetry/` | `layer_20_telemetry` |
 | L21 | Governance | Reasoning | `memory/store.rs` | `layer_21_memory_governance` |
 
@@ -277,12 +278,12 @@ Total:
 
 | Layer | Name | Source | Responsibility |
 |-------|------|--------|----------------|
-| L1 | Input Ingestion | `layers/input.rs` | Byte/character ingestion without fixed tokens; normalize raw text → `InputPacket` |
-| L2 | Unit Builder | `layers/builder.rs` | Rolling hash discovery of dynamic units (n-grams, phrases) that form classification features |
-| L3 | Hierarchy Organizer | `layers/hierarchy.rs` | Level grouping (Char → Subword → Word → Phrase → Pattern), anchor/entity extraction |
-| L9 | Intent & Uncertainty Detector | `layers/intent.rs` | Primary classification engine: weighted score based on entropy, recency, and internal disagreement; classifies query type and decides if retrieval is required |
-| L10 | Safe Query Builder | `layers/query.rs` | Sanitizes classified intent into a search query if needed, stripping PII |
-| L19 | Trust & Safety | `layers/safety.rs` | Classifies source reliability; detects injection attacks and toxic tone |
+| L1 | Input Ingestion | `classification/input.rs` | Byte/character ingestion without fixed tokens; normalize raw text → `InputPacket`; **compound noun detection** via POS tagger (NN+NN, NNP+NNP merge) |
+| L2 | Unit Builder | `classification/builder.rs` | Rolling hash discovery of dynamic units (n-grams, phrases) that form classification features |
+| L3 | Hierarchy Organizer | `classification/hierarchy.rs` | Level grouping (Char → Subword → Word → Phrase → Pattern), anchor/entity extraction |
+| L9 | Intent & Uncertainty Detector | `classification/intent.rs` | Primary classification engine: weighted score based on entropy, recency, and internal disagreement; classifies query type and decides if retrieval is required |
+| L10 | Safe Query Builder | `classification/query.rs` | Sanitizes classified intent into a search query if needed, stripping PII |
+| L19 | Trust & Safety | `classification/safety.rs` | Classifies source reliability; detects injection attacks and toxic tone |
 
 ### Operational Flow
 
@@ -304,9 +305,9 @@ Total:
 
 The Classification System begins with tokenizer-free ingestion. Rather than a fixed vocabulary, the engine discovers reusable semantic elements dynamically:
 
-- **L1 (`layers/input.rs`)** — Normalizes raw text into an `InputPacket`. No fixed tokenizer; operates on bytes/characters directly.
-- **L2 (`layers/builder.rs`)** — Uses rolling hash to discover variable-length units (n-grams, words, phrases). Each unit receives utility, salience, and confidence scores. Config: `layer_2_unit_builder`.
-- **L3 (`layers/hierarchy.rs`)** — Groups discovered units into five granularity levels:
+- **L1 (`classification/input.rs`)** — Normalizes raw text into an `InputPacket`. No fixed tokenizer; operates on bytes/characters directly. **Compound noun merge**: after POS tagging, consecutive NN+NN and NNP+NNP sequences are merged into single tokens (e.g., "machine learning" → `machine_learning`, "New York" → `New_York`). Known compounds are cached; new compounds are added when seen ≥ `compound_noun_min_frequency` times.
+- **L2 (`classification/builder.rs`)** — Uses rolling hash to discover variable-length units (n-grams, words, phrases). Each unit receives utility, salience, and confidence scores. Config: `layer_2_unit_builder`.
+- **L3 (`classification/hierarchy.rs`)** — Groups discovered units into five granularity levels:
 
 | Level | Description |
 |-------|-------------|
@@ -348,7 +349,7 @@ ClassificationResult {
 
 ### 3.3 Safe Query Construction (L10)
 
-When retrieval is flagged, `SafeQueryBuilder::build()` in `layers/query.rs`:
+When retrieval is flagged, `SafeQueryBuilder::build()` in `classification/query.rs`:
 
 1. Strips PII (configurable aggressiveness via `query.pii_stripping_aggressiveness`: "standard")
 2. Applies semantic expansion from unit hierarchy
@@ -356,7 +357,7 @@ When retrieval is flagged, `SafeQueryBuilder::build()` in `layers/query.rs`:
 
 ### 3.4 Trust & Safety Gate (L19)
 
-`TrustSafetyValidator` in `layers/safety.rs` operates at the classification boundary:
+`TrustSafetyValidator` in `classification/safety.rs` operates at the classification boundary:
 
 Trust scoring formula per source:
 ```
@@ -507,13 +508,13 @@ Classification patterns stored here are queried via spatial grid for O(log N) re
 | Layer | Name | Source | Responsibility |
 |-------|------|--------|----------------|
 | L4 | Dual Unit Memory Store | `memory/store.rs` | Manages separation of stable facts (Core) and transient session data (Episodic) |
-| L7 | Context Matrix & Anchor Memory | `layers/intent.rs` | Maintains active reasoning state, weighing recency and salience while protecting critical long-range anchors |
+| L7 | Context Matrix & Anchor Memory | `reasoning/context.rs` | Maintains active reasoning state, weighing recency and salience while protecting critical long-range anchors |
 | L8 | Adaptive Runtime | `engine.rs` | Profile selection (10 intent profiles), scoring weight adjustment |
-| L11 | Retrieval Pipeline | `layers/retrieval.rs` | Fetches external data when Classification flagged a need |
-| L12 | Safety Validator | `layers/safety.rs` | Normalizes and trust-scores retrieved documents |
-| L13 | Evidence Merger | `layers/merge.rs` | Merges external evidence with internal memory using trust weights (Source Reliability + Recency + Agreement) |
-| L14 | Adaptive Calculated Search | `layers/search.rs` | Core reasoning engine: scores potential answer fragments on spatial fit, context fit, sequence logic, and evidence support — O(k·d) complexity |
-| L18 | Feedback Controller | `layers/feedback.rs` | Orchestrates learning updates; decides which reasoning traces become durable memory |
+| L11 | Retrieval Pipeline | `reasoning/retrieval.rs` | Fetches external data when Classification flagged a need |
+| L12 | Safety Validator | `classification/safety.rs` | Normalizes and trust-scores retrieved documents |
+| L13 | Evidence Merger | `reasoning/merge.rs` | Merges external evidence with internal memory using trust weights (Source Reliability + Recency + Agreement) |
+| L14 | Adaptive Calculated Search | `reasoning/search.rs` | Core reasoning engine: scores potential answer fragments on spatial fit, context fit, sequence logic, and evidence support — O(k·d) complexity |
+| L18 | Feedback Controller | `reasoning/feedback.rs` | Orchestrates learning updates; decides which reasoning traces become durable memory |
 | L21 | Memory Governance | `memory/store.rs` | Prunes low-utility reasoning paths, compacts memory, prevents bloat |
 
 ### Operational Flow
@@ -627,7 +628,7 @@ Units earn anchor status when:
 - `frequency >= anchor_reuse_threshold` (3)
 - `salience_score >= anchor_salience_threshold` (0.70)
 
-Anchors are protected from pruning for `anchor_protection_grace_days` (14 days). The Predictive System's Fine Resolver (L16) also protects anchors during resolution.
+Anchors are protected from pruning for `anchor_protection_grace_days` (14 days). The Predictive System's Step Resolver (L16) also protects anchor words during edge selection.
 
 #### Bloom Filter (`src/bloom_filter.rs`)
 
@@ -638,7 +639,7 @@ Anchors are protected from pruning for `anchor_protection_grace_days` (14 days).
 
 ### 4.2 Context Matrix & Adaptive Runtime (L7/L8)
 
-**L7 (`layers/context.rs`)** constructs the context matrix from the current memory snapshot — sequence state, task entities, and recency-weighted salience.
+**L7 (`reasoning/context.rs`)** constructs the context matrix from the current memory snapshot — sequence state, task entities, and recency-weighted salience.
 
 **L8 (`engine.rs`)** resolves adaptive runtime settings based on the intent profile received from the Classification System. Ten named profiles with tuned scoring weights:
 
@@ -661,9 +662,9 @@ Two trust profiles: `default` (trust=0.50, corroboration=2, no HTTPS) and `high_
 
 If the Classification System flagged a retrieval need, the Reasoning System executes:
 
-1. **L11 (`layers/retrieval.rs`)** — Fetches from external sources via SearxNG. Response caching. Config: `layer_11_retrieval`.
-2. **L12 (`layers/safety.rs`)** — Trust assessment of retrieved documents. HTTPS enforcement, format trust adjustments, content quality gates (see §3.4).
-3. **L13 (`layers/merge.rs`)** — Evidence merge. Conflict detection and agreement scoring between internal memory and web results. Trust-weighted merge using Source Reliability + Recency + Agreement. Config: `layer_13_evidence_merge`.
+1. **L11 (`reasoning/retrieval.rs`)** — Fetches from external sources via SearxNG. Response caching. Config: `layer_11_retrieval`.
+2. **L12 (`classification/safety.rs`)** — Trust assessment of retrieved documents. HTTPS enforcement, format trust adjustments, content quality gates (see §3.4).
+3. **L13 (`reasoning/merge.rs`)** — Evidence merge. Conflict detection and agreement scoring between internal memory and web results. Trust-weighted merge using Source Reliability + Recency + Agreement. Config: `layer_13_evidence_merge`.
 
 If `local_documents` are provided (e.g., uploaded files), they are merged directly without L10/L11.
 
@@ -746,7 +747,7 @@ On-demand allocation for reasoning buffers:
 
 ### 4.6 Feedback & Learning (L18)
 
-`FeedbackController::learn()` in `layers/feedback.rs` generates `FeedbackEvent` instances after each query:
+`FeedbackController::learn()` in `reasoning/feedback.rs` generates `FeedbackEvent` instances after each query:
 - Impact scoring of predicted vs. expected outcome
 - Weight adjustment signals fed back to Classification (pattern reinforcement) and Predictive (spatial corrections) systems
 - Events enqueued for async background worker processing
@@ -793,112 +794,289 @@ GovernanceReport {
 
 ## 5. Predictive System
 
-**Function:** Creates and navigates a **spatial map of words/units**. Concepts likely to appear side-by-side in a sentence are physically nearer in 3D space, enabling efficient local search for the next token/unit rather than a global softmax computation.
+**Function:** Maintains a **Word Graph** — a directed, weighted graph of individual words embedded in 3D space. Training creates explicit connections ("roads") between words; prediction walks these roads using spatial proximity as the priority signal. When no direct road exists, the system pathfinds through function-word hubs on-the-fly, enabling LLM-like generalization without a neural network.
 
-**Core Mechanism:** Regularized 3D Coarse Map with force-directed energy minimization (non-backpropagation) and hierarchical region indexing. Supports **autoregressive spatial walk** for sequence generation: iteratively navigate the spatial map, selecting the next unit from local neighbors at each step, with attract/repel position training as the learning signal.
+**Core Mechanism:** Word-level graph with directed weighted edges, embedded in a regularized 3D space via force-directed layout. Prediction uses a **3-tier spatial graph walk**: (1) near direct edges, (2) far direct edges, (3) on-the-fly pathfinding through hub nodes. Frequently-walked multi-hop paths harden into variable-length **highways** for fast traversal.
 
 ### Constituent Layers
 
 | Layer | Name | Source | Responsibility |
 |-------|------|--------|----------------|
-| L5 | Regularized 3D Coarse Map | `layers/router.rs` | Central spatial structure; units positioned by semantic similarity; force-directed layout (attraction/repulsion) rather than gradient descent |
-| L6 | Hierarchical 3D Region Index | `layers/context.rs` | Partitions map into searchable regions (Spatial Grid/Octree) for O(1) or O(log n) neighbor lookup |
-| L15 | Internal Candidate Router | `engine.rs` | Narrows search space to local neighbors in 3D map; prevents local minima while avoiding global scans |
-| L16 | Fine Resolver | `layers/resolver.rs` | Selects exact next unit from shortlisted spatial neighbors using temperature-controlled probabilistic choice |
-| L17 | Output Decoder | `layers/output.rs` | Converts resolved spatial unit back into surface text; ensures fluent reconstruction grounded in map geometry |
+| L5 | Word Graph Manager | `predictive/router.rs` | Maintains the word graph: nodes, edges, highways. Adds words, creates/strengthens edges during training. Force-directed 3D layout positions connected words nearby. |
+| L6 | Spatial + Path Index | `reasoning/context.rs` + `spatial_index.rs` + `region_index.rs` | Spatial grid for tiered neighbor lookup (near → far). Trie-based highway prefix index for fast path matching. |
+| L15 | Graph Walker | `engine.rs` | Implements 3-tier prediction walk: near edges → far edges → on-the-fly pathfinding through hub nodes. Highway matching and preference. |
+| L16 | Step Resolver | `predictive/resolver.rs` | At each walk step, resolves which edge to follow via temperature-controlled probabilistic choice with intent shaping and context gating. |
+| L17 | Sequence Assembler | `predictive/output.rs` | Assembles the walked word path into coherent surface text. Handles spacing, punctuation, capitalization. Evidence grounding when retrieval was used. |
 
 ### Operational Flow
 
 ```
 1. Receive Ranked Candidate Concepts from Reasoning System
-2. L5: Project candidates onto 3D Semantic Map
-       Update unit positions via force-directed layout
-       Connect neighbors (trust=0.35 minimum)
-3. L6: Region Index instantly finds neighboring units
-       that are spatially close (high probability of co-occurrence)
-4. L15: Select resolver mode:
-        - Retrieval used OR ambiguous OR negative certainty_bias → Balanced
-        - Otherwise → Deterministic
-5. L15: Local Candidate Search — evaluate spatial fit,
-        transition probabilities, and sequence continuity
-6. L16: Fine Resolution — pick single best next unit
-        Temperature-controlled probabilistic choice
-        Intent shaping and anchor protection applied
-        Fallback: first candidate with Deterministic mode
-7. L17: Decode — emit surface text
-        Reshape output for intent-specific formatting
-        Queue prediction error stats → Reasoning System L18
-8. L18 feedback → L5 spatial position adjustments
+2. L5: Map candidates to Word Graph nodes
+       Identify starting node(s) from context
+       Check for highway prefix matches on recent sequence
+3. L6: Spatial Index provides tiered edge lookup:
+       Tier 1: direct edges where target is spatially near
+       Tier 2: direct edges where target is spatially far
+       Tier 3: on-the-fly pathfinding through hub nodes (A*)
+4. L15: Graph Walk — for each step:
+       a. Gather outgoing edges from current node
+       b. Filter by context (intent, recent words, reasoning output)
+       c. Score: edge_weight × proximity_bonus × context_relevance
+       d. Check highway match → boost if prefix matches
+       e. If no good edges: pathfind through Function-word hubs
+5. L16: Step Resolution — pick single best edge to follow
+       Temperature-controlled probabilistic choice
+       Intent shaping and anchor protection applied
+       Fallback: spatial nearest with Deterministic mode
+6. L17: Assemble walked word sequence → surface text
+       Reshape output for intent-specific formatting
+       Queue prediction error stats → Reasoning System L18
+7. L18 feedback → L5 edge strengthening + spatial adjustments
 ```
 
-### 5.1 Regularized 3D Coarse Map (L5)
+### 5.1 Word Graph Structure (L5)
 
-The central spatial structure of the engine (`layers/router.rs`). Config: `layer_5_semantic_map`.
+The central data structure of the Predictive System (`predictive/router.rs`). Config: `layer_5_semantic_map`.
 
-Every unit in memory has a 3D position (`semantic_position: [f32; 3]`). Units that frequently co-occur are attracted toward each other; unrelated units are repelled. This is maintained via **force-directed layout** — not gradient descent:
+#### Word Nodes
 
-- **Attractive force** — between linked units (sequence, semantic, parent-child edges)
-- **Repulsive force** — between all units within a region (prevents collapse)
-- **Energy minimization** — iterative layout steps during maintenance cycles
+Every unique word in the engine's vocabulary is a **node** embedded in 3D space:
 
-The spatial map enables the key architectural insight: **prediction is local navigation, not global computation**. To predict the next word, the system only needs to search the local spatial neighborhood of the current context — O(1) or O(log n) instead of O(vocabulary_size).
+```rust
+struct WordNode {
+    id: WordId,                        // compact u32 index
+    content: String,                   // "the", "quantum", "New_York"
+    position: [f32; 3],                // 3D spatial coordinates
+    node_type: NodeType,               // Content | Function | Compound | Custom
+    frequency: u32,                    // global usage count
+    is_anchor: bool,                   // protected from pruning
+    content_fingerprint: u64,          // FNV hash for fast lookup
+}
 
-**Escape profiles** prevent getting stuck in local minima: stochastic jumps with configurable probability (`stochastic_jump_probability` per intent profile) explore non-obvious candidates.
+enum NodeType {
+    Content,    // nouns, verbs, adjectives — domain-specific hubs
+    Function,   // the, is, of, and — universal routing hubs (never pruned)
+    Compound,   // machine_learning, New_York — POS-merged compounds
+    Custom,     // user-defined names, slang — placed by sentence context
+}
+```
 
-### 5.2 Hierarchical Region Index (L6)
+**Node types serve different roles in the graph:**
 
-Two spatial index structures partition the 3D map:
+| Property | Content Words | Function Words | Compound Words | Custom Words |
+|----------|--------------|----------------|----------------|--------------|
+| **Connectivity** | 10–200 edges | 500–5000 edges | 10–100 edges | 1–50 edges |
+| **Role** | Domain-specific hub | Universal routing hub | Semantic unit | Context-placed |
+| **Pruning** | Subject to decay | **Never pruned** | Subject to decay | Subject to decay |
+| **Spatial position** | Clustered by domain | Central (high-connectivity) | Near related content | Avg of sentence neighbors |
 
-- **SpatialGrid** (`src/spatial_index.rs`) — Grid-based spatial index for O(log N) queries. Used for both unit lookup and classification pattern retrieval.
-- **RegionIndex** (`src/region_index.rs`) — Regional spatial index for hierarchical partitioning.
+#### Word Edges (Roads)
 
-Together they enable instant neighbor lookup: given a 3D position, find all units within a configurable radius without scanning the entire memory.
+Directed, weighted connections between word nodes. Created and strengthened during training:
 
-### 5.3 Candidate Router (L15)
+```rust
+struct WordEdge {
+    from: WordId,                      // source word
+    to: WordId,                        // target word
+    weight: f32,                       // connection strength [0, 1]
+    context_tags: SmallVec<[u64; 4]>,  // hashed context fingerprints (polysemy)
+    frequency: u32,                    // times traversed
+    last_reinforced: u32,              // epoch counter for decay
+}
+```
 
-Located in `engine.rs`, the router narrows the candidate space:
+- **Weight formula**: `base_weight × frequency_factor × recency_factor × context_diversity_bonus`
+- **Context tags**: hashed fingerprints of the sentences where this edge appeared — enables polysemy disambiguation without multiple nodes per word (e.g., "bank" has edges tagged `{finance}` and edges tagged `{nature}`)
+- **Decay**: edges not reinforced within `edge_decay_epochs` maintenance cycles lose weight; pruned below `edge_min_weight`
 
-1. Takes scored candidates from Reasoning System L14
-2. Projects them onto the 3D map
-3. Uses Region Index for spatial neighbor discovery
-4. Selects resolver mode based on Classification confidence:
-   - Retrieval used OR ambiguous → **Balanced**
-   - High confidence → **Deterministic**
-   - Creative/brainstorm intents → **Exploratory**
+#### Highways (Meta-connections)
 
-### 5.4 Fine Resolver (L16)
+Variable-length pre-formed paths through the graph. Created when a word sequence is walked ≥ `highway_formation_threshold` times (configurable, default 5):
 
-`FineResolver::select_with_shaping()` in `layers/resolver.rs`. Config: `layer_16_fine_resolver`.
+```rust
+struct Highway {
+    id: HighwayId,
+    path: Vec<WordId>,                 // variable length: 2..N words
+    aggregate_weight: f32,             // overall path quality
+    frequency: u32,                    // times this exact sequence walked
+    entry_contexts: Vec<u64>,          // context fingerprints that trigger
+    subgraph_density: f32,             // how well-connected intermediate nodes are
+}
+```
 
-Selects the exact next unit from the shortlisted spatial neighbors:
+- **Variable length**: highways range from 2 words ("of course") to full phrases ("the capital of France is Paris")
+- **Subgraph density**: measures connectivity of intermediate nodes — a path through a dense, well-connected cluster is more reliable than through sparse nodes. This is the "connection between connections" strength.
+- **Matching**: prefix-match on the current walked sequence → if match, prefer highway path with `highway_confidence_boost`
+- **Maintenance**: highways below `highway_min_frequency` are dissolved back into individual edges
+
+#### Polysemy: Single Node, Context-Gated Edges
+
+One node per word form. Disambiguation happens through **context-gated edge selection**:
+
+```
+Node: "bank"
+  Edge: "river" → "bank"  [context_tags: {nature, geography}]  weight: 0.8
+  Edge: "money" → "bank"  [context_tags: {finance, business}]  weight: 0.9
+  Edge: "bank" → "account" [context_tags: {finance}]           weight: 0.7
+  Edge: "bank" → "erosion" [context_tags: {nature}]            weight: 0.6
+
+Context from Classification: {finance}
+→ "money→bank" activated (0.9), "bank→account" activated (0.7)
+→ "river→bank" suppressed, "bank→erosion" suppressed
+```
+
+The Classification System's intent + the Reasoning System's context provide the context fingerprint that gates which edges are active during prediction.
+
+### 5.2 Vocabulary Bootstrap & Growth
+
+#### Phase 1: Dictionary Pre-population
+
+On first run, load ~50K common English words from a bundled dictionary file. Each word gets:
+- Initial 3D position from `SemanticHasher` (existing FNV trigram hashing — deterministic, no embedding model)
+- `NodeType` assignment: POS tagger classifies as Content, Function, or Compound
+- **No edges yet** — edges only come from training
+
+#### Phase 2: Training Edge Formation
+
+Q&A training creates/strengthens edges between consecutive words in answers, tagged with context from questions. See §11.4.
+
+#### Phase 3: Runtime Growth
+
+When a word appears that isn't in the graph (custom names, slang, domain terms):
+1. Create new `WordNode` with `NodeType::Custom`
+2. **Position**: weighted average of surrounding known words' positions in the sentence
+   ```
+   "I visited Kigali yesterday"
+   "Kigali" unknown → position = weighted_avg(pos("visited"), pos("yesterday"))
+   ```
+3. New edges formed from sentence context, starting with low weight
+4. Compound noun detection (L1) may merge multi-word names into single nodes
+
+### 5.3 Spatial + Path Index (L6)
+
+Two index structures support the 3-tier lookup:
+
+- **SpatialGrid** (`src/spatial_index.rs`) — Grid-based spatial index for O(1) cell lookup. Given a 3D position, finds all word nodes within a configurable radius. Used for Tier 1 (near edges) and Tier 2 (far edges) prioritization.
+- **RegionIndex** (`src/region_index.rs`) — Regional hierarchical partitioning for coarser spatial queries.
+- **HighwayTrie** (new, in `predictive/router.rs`) — Trie indexed by word sequences for O(k) highway prefix matching, where k = sequence length.
+
+Together they enable the 3-tier prediction: spatially-near edges are checked first (fast, high confidence), then farther edges, then pathfinding.
+
+### 5.4 3-Tier Prediction Algorithm (L15)
+
+The core prediction loop. 3D spatial distance **prioritizes** which edges to try first:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  TIER 1: Near Edges (spatial_radius_near)               │
+│  Direct outgoing edges where target is spatially close  │
+│  Score = edge_weight × proximity_bonus × context_match  │
+│  FAST — most predictions resolve here (~70%)            │
+├─────────────────────────────────────────────────────────┤
+│  TIER 2: Far Edges (full edge list)                     │
+│  Direct outgoing edges beyond near radius               │
+│  Score = edge_weight × distance_decay × context_match   │
+│  MEDIUM — handles topic shifts (~20%)                   │
+├─────────────────────────────────────────────────────────┤
+│  TIER 3: On-the-fly Pathfinding                         │
+│  No sufficient direct edge — route through hub nodes    │
+│  A* search: spatial distance as heuristic               │
+│  Path score = Π(edge_weights) × subgraph_density        │
+│  SLOW — handles novel combinations (~10%)               │
+│  This is what makes it "work like an LLM"               │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Full prediction step:**
+```
+1. current_node = last emitted word
+2. context = (intent, last_K_words, reasoning_output)
+
+3. // Highway check (runs in parallel with edge lookup)
+   if recent_sequence matches highway prefix:
+       highway_candidate = next word from highway path
+       highway_score = highway.aggregate_weight × highway_boost
+
+4. // Tier 1: Near edges
+   near_edges = outgoing_edges(current_node)
+       .filter(|e| spatial_distance(e.to) < radius_near)
+       .filter(|e| context_match(e.context_tags, context) > min_context)
+       .score(|e| e.weight × proximity_bonus × context_relevance)
+
+5. // Tier 2: Far edges (only if Tier 1 insufficient)
+   if best(near_edges).score < tier1_confidence_threshold:
+       far_edges = outgoing_edges(current_node)
+           .filter(|e| spatial_distance(e.to) >= radius_near)
+           .score(|e| e.weight × distance_decay × context_relevance)
+
+6. // Tier 3: Pathfinding (only if Tier 1+2 insufficient)
+   if best(all_edges).score < tier2_confidence_threshold:
+       paths = a_star_search(current_node, target_region,
+                             max_hops=pathfind_max_hops,
+                             prefer_hubs=true)
+       path_scores = paths.map(|p| path_weight(p) × subgraph_density(p))
+
+7. // Merge all candidates, pass to L16 Step Resolver
+   all_candidates = merge(highway_candidate, near_edges, far_edges, paths)
+   next_word = L16_step_resolve(all_candidates, context)
+   emit(next_word)
+```
+
+**On-the-fly pathfinding** (Tier 3) preferentially routes through **Function nodes** because they have the highest connectivity — they are the highway interchanges of the word graph. This is what enables the system to generate novel word combinations it was never explicitly trained on.
+
+### 5.5 Step Resolver (L16)
+
+`FineResolver::select_with_shaping()` in `predictive/resolver.rs`. Config: `layer_16_fine_resolver`.
+
+At each step of the graph walk, selects which edge to follow:
 
 - **Temperature-controlled** — sampling temperature varies by intent profile (0.10 for factual → 0.90 for brainstorm)
 - **Intent shaping** — output biased toward the classified intent's expected patterns
-- **Anchor protection** — high-trust anchors protected via `anchor_trust_threshold`
-- **Fallback** — first candidate with Deterministic mode if shaping fails
+- **Context gating** — edges filtered by context tags matching current Classification + Reasoning context
+- **Anchor protection** — high-trust anchor words protected via `anchor_trust_threshold`
+- **Highway preference** — when a highway match is found, it receives `highway_confidence_boost` (configurable)
+- **Fallback** — if no edges score above `min_edge_confidence`, use spatial nearest neighbor with Deterministic mode
 
-### 5.5 Output Decoder (L17)
+### 5.6 Sequence Assembler (L17)
 
-`OutputDecoder` in `layers/output.rs` converts the resolved spatial unit back into surface text:
+`OutputDecoder` in `predictive/output.rs` assembles the walked word path into surface text:
 
+- **Word joining** — handles spacing, punctuation reinsertion, capitalization (sentence-start, proper nouns)
+- **Compound expansion** — `machine_learning` → "machine learning", `New_York` → "New York" (reverse of L1 merge)
 - **Evidence grounding** — if retrieval was used:
   - Extract intent → `list_evidence_answer` / `grounded_evidence_answer`
   - Other intents → `grounded_evidence_answer` / `answer_question`
   - Retrieval failed → real-time query message or "couldn't find" message
 - **Intent reshaping** — `reshape_output_for_intent` applies intent-specific formatting
-- **Sentence extraction** — finalizes coherent sentences from unit sequences
-- **Prediction error** — difference between predicted and actual next unit queued to L18 → L5 for spatial map adjustment
+- **Prediction error** — difference between predicted and actual next word queued to L18 → L5 for edge strengthening
 
-### 5.6 Efficiency Optimizations
+### 5.7 Memory Budget (Mac M4 Air Target)
+
+| Component | Count | Size Per | Total |
+|-----------|-------|----------|-------|
+| **Word nodes** | 100K (50K dictionary + 50K learned) | ~80 bytes | **8 MB** |
+| **Edges** | ~2M (after training + pruning) | ~28 bytes | **56 MB** |
+| **Highways** | ~50K | ~80 bytes | **4 MB** |
+| **Spatial index** | grid cells | ~2 bytes/cell | **~2 MB** |
+| **Highway trie** | prefix index | — | **~4 MB** |
+| **Total Word Graph** | | | **~74 MB** |
+
+Well within Mac M4 Air's 8–16 GB. Leaves ample room for MemoryStore, Classification patterns, and runtime buffers.
+
+### 5.8 Efficiency Optimizations
 
 | Optimization | Mechanism | Impact |
 |-------------|-----------|--------|
-| **Position momentum** | Attract/repel with exponential moving average of position deltas (momentum=0.9) to avoid oscillation during training | Faster convergence, fewer layout iterations needed |
+| **Position momentum** | Attract/repel with exponential moving average of position deltas (momentum=0.9) during training | Faster convergence, fewer layout iterations |
 | **Neighborhood pre-computation** | Cache spatial neighbors per grid cell; invalidate only cells affected by position updates | Avoids full `nearby()` scan when most positions unchanged |
-| **Adaptive walk length** | Confidence-weighted early stop: if 3 consecutive high-confidence (>0.8) units emitted, reduce remaining `max_steps` by 50% | Faster output for confident predictions |
-| **Batch position updates** | During training, accumulate attract/repel deltas across a mini-batch (default 32 sequences) before applying to grid and rebuilding affected cells | Reduces grid rebuild frequency by 32× during training |
-| **Process unit Z-confinement** | Process units (reasoning artifacts) confined to Z=-1.0 subspace during layout; content units occupy Z≥0 | Prevents reasoning artifacts from interfering with predictive spatial search |
-| **Temperature annealing** | During autoregressive walk, start with higher temperature (more exploration) and anneal toward lower temperature as sequence progresses | Better first-unit diversity with convergent tail |
+| **Adaptive walk length** | Confidence-weighted early stop: if 3 consecutive high-confidence (>0.8) words emitted, reduce remaining `max_steps` by 50% | Faster output for confident predictions |
+| **Batch edge updates** | During training, accumulate edge weight deltas across a mini-batch (default 32 sequences) before applying | Reduces contention during parallel training |
+| **Edge top-K pruning** | Hub nodes (Function words) keep only top `max_edges_per_hub` strongest edges; others decay | Prevents connection explosion on "the", "is", etc. |
+| **Context gating early-out** | If context tags don't match any active context, skip edge entirely (bitwise AND check) | Eliminates irrelevant edges before scoring |
+| **Highway prefix cache** | LRU cache of recent highway prefix lookups | Avoids trie traversal for repeated patterns |
+| **Temperature annealing** | During walk, start with higher temperature (more exploration) and anneal toward lower temperature as sequence progresses | Better first-word diversity with convergent tail |
+| **Process unit Z-confinement** | Process units (reasoning artifacts) confined to Z=-1.0 subspace; word nodes occupy Z≥0 | Prevents reasoning artifacts from interfering with word graph |
 
 ---
 
@@ -962,19 +1140,22 @@ Input: text, optional local_documents, preset_sources, allow_retrieval flag
                               │
                               ▼
 ╔══════════════════════════════════════════════════════════════════╗
-║  PREDICTIVE SYSTEM                                              ║
+║  PREDICTIVE SYSTEM (Word Graph)                                  ║
 ╠══════════════════════════════════════════════════════════════════╣
-║  [L5]  Route units through 3D semantic space   ⏱ rec(5)         ║
-║        Update positions, connect neighbors                      ║
-║  [L6]  Region Index neighbor lookup                             ║
-║  [L15] Select resolver mode + local candidate search            ║
-║  [L16] Fine resolve with shaping & anchor protection ⏱ rec(16)  ║
+║  [L5]  Map candidates to Word Graph nodes        ⏱ rec(5)       ║
+║        Identify starting node, check highway prefix matches     ║
+║  [L6]  Spatial + Path Index: tiered edge lookup                 ║
+║        Tier 1: near edges → Tier 2: far → Tier 3: pathfind     ║
+║  [L15] Graph Walk: walk edges with context gating               ║
+║        Highway preference when prefix matches                   ║
+║  [L16] Step resolve: temperature + shaping + context ⏱ rec(16)  ║
 ║                                                                  ║
 ║  [Reasoning Loop] If confidence < trigger_floor:                 ║
 ║        execute_reasoning_loop (max 3 steps, may re-trigger       ║
 ║        retrieval → cycles back to Reasoning System)              ║
 ║                                                                  ║
-║  [L17] Decode output → final text                               ║
+║  [L17] Assemble walked word sequence → surface text             ║
+║        Compound expansion, punctuation, evidence grounding      ║
 ║                                                                  ║
 ║  Output: ProcessResult (predicted_text, confidence, trace)       ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -1050,6 +1231,40 @@ pub struct Unit {
 }
 ```
 
+### Word Graph Types (Predictive System)
+
+The Predictive System maintains a separate **Word Graph** alongside the Unit-based MemoryStore. See §5.1 for full details.
+
+```rust
+pub struct WordNode {
+    pub id: WordId,                        // compact u32 index
+    pub content: String,                   // "the", "quantum", "New_York"
+    pub position: [f32; 3],                // 3D spatial coordinates
+    pub node_type: NodeType,               // Content | Function | Compound | Custom
+    pub frequency: u32,                    // global usage count
+    pub is_anchor: bool,                   // protected from pruning
+    pub content_fingerprint: u64,          // FNV hash for fast lookup
+}
+
+pub struct WordEdge {
+    pub from: WordId,                      // source word
+    pub to: WordId,                        // target word
+    pub weight: f32,                       // connection strength [0, 1]
+    pub context_tags: SmallVec<[u64; 4]>,  // polysemy disambiguation
+    pub frequency: u32,                    // times traversed
+    pub last_reinforced: u32,              // epoch counter for decay
+}
+
+pub struct Highway {
+    pub id: HighwayId,
+    pub path: Vec<WordId>,                 // variable length: 2..N words
+    pub aggregate_weight: f32,             // overall path quality
+    pub frequency: u32,                    // times this exact sequence walked
+    pub entry_contexts: Vec<u64>,          // context fingerprints that trigger
+    pub subgraph_density: f32,             // intermediate node connectivity
+}
+```
+
 ### Key Enumerations
 
 | Enum | Variants | System |
@@ -1059,6 +1274,7 @@ pub struct Unit {
 | `DatabaseMaturityStage` | ColdStart, Growth, Stable | Reasoning |
 | `CandidateStatus` | Candidate, Validated, Active, Rejected | Reasoning |
 | `UnitLevel` | Char, Subword, Word, Phrase, Pattern | Classification |
+| `NodeType` | Content, Function, Compound, Custom | Predictive |
 | `EdgeType` | Semantic, Parent, Child, Sequence, SourceEvidence | Predictive / Reasoning |
 | `SourceKind` | UserInput, Retrieval, TrainingDocument, TrainingUrl | Reasoning |
 | `ResolverMode` | Deterministic, Balanced, Exploratory | Predictive |
@@ -1168,12 +1384,13 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `memory_budgets` | `memory_budgets` | `MemoryBudgetConfig` |
 | `auto_inference` | `auto_inference` | `AutoInferenceConfig` |
 
-**Predictive System:**
+**Predictive System (Word Graph):**
 
 | Field | Config Key | Type |
 |-------|-----------|------|
-| `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` |
+| `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
+| `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
 
 **Cross-Cutting:**
 
@@ -1282,7 +1499,7 @@ Minimum thresholds: `min_candidates_for_gpu`: 256, `min_units_for_gpu_layout`: 1
 pub fn is_gpu_available() -> bool { false }
 ```
 
-`score_candidates_gpu_accelerated()` in `layers/search.rs` automatically uses CPU when GPU is unavailable.
+`score_candidates_gpu_accelerated()` in `reasoning/search.rs` automatically uses CPU when GPU is unavailable.
 
 ---
 
@@ -1362,8 +1579,8 @@ The SPS engine uses **Decoupled Training, Coupled Inference**: each system is tr
 | Channel | Owner | Consumers | Contents |
 |---------|-------|-----------|----------|
 | Intent Memory Channel | Classification | Reasoning (retrieval gating), Predictive (resolver mode) | Classification patterns, centroids, confidence |
-| Candidate Pool | Reasoning | Predictive (spatial walk input) | Ranked candidate units with 7D scores |
-| 3D Map Coordinates | Predictive | Classification (spatial pre-filter), Reasoning (spatial_fit dimension) | Unit positions in force-directed map |
+| Candidate Pool | Reasoning | Predictive (graph walk input) | Ranked candidate units with 7D scores |
+| Word Graph | Predictive | Classification (spatial pre-filter), Reasoning (spatial_fit dimension) | Word nodes, edges, highways in force-directed 3D map |
 
 ### 11.2 Classification System Training
 
@@ -1477,70 +1694,93 @@ Phase 3: REASONING LOOP THRESHOLD OPTIMIZATION
 | `reasoning_multihop` | 5K+ multi-hop examples | `{query, sub_questions[], answer, reasoning_trace}` | Decomposition template learning |
 | `reasoning_retrieval_gate` | 3K+ examples | `{query, needs_retrieval: bool, internal_sufficient: bool}` | Threshold optimization |
 
-### 11.4 Predictive System Training
+### 11.4 Predictive System Training (Word Graph)
 
 #### Learnable Parameters
 
 | Parameter | Count | Type | Default |
 |-----------|-------|------|---------|
-| Unit positions | N × 3 | `[f32; 3]` per unit | Initialized by SemanticHasher, refined by layout + attract/repel |
+| Word node positions | N × 3 | `[f32; 3]` per word | Initialized by SemanticHasher, refined by force-directed layout |
+| Edge weights | E | `f32` per edge | Initialized from training frequency, refined by attract/repel |
+| Highway paths | H | `Vec<WordId>` per highway | Formed when sequence walked ≥ `highway_formation_threshold` times |
 | Force layout config | 6 | `f32` | attractive_coeff=1.0, repulsive_coeff=1.0, preferred_spacing=1.0, boundary=128.0, temperature=1.75, convergence=0.001 |
-| Walk parameters | 3 | `f32` | max_steps=50, confidence_floor=0.22, temperature_anneal_rate=0.95 |
+| Walk parameters | 5 | `f32` | max_steps=50, tier1_confidence_threshold=0.60, tier2_confidence_threshold=0.30, pathfind_max_hops=4, temperature_anneal_rate=0.95 |
 
 #### Loss Function: L_pred
 
 ```
-L_pred = L_next_unit + 0.1 × L_spatial_energy + 0.2 × L_alignment
+L_pred = L_next_word + 0.1 × L_spatial_energy + 0.2 × L_edge_quality
 
-L_next_unit     = -mean(log(P(correct_unit | walk_candidates)))
-L_spatial_energy = layout_energy(graph) / num_edges
-L_alignment     = mean(max(0, anchor_trust - selected_trust))
+L_next_word      = -mean(log(P(correct_word | walked_edges)))
+L_spatial_energy = layout_energy(word_graph) / num_edges
+L_edge_quality   = mean(edge_weight_variance_per_node)  # penalizes noisy edge distributions
 ```
 
-#### Training Pipeline: Autoregressive Spatial Walk
+#### Training Pipeline: Word Graph Edge Formation
 
 ```
-Phase 1: SEQUENCE TRAINING (attract/repel)
-  For each training sequence [u₁, u₂, ..., uₙ]:
-    position = centroid(u₁.position)
-    For each step i in 1..n-1:
-      1. candidates = SpatialGrid.nearby(position, radius)
-      2. scored = 7D_score(candidates, context)
-      3. proposed = FineResolver.select(scored)
-      4. If proposed == u_{i+1}:  (correct prediction)
-           SpatialGrid.attract(u_{i+1}.id, position, strength=0.02)
-           record_success
-      5. Else:  (incorrect prediction)
-           SpatialGrid.attract(u_{i+1}.id, position, strength=0.03)  # pull correct closer
-           SpatialGrid.repel(proposed.id, position, strength=0.01)   # push wrong away
-           record_failure
-      6. position = u_{i+1}.semantic_position  # teacher forcing
+Phase 1: VOCABULARY BOOTSTRAP
+  Load ~50K English words from bundled dictionary
+  Assign initial 3D positions via SemanticHasher (FNV trigram hashing)
+  Classify each word as Content | Function via POS tagger
+  No edges yet — graph is a cloud of unconnected nodes
+
+Phase 2: EDGE FORMATION (from Q&A training data)
+  For each Q&A pair (question, answer):
+    1. L1: Tokenize + compound noun merge → word sequences
+    2. context_hash = hash(question)  # for context tagging
+    3. For each consecutive pair (word_i, word_i+1) in answer:
+       - If edge(word_i → word_i+1) exists:
+           Strengthen: weight += edge_strengthen_delta
+           Add context_hash to context_tags (if not present)
+           Increment frequency
+       - Else:
+           Create new edge with initial_edge_weight
+           Set context_tags = [context_hash]
+    4. For question words that also appear in answer:
+       - Create/strengthen cross-context bridge edges
+         (connects question context to answer word nodes)
+    5. Track sequence: if exact word sequence seen ≥ highway_formation_threshold:
+       - Create Highway from the sequence
     
-    After every 32 sequences (mini-batch):
+    After every 32 Q&A pairs (mini-batch):
+      Update 3D positions: attract connected words, repel unconnected
       Apply accumulated position deltas to SpatialGrid
       Rebuild affected grid cells
 
-Phase 2: FORCE-DIRECTED LAYOUT REFINEMENT
-  After sequence training stabilizes (attract/repel delta < convergence_tolerance):
-    Run force_directed_layout() on full unit set
+Phase 3: FORCE-DIRECTED LAYOUT REFINEMENT
+  After edge formation stabilizes (new edge rate < convergence_tolerance):
+    Run force_directed_layout() on full word graph
+    Connected words attract (strength ∝ edge_weight)
+    Unconnected words within same cell repel
     GPU-accelerated if available (O(n²) repulsion parallelized)
     Energy rollback if layout diverges
 
-Phase 3: WALK PARAMETER OPTIMIZATION
-  Sweep max_steps, confidence_floor, temperature_anneal_rate
-  Evaluate on held-out sequences:
-    Accuracy = fraction of correctly predicted next-units
+Phase 4: HIGHWAY DETECTION & CONSOLIDATION
+  Scan all edges for frequently-walked sequences:
+    Sequences walked ≥ highway_formation_threshold → create Highway
+    Compute subgraph_density for each highway (intermediate node connectivity)
+  Prune weak edges: remove edges below edge_min_weight
+  Prune hub overflow: Function words keep only top max_edges_per_hub edges
+
+Phase 5: WALK PARAMETER OPTIMIZATION
+  Sweep tier thresholds, pathfind_max_hops, temperature_anneal_rate
+  Evaluate on held-out Q&A pairs:
+    Accuracy = fraction of correctly predicted next-words per tier
+    Tier distribution = % resolved at Tier 1 vs Tier 2 vs Tier 3
     Fluency = average sequence confidence
   Select parameters maximizing accuracy × fluency
+  Target: ≥70% Tier 1, ≤10% Tier 3
 ```
 
 #### Dataset Requirements
 
 | Dataset | Size | Format | Purpose |
 |---------|------|--------|---------|
-| `predictive_sequences_train` | 100K+ unit sequences | `{units: [{content, position, level}], context}` | Spatial walk training (attract/repel) |
-| `predictive_sequences_val` | 10K+ sequences | Same format | Walk parameter optimization |
-| `predictive_layout_corpus` | Full memory dump | All units with links | Force-directed layout refinement |
+| `predictive_qa_train` | 100K+ Q&A pairs | `{question, answer, context}` | Edge formation + highway detection |
+| `predictive_qa_val` | 10K+ Q&A pairs | Same format | Walk parameter optimization |
+| `predictive_dictionary` | ~50K words | `{word, pos_tag}` | Vocabulary bootstrap |
+| `predictive_layout_corpus` | Full word graph dump | All nodes with edges | Force-directed layout refinement |
 
 ### 11.5 Cross-System Consistency Loop
 
@@ -1584,8 +1824,8 @@ These corrections are applied as config overrides, not weight changes — preser
 
 | Component | Spec | Rationale |
 |-----------|------|-----------|
-| **CPU** | 4-core / 8-thread, ≥2.5 GHz (Intel i5-1235U, AMD Ryzen 5 5600U, Apple M1) | Rayon parallel scoring uses all cores; 7D scoring + spatial walk is lightweight |
-| **RAM** | 8 GB | ~2GB memory store (100K units), ~1GB spatial grid, ~2GB OS/runtime |
+| **CPU** | 4-core / 8-thread, ≥2.5 GHz (Intel i5-1235U, AMD Ryzen 5 5600U, Apple M1) | Rayon parallel scoring uses all cores; 7D scoring + graph walk is lightweight |
+| **RAM** | 8 GB | ~74MB word graph (100K nodes + 2M edges), ~2GB memory store, ~2GB OS/runtime |
 | **Storage** | 256 GB SSD | SQLite WAL persistence, training datasets ~1-5 GB |
 | **GPU** | None required | All inference and training paths have CPU fallback |
 
@@ -1594,7 +1834,7 @@ These corrections are applied as config overrides, not weight changes — preser
 | Component | Spec | Rationale |
 |-----------|------|-----------|
 | **CPU** | 6-core / 12-thread, ≥3.0 GHz (Intel i7-1360P, AMD Ryzen 7 7840U, Apple M2) | Faster parallel scoring, multi-threaded training |
-| **RAM** | 16 GB | 500K+ units, concurrent training + inference |
+| **RAM** | 16 GB | Word graph + 500K+ units, concurrent training + inference |
 | **Storage** | 512 GB NVMe SSD | Fast SQLite I/O, multiple datasets |
 | **GPU** | Integrated (Intel Iris Xe, AMD RDNA3 iGPU) or discrete ≤2GB (MX550, GTX 1050) | Accelerates force layout + batch scoring via wgpu |
 
@@ -1604,8 +1844,8 @@ These corrections are applied as config overrides, not weight changes — preser
 |-----------|----------|----------------|--------|
 | Classification (78-float centroid compare) | <1ms | <1ms | 2ms max |
 | Reasoning loop (3 steps, no retrieval) | 5-15ms | 3-10ms | 20ms max |
-| Predictive walk (50 steps) | 20-50ms | 15-30ms | 60ms max |
-| Force-directed layout (256 units) | ~100ms | ~15ms | 200ms max |
+| Predictive graph walk (50 steps, 3-tier) | 20-50ms | 15-30ms | 60ms max |
+| Force-directed layout (100K word nodes) | ~100ms | ~15ms | 200ms max |
 | **Total inference (no retrieval)** | **30-70ms** | **20-45ms** | **100ms max** |
 | Web retrieval (when triggered) | +2-7s | +2-7s | Network-bound |
 
@@ -1615,7 +1855,7 @@ These corrections are applied as config overrides, not weight changes — preser
 |----------|---------------------|----------------|
 | Classification (50K examples, 10 sweep iterations) | ~2 min | ~1.5 min |
 | Reasoning weight optimization (10K QA pairs, 20 sweeps) | ~5 min | ~3 min |
-| Predictive spatial training (100K sequences × 50 steps) | ~15 min | ~8 min |
+| Predictive Word Graph training (100K Q&A pairs, edge formation + highways) | ~15 min | ~8 min |
 | Full force-directed re-layout (10K units) | ~30 sec | ~5 sec |
 | Consistency check (5K validation examples) | ~1 min | ~45 sec |
 | **Full training pipeline** | **~25 min** | **~15 min** |
@@ -1663,7 +1903,7 @@ Plans are built via `build_training_plan_with_config()` which reads `EngineConfi
 | `run_phase0_dry_run()` | Validates pipeline + measures inference latency |
 | **`train_classification()`** | **New: Classification-specific training (centroid + sweep)** |
 | **`train_reasoning()`** | **New: Reasoning-specific training (weights + templates)** |
-| **`train_predictive()`** | **New: Predictive-specific training (spatial walk + layout)** |
+| **`train_predictive()`** | **New: Predictive-specific training (Word Graph edge formation + highways + layout)** |
 | **`run_consistency_check()`** | **New: Cross-system consistency validation** |
 
 #### DryRun Report
@@ -1753,7 +1993,7 @@ pub struct TrainingExample {
 |-----------|------|--------|---------|
 | **`ClassificationDatasetGenerator`** | `seed/classification_generator.rs` | `{text, intent, tone, needs_retrieval}` | 50K+ labeled examples for centroid construction + weight sweep |
 | **`ReasoningDatasetGenerator`** | `seed/reasoning_generator.rs` | `{query, answer, sub_questions, reasoning_trace}` | 20K+ QA pairs for scoring weight optimization + decomposition templates |
-| **`PredictiveSequenceGenerator`** | `seed/predictive_generator.rs` | `{units[], context, expected_next[]}` | 100K+ unit sequences for spatial walk training |
+| **`PredictiveQAGenerator`** | `seed/predictive_generator.rs` | `{question, answer, context}` | 100K+ Q&A pairs for Word Graph edge formation + highway detection |
 | **`ConsistencyDatasetGenerator`** | `seed/consistency_generator.rs` | `{query, expected_classification, expected_reasoning, expected_prediction}` | 5K+ cross-system validation examples |
 
 **Classification dataset generation strategy:**
@@ -1768,11 +2008,13 @@ pub struct TrainingExample {
 - 15% adversarial (contradictory evidence, missing information, trick questions)
 - Each example includes ground truth `correct_unit_id` for MRR evaluation
 
-**Predictive sequence generation strategy:**
-- Extract unit sequences from training corpus via L2 unit builder
-- Each sequence = ordered list of units as they appear in coherent text
-- Include context (preceding text) for each sequence
-- Sequences of 10-100 units, average 30
+**Predictive Word Graph generation strategy:**
+- Generate Q&A pairs where answers contain natural word sequences
+- Each pair creates edges between consecutive words in the answer, tagged with question context
+- Include diverse question types to ensure broad context tagging (polysemy coverage)
+- Answers of 5-50 words, average 20
+- Include 15% pairs with compound nouns to train compound detection
+- Include 10% pairs with rare/custom words to train runtime vocabulary growth
 
 #### Intelligence-Focused Seed Generation
 
@@ -1833,7 +2075,7 @@ Unified sweep harness that runs all three system training pipelines and the cons
 ```
 training_sweep --system classification --sweep-dims w_intent_hash,w_tone_hash,low_confidence_threshold
 training_sweep --system reasoning --sweep-dims spatial_weight,context_weight,evidence_weight
-training_sweep --system predictive --sweep-dims attract_strength,repel_strength,walk_temperature
+training_sweep --system predictive --sweep-dims edge_strengthen_delta,tier1_confidence_threshold,pathfind_max_hops
 training_sweep --system consistency --validate-all
 ```
 
@@ -1952,11 +2194,11 @@ spse_engine/
 │   │   ├── merge.rs               # L13: Evidence merging & conflict detection
 │   │   ├── search.rs              # L14: 7D candidate scoring
 │   │   └── feedback.rs            # L18: Feedback controller & learning events
-│   ├── predictive/                # Predictive System (L5, L15, L16, L17)
+│   ├── predictive/                # Predictive System (L5, L15, L16, L17) — Word Graph
 │   │   ├── mod.rs
-│   │   ├── router.rs              # L5: 3D spatial routing & escape profiles
-│   │   ├── resolver.rs            # L16: Fine resolution + intent shaping
-│   │   └── output.rs              # L17: Output decoding & evidence grounding
+│   │   ├── router.rs              # L5: Word Graph Manager (nodes, edges, highways, layout)
+│   │   ├── resolver.rs            # L16: Step resolution + intent shaping + context gating
+│   │   └── output.rs              # L17: Sequence assembly, compound expansion, evidence grounding
 │   ├── memory/                    # Shared: Memory Store (L4, L21)
 │   │   ├── mod.rs
 │   │   ├── store.rs               # MemoryStore + governance + snapshots
@@ -2088,17 +2330,24 @@ spse_engine/
 
 | Term | Definition | System |
 |------|-----------|--------|
-| **Unit** | Atomic semantic element — the fundamental building block | All |
-| **Anchor** | High-salience unit protected from pruning; factual reference point | Reasoning |
+| **Unit** | Atomic semantic element — the fundamental building block for memory and reasoning | All |
+| **WordNode** | Single word in the Word Graph, embedded in 3D space with a `NodeType` (Content, Function, Compound, Custom) | Predictive |
+| **WordEdge** | Directed weighted connection ("road") between two WordNodes, with context tags for polysemy | Predictive |
+| **Highway** | Variable-length pre-formed path through the Word Graph, created when a sequence is walked ≥ N times | Predictive |
+| **Word Graph** | Directed weighted graph of individual words embedded in 3D space; the core Predictive System structure | Predictive |
+| **Function Word** | Universal routing hub (the, is, of, and) — never pruned, high connectivity, serves as pathfinding interchange | Predictive |
+| **Compound Noun** | POS-detected multi-word noun merged into a single node (e.g., "machine_learning", "New_York") | Classification / Predictive |
+| **3-Tier Walk** | Prediction algorithm: Tier 1 (near edges) → Tier 2 (far edges) → Tier 3 (on-the-fly pathfinding) | Predictive |
+| **Context Gating** | Edge filtering based on context tags — enables polysemy disambiguation without multiple nodes | Predictive |
+| **Subgraph Density** | Measure of how well-connected intermediate nodes in a highway are — "connection between connections" strength | Predictive |
+| **Anchor** | High-salience unit or word protected from pruning; factual reference point | Reasoning / Predictive |
 | **Candidate** | Observation-stage unit that may be promoted to active | Reasoning |
 | **Channel** | Isolated memory lane (Main, Intent, Reasoning) | Reasoning / Classification |
 | **Episodic** | Memory type that decays over time | Reasoning |
 | **Core** | Permanent memory type requiring corroboration for promotion | Reasoning |
-| **Escape** | Stochastic jump in semantic routing to explore non-obvious candidates | Predictive |
 | **Governance** | L21 maintenance cycle: pruning, promotion, pollution detection | Reasoning |
 | **Pollution** | Duplicate or degraded units that lower memory quality | Reasoning |
 | **Shaping** | Intent-specific output formatting and anchor protection | Predictive |
-| **Semantic Map** | 3D force-directed spatial structure where co-occurring units are neighbors | Predictive |
 | **Region Index** | Hierarchical spatial partitioning for O(log n) neighbor lookup | Predictive |
 | **Classification Vector** | Output of Classification System: intent + tone + confidence + retrieval flag | Classification |
 | **Evidence Merge** | Trust-weighted combination of internal memory and external web results | Reasoning |
@@ -2109,14 +2358,14 @@ spse_engine/
 | **Centroid** | Mean feature vector for an intent or tone class, used by nearest centroid classifier | Classification |
 | **L_class** | Classification loss: `L_intent + 0.5 × L_tone + 0.3 × L_gate` | Classification |
 | **L_reason** | Reasoning loss: `L_ranking + 0.3 × L_merge_f1 + 0.5 × L_chain` | Reasoning |
-| **L_pred** | Predictive loss: `L_next_unit + 0.1 × L_spatial_energy + 0.2 × L_alignment` | Predictive |
+| **L_pred** | Predictive loss: `L_next_word + 0.1 × L_spatial_energy + 0.2 × L_edge_quality` | Predictive |
 | **L_consistency** | Cross-system mismatch rate across 4 consistency rules | Cross-cutting |
-| **Attract/Repel** | Position adjustment forces: correct predictions attract units closer, incorrect predictions repel | Predictive |
-| **Spatial Walk** | Autoregressive sequence generation by iteratively navigating 3D semantic map | Predictive |
+| **Attract/Repel** | Position adjustment forces: connected words attract, unconnected repel during layout | Predictive |
+| **Graph Walk** | Autoregressive sequence generation by walking directed edges in the Word Graph | Predictive |
 | **Decomposition** | Splitting a complex query into sub-questions for multi-hop reasoning | Reasoning |
 | **MRR** | Mean Reciprocal Rank — measures how high the correct answer ranks in candidate list | Reasoning |
 | **Platt Scaling** | Post-hoc confidence calibration via logistic sigmoid fit | Classification |
-| **The Bus** | Shared global state connecting all three systems: Intent Channel, Candidate Pool, 3D Map | Cross-cutting |
+| **The Bus** | Shared global state connecting all three systems: Intent Channel, Candidate Pool, Word Graph | Cross-cutting |
 
 ### Appendix B: Three-System Quick Reference
 
@@ -2129,12 +2378,13 @@ spse_engine/
 | What does the web say? | Reasoning | L11, L12, L13 |
 | Which answer fragments are best? | Reasoning | L14 |
 | Should we keep learning from this? | Reasoning | L18, L21 |
-| Where is this concept in space? | Predictive | L5, L6 |
-| What word comes next? | Predictive | L15, L16 |
-| How do we say the answer? | Predictive | L17 |
+| Where is this word in the graph? | Predictive | L5, L6 |
+| What word comes next? | Predictive | L15 (3-tier walk), L16 (step resolve) |
+| How do we assemble the answer? | Predictive | L17 (sequence assembly, compound expansion) |
+| How do we handle unseen combinations? | Predictive | L15 Tier 3: A* pathfinding through function-word hubs |
 | How do we train intent recognition? | Classification | §11.2: Centroid construction + Bayesian weight sweep |
 | How do we train reasoning quality? | Reasoning | §11.3: 7D weight optimization + decomposition templates |
-| How do we train prediction accuracy? | Predictive | §11.4: Autoregressive spatial walk + attract/repel |
+| How do we train the Word Graph? | Predictive | §11.4: Edge formation from Q&A + highway detection + layout |
 | How do we ensure systems agree? | Cross-cutting | §11.5: Consistency loop with 4 rules + asymmetric correction |
 
 ### Appendix C: References

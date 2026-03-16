@@ -10,12 +10,12 @@ The engine implements a 21-layer processing pipeline. Each layer has specific re
 
 | Layer | Name | Module | Config Section | Responsibility |
 |-------|------|--------|----------------|----------------|
-| L1 | Input Ingestion | `classification/input.rs` | - | Normalize raw text, create `InputPacket` |
+| L1 | Input Ingestion | `classification/input.rs` | - | Normalize raw text, create `InputPacket`, compound noun merge (POS tagger) |
 | L2 | Unit Builder | `classification/builder.rs` | `layer_2_unit_builder` | Rolling hash discovery, unit activation, scoring |
 | L3 | Hierarchy Organizer | `classification/hierarchy.rs` | - | Level grouping, anchor/entity extraction |
 | L4 | Memory Ingestion | `memory/store.rs` | `layer_21_memory_governance` | Unit persistence, candidate observation |
-| L5 | Semantic Router | `predictive/router.rs` | `layer_5_semantic_map` | Spatial routing, neighbor selection, escape |
-| L6 | Context Manager | `reasoning/context.rs` | - | Context matrix, sequence state, task entities |
+| L5 | Word Graph Manager | `predictive/router.rs` | `layer_5_semantic_map` | Word graph: nodes, edges, highways; force-directed 3D layout |
+| L6 | Spatial + Path Index | `reasoning/context.rs` + `spatial_index.rs` | - | Tiered spatial lookup (near/far), highway trie prefix matching |
 | L7 | Intent Detector | `classification/intent.rs` | `intent` | Intent classification, entropy calculation |
 | L8 | Adaptive Runtime | `config/mod.rs` | `adaptive_behavior` | Profile selection, weight adjustment |
 | L9 | Retrieval Decision | `classification/intent.rs` | `layer_9_retrieval_gating` | Entropy/freshness/cost scoring |
@@ -24,9 +24,9 @@ The engine implements a 21-layer processing pipeline. Each layer has specific re
 | L12 | Safety Validator | `classification/safety.rs` | `layer_19_trust_heuristics` | Trust assessment, document filtering |
 | L13 | Evidence Merger | `reasoning/merge.rs` | `layer_13_evidence_merge` | Conflict detection, agreement scoring |
 | L14 | Candidate Scorer | `reasoning/search.rs` | `layer_14_candidate_scoring` | 7-dimensional feature scoring |
-| L15 | Resolver Mode Selection | `engine.rs` | `adaptive_behavior` | Deterministic/Balanced/Exploratory |
-| L16 | Fine Resolver | `predictive/resolver.rs` | `layer_16_fine_resolver` | Top-k selection, temperature-based |
-| L17 | Output Decoder | `predictive/output.rs` | - | Answer finalization, sentence extraction |
+| L15 | Graph Walker | `engine.rs` | `adaptive_behavior` | 3-tier walk: near edges → far edges → pathfinding through hubs |
+| L16 | Step Resolver | `predictive/resolver.rs` | `layer_16_fine_resolver` | Edge selection: temperature, context gating, highway preference |
+| L17 | Sequence Assembler | `predictive/output.rs` | - | Word joining, compound expansion, evidence grounding |
 | L18 | Feedback Controller | `reasoning/feedback.rs` | - | Learning events, impact scoring |
 | L19 | Trust/Safety | `classification/safety.rs` | `layer_19_trust_heuristics` | Source validation, allowlist management |
 | L20 | Telemetry | `telemetry/` | `layer_20_telemetry` | Trace emission, observation logging |
