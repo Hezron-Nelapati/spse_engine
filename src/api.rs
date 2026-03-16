@@ -37,13 +37,19 @@ const PROTOBUF_MIME: &str = "application/x-protobuf";
 
 pub fn router(engine: Arc<Engine>) -> Router {
     let auto_mode_config = engine.config().auto_inference.auto_mode.clone();
-    let state = ApiState { engine, auto_mode_config };
-    
+    let state = ApiState {
+        engine,
+        auto_mode_config,
+    };
+
     Router::new()
         .route("/api/v1/train/batch", post(train_batch))
         .route("/api/v1/train/status/:job_id", get(training_status))
         .route("/api/v1/status", get(auto_mode_status))
-        .route("/v1/chat/completions", post(openai_compat::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(openai_compat::chat_completions),
+        )
         .route("/v1/models", get(openai_compat::list_models))
         .with_state(state)
 }
@@ -111,10 +117,7 @@ async fn training_status(
 
 /// Phase 3.4: Auto-Mode Status Endpoint
 /// Returns the auto-mode indicator label to confirm engine is locked to auto mode.
-async fn auto_mode_status(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn auto_mode_status(State(state): State<ApiState>, headers: HeaderMap) -> impl IntoResponse {
     #[derive(Debug, Serialize)]
     struct AutoModeStatus {
         mode: String,

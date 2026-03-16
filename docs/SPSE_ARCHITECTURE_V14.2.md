@@ -2353,6 +2353,72 @@ The architecture is mechanically strongest when these boundaries are preserved:
 
 The main correction implied by the sanity check is narrow, not structural: L9 retrieval gating should be calibrated with stronger suppressors for context-carry and structured procedural intents.
 
+### 6.3 Code Audit Architectural Findings
+
+A detailed audit comparing the synthetic benchmark model against the actual inference code (`src/classification/intent.rs`, `src/reasoning/merge.rs`, `src/config/mod.rs`) identified five concrete discrepancies between the documented architecture and the current implementation. These are **architectural gaps** — they do not require structural redesign but do require targeted fixes to bring code behavior in line with the design intent.
+
+#### Finding 1: Brainstorm Intent Incorrectly Suppressed by Retrieval Gating (L9)
+
+**Location:** `src/classification/intent.rs` — `social_or_local` suppression list in `IntentDetector::assess()`
+
+**Problem:** The current code includes `IntentKind::Brainstorm` in the `social_or_local` intent set alongside `Greeting`, `Farewell`, `Gratitude`, and `Continue`. This causes the retrieval gating logic to treat brainstorm queries identically to social intents, suppressing retrieval assessment entirely. However, §3.10's example coverage matrix explicitly states that brainstorm queries (e.g., "Brainstorm names for a climate-friendly coffee brand") should receive "no **factual** retrieval by default" — meaning they should still pass through the full reasoning pipeline with an exploratory profile (§4.2: temperature=0.90, beam_width=10), not be short-circuited as if they were greetings.
+
+**Architectural Impact:** Brainstorm queries that genuinely need external inspiration (e.g., "Brainstorm names incorporating recent sustainability trends") will never trigger retrieval, even when the graph is sparse on the topic. The `brainstorm` adaptive profile's wide beam and high temperature become ineffective because the query never reaches the reasoning loop.
+
+**Recommended Fix:** Remove `Brainstorm` from the `social_or_local` suppression set. Brainstorm should follow the standard retrieval gating path — its exploratory profile and high temperature already prevent over-constrained factual retrieval behavior.
+
+#### Finding 2: Evidence Merge Lacks Contradiction Penalty (L13)
+
+**Location:** `src/reasoning/merge.rs` — `EvidenceMerger::merge()`
+
+**Problem:** The evidence merger currently detects conflicts between internal memory and external evidence (logging them to telemetry), but does **not** penalize the `evidence_support` dimension of conflicted candidates. When contradictory evidence is found, the trust-weighted support score is computed identically to non-conflicted evidence. This contradicts §4.3's design intent that "contradiction handling penalizes, rather than silently averaging over, conflicting evidence" and the Phase 3 acceptance criterion: "Contradictory evidence should be penalized or surfaced, not silently blended into confidence."
+
+**Architectural Impact:** The 7D candidate scorer (L14) receives inflated `evidence_support` scores for candidates backed by contradictory sources. This undermines the Micro-Validator's (§4.3) downstream contradiction checks — if `evidence_support` is already high, the lazy gating optimization will skip validation entirely for the contradicted candidate, assuming it is a "clear winner."
+
+**Recommended Fix:** When `EvidenceMerger::merge()` detects a conflict, apply a configurable `contradiction_penalty` (from `layer_13_evidence_merge`) to the `evidence_support` value of the conflicted candidate before passing it to L14. This ensures the penalty is upstream of both the candidate scorer and the micro-validator's lazy gating check.
+
+#### Finding 3: Token Overlap Calculation Has O(n²) Complexity (L9)
+
+**Location:** `src/classification/intent.rs` — `token_overlap()` utility function
+
+**Problem:** The `token_overlap` function used by `IntentDetector::assess()` to compare input tokens against context/evidence tokens uses nested iteration (`.any()` inside a loop), resulting in O(n×m) complexity where n and m are the token counts of the two inputs. For typical short queries this is negligible, but for longer inputs (document follow-ups, multi-sentence prompts) or when comparing against large evidence pools, this becomes a hot-path bottleneck.
+
+**Architectural Impact:** Performance degradation on longer inputs, particularly in the retrieval gating path where token overlap is computed against multiple candidate evidence snippets. This is inconsistent with the §4.8 efficiency optimization principle of bounded hot-path cost.
+
+**Recommended Fix:** Replace the nested iteration with a `HashSet`-based approach: collect one token set into a `HashSet`, then iterate the other set checking membership. This reduces complexity to O(n+m) with a single-pass construction and single-pass lookup.
+
+#### Finding 4: Incomplete Freshness Temporal Keyword Coverage (L9)
+
+**Location:** `src/classification/intent.rs` — freshness temporal keyword list in `IntentDetector::assess()`
+
+**Problem:** The freshness signal computation in L9 uses a hardcoded list of temporal keywords to detect time-sensitive queries. The current list is missing several common temporal indicators: "current", "latest", "new", "update", "upcoming", "ongoing", and "breaking". Queries like "What is the current population of Tokyo?" or "Latest news on the Mars rover" fail to trigger the freshness signal, causing the retrieval gating logic to under-retrieve for genuinely time-sensitive queries.
+
+**Architectural Impact:** The freshness threshold (`retrieval.freshness_threshold`: 0.65) becomes ineffective for a significant class of time-sensitive queries. These queries fall through to the standard confidence-only retrieval path, which may not trigger retrieval if the graph has stale but high-confidence cached answers.
+
+**Recommended Fix:** Expand the temporal keyword list to include: "current", "latest", "new", "update", "upcoming", "ongoing", "breaking". Per §1's design principle ("no hardcoded thresholds"), consider moving the keyword list to a config file (e.g., `config/freshness_keywords.yaml`) so it can be extended without code changes.
+
+#### Finding 5: Reasoning Loop Trigger Missing Disagreement-Based Activation
+
+**Location:** `src/config/mod.rs` — `ReasoningLoopConfig` struct
+
+**Problem:** The reasoning loop (§4.5) is currently triggered only by two conditions: (1) `enabled` is true, and (2) L14 candidate confidence is below `trigger_confidence_floor` (0.40). However, there is no trigger based on **candidate disagreement** — the scenario where the top candidates have similar scores but represent conflicting answers. In this case, confidence may be above the trigger floor (e.g., 0.45) because the best candidate scores well, but the answer is unreliable because the runner-up is equally strong and contradictory.
+
+**Architectural Impact:** The reasoning loop fails to activate for ambiguous-but-moderate-confidence cases. These queries receive a single "best guess" answer from L16 without the reasoning loop's ability to decompose, retrieve, or re-score — exactly the scenarios where additional reasoning would most improve answer quality. This is particularly relevant for Compare, Critique, and Verify intents where disagreement among candidates is a stronger signal than raw confidence.
+
+**Recommended Fix:** Add a `disagreement_trigger_threshold` field to `ReasoningLoopConfig` (suggested default: 0.15). When the score gap between the top two candidates is below this threshold AND both candidates exceed a minimum viability score, trigger the reasoning loop regardless of absolute confidence. This complements the existing confidence-floor trigger with a margin-based trigger. The config addition should follow the pattern in `src/config/mod.rs` and `config/config.yaml`.
+
+#### Summary Table
+
+| # | Finding | Layer | File | Severity | Type |
+|---|---------|-------|------|----------|------|
+| 1 | Brainstorm suppressed as social intent | L9 | `classification/intent.rs` | Medium | Logic error |
+| 2 | No contradiction penalty in evidence merge | L13 | `reasoning/merge.rs` | High | Missing feature |
+| 3 | Token overlap O(n²) complexity | L9 | `classification/intent.rs` | Low | Performance |
+| 4 | Incomplete freshness keyword list | L9 | `classification/intent.rs` | Medium | Coverage gap |
+| 5 | No disagreement-based reasoning trigger | Config | `config/mod.rs` | Medium | Missing feature |
+
+These findings are tracked for implementation in the Coding Plan (Phase 12D–12H).
+
 ### 6.1 Structural Feedback Loop (Consistency Loop Upgrade)
 
 **Problem:** The existing cross-system consistency checks (§11.5) only adjust numeric thresholds — e.g., lower confidence floors, tweak scoring weights. They cannot evolve the **structure** of the Classification taxonomy itself. If the Predictive System consistently fails to find good paths for a broad Intent class (e.g., "Question" triggers Tier 3 pathfinding > 40% of the time), the root cause may be that the intent is too coarse-grained.

@@ -1,5 +1,5 @@
-use crate::config::DocumentIngestionConfig;
 use crate::classification::input;
+use crate::config::DocumentIngestionConfig;
 use crate::types::{IntentKind, RetrievedDocument};
 use chrono::Utc;
 use lopdf::Document as PdfDocument;
@@ -215,7 +215,13 @@ pub fn answer_question(
     state: Option<&DocumentQueryState>,
     intent_hint: Option<IntentKind>,
 ) -> Option<DocumentAnswer> {
-    answer_question_with_config(prompt, documents, state, intent_hint, &DocumentIngestionConfig::default())
+    answer_question_with_config(
+        prompt,
+        documents,
+        state,
+        intent_hint,
+        &DocumentIngestionConfig::default(),
+    )
 }
 
 pub fn answer_question_with_config(
@@ -1726,7 +1732,11 @@ fn select_response_mode(query: &QueryProfile, scored: &[ScoredChunk]) -> Respons
     }
 }
 
-fn select_chunks(scored: &[ScoredChunk], mode: ResponseMode, max_selected_passages: usize) -> Vec<ScoredChunk> {
+fn select_chunks(
+    scored: &[ScoredChunk],
+    mode: ResponseMode,
+    max_selected_passages: usize,
+) -> Vec<ScoredChunk> {
     let limit = match mode {
         ResponseMode::Summary => max_selected_passages,
         ResponseMode::Focused => 2,
@@ -1946,7 +1956,11 @@ fn estimate_confidence(selected: &[ScoredChunk], query: &QueryProfile, mode: Res
         .clamp(0.15, 0.96)
 }
 
-fn carry_terms(query: &QueryProfile, selected: &[ScoredChunk], max_carry_terms: usize) -> Vec<String> {
+fn carry_terms(
+    query: &QueryProfile,
+    selected: &[ScoredChunk],
+    max_carry_terms: usize,
+) -> Vec<String> {
     let mut terms = query.effective_terms.clone();
     let mut frequencies = BTreeMap::new();
 

@@ -14,15 +14,18 @@ pub mod intent;
 pub mod query;
 pub mod safety;
 
-mod signature;
-mod pattern;
 mod calculator;
+mod pattern;
+mod signature;
 pub mod trainer;
 
-pub use signature::{ClassificationSignature, SemanticHasher};
-pub use pattern::{ClassificationPattern, parse_intent_kind, parse_tone_kind};
 pub use calculator::ClassificationCalculator;
-pub use trainer::{ClassificationTrainer, TrainingOutcome, IterationReport, FinalReport, LabeledDialogue, LabeledTurn, DialogueMetadata, ExpectedUnitCount, MemoryTarget};
+pub use pattern::{parse_intent_kind, parse_tone_kind, ClassificationPattern};
+pub use signature::{ClassificationSignature, SemanticHasher};
+pub use trainer::{
+    ClassificationTrainer, DialogueMetadata, ExpectedUnitCount, FinalReport, IterationReport,
+    LabeledDialogue, LabeledTurn, MemoryTarget, TrainingOutcome,
+};
 
 pub use builder::UnitBuilder;
 pub use hierarchy::HierarchicalUnitOrganizer;
@@ -31,4 +34,4 @@ pub use query::SafeQueryBuilder;
 pub use safety::TrustSafetyValidator;
 
 // Re-export types from crate::types for convenience
-pub use crate::types::{ClassificationResult, CalculationMethod};
+pub use crate::types::{CalculationMethod, ClassificationResult};

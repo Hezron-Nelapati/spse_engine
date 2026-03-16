@@ -17,8 +17,8 @@ use std::time::Instant;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let output_dir = parse_arg(&args, "--output-dir")
-        .unwrap_or_else(|| "datasets/seeds".to_string());
+    let output_dir =
+        parse_arg(&args, "--output-dir").unwrap_or_else(|| "datasets/seeds".to_string());
     let target_gb: f64 = parse_arg(&args, "--target-gb")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0);
@@ -46,7 +46,10 @@ fn main() {
     let num_threads = rayon::current_num_threads();
     eprintln!("=== SPSE Seed Data Generator ===");
     eprintln!("Output directory: {}", output_path.display());
-    eprintln!("Target per category: {:.2} GB ({} bytes)", target_gb, target_bytes);
+    eprintln!(
+        "Target per category: {:.2} GB ({} bytes)",
+        target_gb, target_bytes
+    );
     eprintln!("RNG seed: {}", rng_seed);
     eprintln!("Parallelism: {} threads", num_threads);
     eprintln!();
@@ -56,23 +59,43 @@ fn main() {
     let mut total_bytes: u64 = 0;
 
     // Generator dispatch table: (name, filename, seed_offset, generator_fn)
-    let generators: Vec<(&str, &str, u64, fn(&std::path::Path, u64, u64) -> (u64, u64))> = vec![
-        ("intelligence", "intelligence.jsonl", 0, spse_engine::seed::generate_bulk_intelligence),
-        ("entity", "entities.jsonl", 1, spse_engine::seed::generate_bulk_entities),
-        ("dialogue", "dialogues.jsonl", 2, spse_engine::seed::generate_bulk_dialogues),
-        ("classification", "classification.jsonl", 3, spse_engine::seed::generate_bulk_classification),
+    let generators: Vec<(
+        &str,
+        &str,
+        u64,
+        fn(&std::path::Path, u64, u64) -> (u64, u64),
+    )> = vec![
+        (
+            "intelligence",
+            "intelligence.jsonl",
+            0,
+            spse_engine::seed::generate_bulk_intelligence,
+        ),
+        (
+            "entity",
+            "entities.jsonl",
+            1,
+            spse_engine::seed::generate_bulk_entities,
+        ),
+        (
+            "dialogue",
+            "dialogues.jsonl",
+            2,
+            spse_engine::seed::generate_bulk_dialogues,
+        ),
+        (
+            "classification",
+            "classification.jsonl",
+            3,
+            spse_engine::seed::generate_bulk_classification,
+        ),
     ];
 
     for (idx, (name, filename, seed_offset, gen_fn)) in generators.iter().enumerate() {
         eprintln!("[{}/4] Generating {} seeds...", idx + 1, name);
         let start = Instant::now();
         let path = output_path.join(filename);
-        let (count, bytes) = parallel_generate(
-            &path,
-            target_bytes,
-            rng_seed + seed_offset,
-            gen_fn,
-        );
+        let (count, bytes) = parallel_generate(&path, target_bytes, rng_seed + seed_offset, gen_fn);
         let elapsed = start.elapsed();
         eprintln!(
             "  Done: {} examples, {} in {:.1}s ({:.0} examples/sec)",
@@ -101,8 +124,10 @@ fn main() {
         eprintln!();
         eprintln!("=== Validation ===");
         let files = [
-            "intelligence.jsonl", "entities.jsonl",
-            "dialogues.jsonl", "classification.jsonl",
+            "intelligence.jsonl",
+            "entities.jsonl",
+            "dialogues.jsonl",
+            "classification.jsonl",
         ];
         let mut all_ok = true;
         for filename in &files {
@@ -148,16 +173,29 @@ struct ValidationReport {
 
 impl ValidationReport {
     fn has_issues(&self) -> bool {
-        self.bad_json > 0 || self.empty_question > 0 || self.empty_answer > 0
-            || self.missing_intent > 0 || self.bad_math > 0
+        self.bad_json > 0
+            || self.empty_question > 0
+            || self.empty_answer > 0
+            || self.missing_intent > 0
+            || self.bad_math > 0
     }
 
     fn print_issues(&self) {
-        if self.bad_json > 0 { eprintln!("    bad_json: {}", self.bad_json); }
-        if self.empty_question > 0 { eprintln!("    empty_question: {}", self.empty_question); }
-        if self.empty_answer > 0 { eprintln!("    empty_answer: {}", self.empty_answer); }
-        if self.missing_intent > 0 { eprintln!("    missing_intent: {}", self.missing_intent); }
-        if self.bad_math > 0 { eprintln!("    bad_math: {}", self.bad_math); }
+        if self.bad_json > 0 {
+            eprintln!("    bad_json: {}", self.bad_json);
+        }
+        if self.empty_question > 0 {
+            eprintln!("    empty_question: {}", self.empty_question);
+        }
+        if self.empty_answer > 0 {
+            eprintln!("    empty_answer: {}", self.empty_answer);
+        }
+        if self.missing_intent > 0 {
+            eprintln!("    missing_intent: {}", self.missing_intent);
+        }
+        if self.bad_math > 0 {
+            eprintln!("    bad_math: {}", self.bad_math);
+        }
     }
 }
 
@@ -165,8 +203,12 @@ fn validate_jsonl(path: &std::path::Path) -> std::io::Result<ValidationReport> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let mut report = ValidationReport {
-        total: 0, bad_json: 0, empty_question: 0, empty_answer: 0,
-        missing_intent: 0, bad_math: 0,
+        total: 0,
+        bad_json: 0,
+        empty_question: 0,
+        empty_answer: 0,
+        missing_intent: 0,
+        bad_math: 0,
     };
 
     let add_re = regex::Regex::new(r"(\d+) \+ (\d+) = (\d+)").unwrap();
@@ -178,15 +220,26 @@ fn validate_jsonl(path: &std::path::Path) -> std::io::Result<ValidationReport> {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&line);
         let obj = match parsed {
             Ok(v) => v,
-            Err(_) => { report.bad_json += 1; continue; }
+            Err(_) => {
+                report.bad_json += 1;
+                continue;
+            }
         };
 
         let q = obj.get("question").and_then(|v| v.as_str()).unwrap_or("");
         let a = obj.get("answer").and_then(|v| v.as_str()).unwrap_or("");
 
-        if q.trim().is_empty() { report.empty_question += 1; }
-        if a.trim().is_empty() { report.empty_answer += 1; }
-        if obj.get("intent").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+        if q.trim().is_empty() {
+            report.empty_question += 1;
+        }
+        if a.trim().is_empty() {
+            report.empty_answer += 1;
+        }
+        if obj
+            .get("intent")
+            .and_then(|v| v.as_str())
+            .map_or(true, |s| s.is_empty())
+        {
             report.missing_intent += 1;
         }
 

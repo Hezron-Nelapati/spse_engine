@@ -2,7 +2,9 @@
 //!
 //! Implements online learning from labeled seed data with spatial adjustment.
 
-use crate::classification::{ClassificationCalculator, ClassificationPattern, ClassificationSignature};
+use crate::classification::{
+    ClassificationCalculator, ClassificationPattern, ClassificationSignature,
+};
 use crate::config::ClassificationConfig;
 use crate::memory::MemoryStore;
 use crate::spatial_index::SpatialGrid;
@@ -45,7 +47,7 @@ impl IterationReport {
         }
         self.intent_correct as f32 / self.total as f32
     }
-    
+
     /// Calculate tone accuracy.
     pub fn tone_accuracy(&self) -> f32 {
         if self.total == 0 {
@@ -53,7 +55,7 @@ impl IterationReport {
         }
         self.tone_correct as f32 / self.total as f32
     }
-    
+
     /// Calculate resolver accuracy.
     pub fn resolver_accuracy(&self) -> f32 {
         if self.total == 0 {
@@ -61,7 +63,7 @@ impl IterationReport {
         }
         self.resolver_correct as f32 / self.total as f32
     }
-    
+
     /// Calculate average accuracy across all classifications.
     pub fn average_accuracy(&self) -> f32 {
         (self.intent_accuracy() + self.tone_accuracy() + self.resolver_accuracy()) / 3.0
@@ -100,7 +102,7 @@ impl ClassificationTrainer {
             pattern_merge_threshold: 0.95,
         }
     }
-    
+
     /// Ingest a labeled turn with online evaluation.
     /// Returns training outcome with prediction vs expected comparison.
     pub fn ingest_labeled_turn(
@@ -111,29 +113,31 @@ impl ClassificationTrainer {
         spatial: &mut SpatialGrid,
     ) -> TrainingOutcome {
         let sig = ClassificationSignature::compute(text, self.calculator.hasher());
-        
+
         // 1. Predict before storing (online evaluation)
-        let prediction = self.calculator.calculate(text, memory, spatial, &self.config);
-        
+        let prediction = self
+            .calculator
+            .calculate(text, memory, spatial, &self.config);
+
         let intent_correct = prediction.intent == label.intent;
         let tone_correct = prediction.tone == label.tone;
         let resolver_correct = prediction.resolver_mode == label.resolver_mode;
-        
+
         // 2. Find or create pattern
         if let Some(mut existing) = self.find_similar_pattern(&sig, memory, spatial) {
             // Layer 18 Feedback: Update utility based on outcome
             if intent_correct && tone_correct {
                 existing.record_success();
-                
+
                 // Reinforce: Move toward query centroid (attract)
                 spatial.attract(existing.unit_id, &sig.semantic_centroid, 0.05);
             } else {
                 existing.record_failure();
-                
+
                 // Penalize: Move away from query centroid (repel)
                 spatial.repel(existing.unit_id, &sig.semantic_centroid, 0.10);
             }
-            
+
             memory.update_classification_pattern(existing.clone());
         } else {
             // New Unit Discovery (Layer 2)
@@ -144,7 +148,7 @@ impl ClassificationTrainer {
                 label.resolver_mode,
                 label.domain.clone(),
             );
-            
+
             // Set initial success/failure based on prediction match
             let mut new_pattern = new_pattern;
             if intent_correct && tone_correct {
@@ -152,14 +156,14 @@ impl ClassificationTrainer {
             } else {
                 new_pattern.record_failure();
             }
-            
+
             // Store in memory (L4)
             memory.store_classification_pattern(new_pattern.clone());
-            
+
             // Insert into spatial map (L5)
             spatial.insert(new_pattern.unit_id, &sig.semantic_centroid);
         }
-        
+
         TrainingOutcome {
             intent_correct,
             tone_correct,
@@ -168,7 +172,7 @@ impl ClassificationTrainer {
             expected: label.clone(),
         }
     }
-    
+
     /// Fast bulk ingest: store pattern without per-example classification prediction.
     /// Skips online accuracy measurement for ~50x speedup during seed training.
     pub fn ingest_labeled_turn_bulk(
@@ -217,10 +221,10 @@ impl ClassificationTrainer {
         let mut iteration = 0;
         let mut best_accuracy = 0.0;
         let mut best_report = IterationReport::default();
-        
+
         while iteration < max_iterations {
             let mut report = IterationReport::default();
-            
+
             for dialogue in seed_data {
                 for turn in &dialogue.turns {
                     let outcome = self.ingest_labeled_turn(
@@ -229,7 +233,7 @@ impl ClassificationTrainer {
                         memory,
                         spatial,
                     );
-                    
+
                     report.total += 1;
                     if outcome.intent_correct {
                         report.intent_correct += 1;
@@ -242,9 +246,9 @@ impl ClassificationTrainer {
                     }
                 }
             }
-            
+
             let avg_accuracy = report.average_accuracy();
-            
+
             if avg_accuracy >= target_accuracy {
                 return FinalReport {
                     converged: true,
@@ -253,18 +257,18 @@ impl ClassificationTrainer {
                     report,
                 };
             }
-            
+
             // Adjust weights based on performance
             self.adjust_weights(&report);
-            
+
             if avg_accuracy > best_accuracy {
                 best_accuracy = avg_accuracy;
                 best_report = report.clone();
             }
-            
+
             iteration += 1;
         }
-        
+
         FinalReport {
             converged: false,
             iterations: max_iterations,
@@ -272,7 +276,7 @@ impl ClassificationTrainer {
             report: best_report,
         }
     }
-    
+
     /// Find a similar pattern in memory.
     fn find_similar_pattern(
         &self,
@@ -281,7 +285,7 @@ impl ClassificationTrainer {
         spatial: &SpatialGrid,
     ) -> Option<ClassificationPattern> {
         let candidate_ids = spatial.nearby(sig.semantic_centroid, self.config.spatial_query_radius);
-        
+
         for id in candidate_ids {
             if let Some(pattern) = memory.get_classification_pattern(id) {
                 let similarity = self.calculator.cosine_similarity(sig, &pattern.signature);
@@ -290,28 +294,28 @@ impl ClassificationTrainer {
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Adjust feature weights based on iteration performance.
     fn adjust_weights(&mut self, report: &IterationReport) {
         // If intent accuracy low, increase semantic weight
         if report.intent_accuracy() < 0.7 {
             self.calculator.w_semantic *= 1.05;
         }
-        
+
         // If tone accuracy low, increase derived scores weight
         if report.tone_accuracy() < 0.7 {
             self.calculator.w_derived *= 1.05;
         }
-        
+
         // Normalize weights to sum to ~1.0
         let total = self.calculator.w_structure
             + self.calculator.w_punctuation
             + self.calculator.w_semantic
             + self.calculator.w_derived;
-        
+
         if total > 1.5 || total < 0.5 {
             self.calculator.w_structure /= total;
             self.calculator.w_punctuation /= total;
@@ -319,12 +323,12 @@ impl ClassificationTrainer {
             self.calculator.w_derived /= total;
         }
     }
-    
+
     /// Get reference to calculator.
     pub fn calculator(&self) -> &ClassificationCalculator {
         &self.calculator
     }
-    
+
     /// Get mutable reference to calculator.
     pub fn calculator_mut(&mut self) -> &mut ClassificationCalculator {
         &mut self.calculator
@@ -421,8 +425,8 @@ fn default_corroboration_threshold() -> u32 {
 /// Convert from dialogue_generator::Dialogue to LabeledDialogue for unified training
 impl From<&crate::seed::Dialogue> for LabeledDialogue {
     fn from(dialogue: &crate::seed::Dialogue) -> Self {
-        use crate::types::{IntentKind, ToneKind, ResolverMode};
-        
+        use crate::types::{IntentKind, ResolverMode, ToneKind};
+
         // Parse intent string to enum (default to Unknown if invalid)
         let intent = match dialogue.intent.as_str() {
             "Greeting" => IntentKind::Greeting,
@@ -450,9 +454,10 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
             "Brainstorm" => IntentKind::Brainstorm,
             _ => IntentKind::Unknown,
         };
-        
+
         // Parse tone (default to NeutralProfessional)
-        let expected_tone = dialogue.expected_tone
+        let expected_tone = dialogue
+            .expected_tone
             .as_ref()
             .and_then(|t| match t.as_str() {
                 "Casual" => Some(ToneKind::Casual),
@@ -464,9 +469,10 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
                 _ => None,
             })
             .unwrap_or(ToneKind::NeutralProfessional);
-        
+
         // Parse resolver mode (default to Balanced)
-        let resolver_mode = dialogue.resolver_mode
+        let resolver_mode = dialogue
+            .resolver_mode
             .as_ref()
             .and_then(|r| match r.as_str() {
                 "Deterministic" => Some(ResolverMode::Deterministic),
@@ -475,21 +481,25 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
                 _ => None,
             })
             .unwrap_or(ResolverMode::Balanced);
-        
+
         // Convert turns with extended fields
-        let turns = dialogue.turns.iter().map(|t| LabeledTurn {
-            role: t.role.clone(),
-            content: t.content.clone(),
-            expected_entities: t.expected_entities.clone(),
-            expected_anchors: t.expected_anchors.clone(),
-            expected_unit_count: ExpectedUnitCount {
-                phrase: t.expected_unit_count.phrase,
-                sentence: t.expected_unit_count.sentence,
-                word: t.expected_unit_count.word,
-            },
-            source_quality: t.source_quality,
-        }).collect();
-        
+        let turns = dialogue
+            .turns
+            .iter()
+            .map(|t| LabeledTurn {
+                role: t.role.clone(),
+                content: t.content.clone(),
+                expected_entities: t.expected_entities.clone(),
+                expected_anchors: t.expected_anchors.clone(),
+                expected_unit_count: ExpectedUnitCount {
+                    phrase: t.expected_unit_count.phrase,
+                    sentence: t.expected_unit_count.sentence,
+                    word: t.expected_unit_count.word,
+                },
+                source_quality: t.source_quality,
+            })
+            .collect();
+
         // Convert metadata with memory_target from dialogue
         let metadata = DialogueMetadata {
             domain: Some(dialogue.metadata.domain.clone()),
@@ -499,10 +509,15 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
                 crate::seed::SeedMemoryTarget::Core => MemoryTarget::Core,
                 crate::seed::SeedMemoryTarget::Episodic => MemoryTarget::Episodic,
             },
-            channels: dialogue.metadata.memory_channels.iter().map(|c| format!("{:?}", c)).collect(),
+            channels: dialogue
+                .metadata
+                .memory_channels
+                .iter()
+                .map(|c| format!("{:?}", c))
+                .collect(),
             corroboration_threshold: dialogue.metadata.corroboration_threshold,
         };
-        
+
         Self {
             id: dialogue.id.clone(),
             intent,
@@ -518,47 +533,47 @@ impl From<&crate::seed::Dialogue> for LabeledDialogue {
 mod tests {
     use super::*;
     use crate::config::ClassificationConfig;
-    
+
     #[test]
     fn test_iteration_report_accuracy() {
         let mut report = IterationReport::default();
-        
+
         assert_eq!(report.intent_accuracy(), 0.0);
-        
+
         report.total = 10;
         report.intent_correct = 8;
         report.tone_correct = 7;
         report.resolver_correct = 9;
-        
+
         assert!((report.intent_accuracy() - 0.8).abs() < 0.01);
         assert!((report.tone_accuracy() - 0.7).abs() < 0.01);
         assert!((report.resolver_accuracy() - 0.9).abs() < 0.01);
         assert!((report.average_accuracy() - 0.8).abs() < 0.01);
     }
-    
+
     #[test]
     fn test_trainer_creation() {
         let calculator = ClassificationCalculator::new();
         let config = ClassificationConfig::default();
         let trainer = ClassificationTrainer::new(calculator, config);
-        
+
         assert!((trainer.calculator.w_semantic - 0.15).abs() < 0.01);
     }
-    
+
     #[test]
     fn test_weight_adjustment() {
         let calculator = ClassificationCalculator::new();
         let config = ClassificationConfig::default();
         let mut trainer = ClassificationTrainer::new(calculator, config);
-        
+
         let mut report = IterationReport::default();
         report.total = 10;
         report.intent_correct = 5; // 50% accuracy
         report.tone_correct = 5; // 50% accuracy
         report.resolver_correct = 10;
-        
+
         trainer.adjust_weights(&report);
-        
+
         // Weights should have been adjusted
         assert!(trainer.calculator.w_semantic > 0.15);
         assert!(trainer.calculator.w_derived > 0.10);

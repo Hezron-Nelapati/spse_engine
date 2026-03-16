@@ -170,23 +170,61 @@ impl SqliteHotStore {
     }
 
     pub fn insert_event(&self, event: &TelemetryEvent) -> Result<(), String> {
-        let conn = self.connection.as_ref()
+        let conn = self
+            .connection
+            .as_ref()
             .ok_or_else(|| "Connection not initialized".to_string())?;
 
         let (event_type, session_id, trace_id) = match event {
-            TelemetryEvent::Calculation { session_id, trace_id, .. } => ("calculation", *session_id, *trace_id),
-            TelemetryEvent::DbPush { session_id, trace_id, .. } => ("db_push", *session_id, *trace_id),
-            TelemetryEvent::Retrieval { session_id, trace_id, .. } => ("retrieval", *session_id, *trace_id),
-            TelemetryEvent::MorphAction { session_id, trace_id, .. } => ("morph_action", *session_id, *trace_id),
-            TelemetryEvent::IntentLabel { session_id, trace_id, .. } => ("intent_label", *session_id, *trace_id),
-            TelemetryEvent::ReasoningStep { session_id, trace_id, .. } => ("reasoning_step", *session_id, *trace_id),
-            TelemetryEvent::LatencySpike { session_id, trace_id, .. } => ("latency_spike", *session_id, *trace_id),
-            TelemetryEvent::MemoryAllocation { session_id, trace_id, .. } => ("memory_allocation", *session_id, *trace_id),
-            TelemetryEvent::ProcessAnchorProtected { session_id, trace_id, .. } => ("process_anchor_protected", *session_id, *trace_id),
+            TelemetryEvent::Calculation {
+                session_id,
+                trace_id,
+                ..
+            } => ("calculation", *session_id, *trace_id),
+            TelemetryEvent::DbPush {
+                session_id,
+                trace_id,
+                ..
+            } => ("db_push", *session_id, *trace_id),
+            TelemetryEvent::Retrieval {
+                session_id,
+                trace_id,
+                ..
+            } => ("retrieval", *session_id, *trace_id),
+            TelemetryEvent::MorphAction {
+                session_id,
+                trace_id,
+                ..
+            } => ("morph_action", *session_id, *trace_id),
+            TelemetryEvent::IntentLabel {
+                session_id,
+                trace_id,
+                ..
+            } => ("intent_label", *session_id, *trace_id),
+            TelemetryEvent::ReasoningStep {
+                session_id,
+                trace_id,
+                ..
+            } => ("reasoning_step", *session_id, *trace_id),
+            TelemetryEvent::LatencySpike {
+                session_id,
+                trace_id,
+                ..
+            } => ("latency_spike", *session_id, *trace_id),
+            TelemetryEvent::MemoryAllocation {
+                session_id,
+                trace_id,
+                ..
+            } => ("memory_allocation", *session_id, *trace_id),
+            TelemetryEvent::ProcessAnchorProtected {
+                session_id,
+                trace_id,
+                ..
+            } => ("process_anchor_protected", *session_id, *trace_id),
         };
 
-        let event_data = serde_json::to_string(event)
-            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+        let event_data =
+            serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
         conn.execute(
             "INSERT INTO events (event_type, event_data, session_id, trace_id) VALUES (?1, ?2, ?3, ?4)",
@@ -198,20 +236,21 @@ impl SqliteHotStore {
     }
 
     pub fn query_by_trace(&self, trace_id: Uuid) -> Result<Vec<TelemetryEvent>, String> {
-        let conn = self.connection.as_ref()
+        let conn = self
+            .connection
+            .as_ref()
             .ok_or_else(|| "Connection not initialized".to_string())?;
 
-        let mut stmt = conn.prepare(
-            "SELECT event_data FROM events WHERE trace_id = ?1 ORDER BY id"
-        ).map_err(|e| format!("Failed to prepare query: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT event_data FROM events WHERE trace_id = ?1 ORDER BY id")
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
-        let events = stmt.query_map(
-            rusqlite::params![trace_id.to_string()],
-            |row| {
+        let events = stmt
+            .query_map(rusqlite::params![trace_id.to_string()], |row| {
                 let data: String = row.get(0)?;
                 Ok(serde_json::from_str::<TelemetryEvent>(&data))
-            }
-        ).map_err(|e| format!("Failed to query events: {e}"))?;
+            })
+            .map_err(|e| format!("Failed to query events: {e}"))?;
 
         Ok(events
             .filter_map(|r| r.ok())
@@ -252,14 +291,15 @@ impl AppendOnlyLog {
     pub fn append(&mut self, event: &TelemetryEvent) -> Result<(), String> {
         use std::io::Write;
 
-        let file = self.file.as_mut()
+        let file = self
+            .file
+            .as_mut()
             .ok_or_else(|| "File not initialized".to_string())?;
 
-        let json = serde_json::to_string(event)
-            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+        let json =
+            serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
-        writeln!(file, "{json}")
-            .map_err(|e| format!("Failed to write to cold log: {e}"))?;
+        writeln!(file, "{json}").map_err(|e| format!("Failed to write to cold log: {e}"))?;
 
         Ok(())
     }
@@ -285,7 +325,7 @@ impl TelemetryWorker {
             });
         }
 
-        let (sender, receiver): (std::sync::mpsc::SyncSender<TelemetryEvent>, _) = 
+        let (sender, receiver): (std::sync::mpsc::SyncSender<TelemetryEvent>, _) =
             std::sync::mpsc::sync_channel(config.channel_capacity);
 
         let hot_store_path = config.hot_store_path.clone();
@@ -348,7 +388,11 @@ impl TelemetryWorker {
         })
     }
 
-    fn flush_batch(hot_store: &SqliteHotStore, cold_log: &mut AppendOnlyLog, batch: &mut Vec<TelemetryEvent>) {
+    fn flush_batch(
+        hot_store: &SqliteHotStore,
+        cold_log: &mut AppendOnlyLog,
+        batch: &mut Vec<TelemetryEvent>,
+    ) {
         for event in batch.drain(..) {
             if let Err(e) = hot_store.insert_event(&event) {
                 eprintln!("Failed to insert event to hot store: {e}");
@@ -387,13 +431,15 @@ impl TelemetryWorker {
     /// Check if the worker channel is full (backpressure)
     pub fn is_backpressured(&self) -> bool {
         // If we can send without blocking, there's no backpressure
-        self.sender.try_send(TelemetryEvent::Calculation {
-            layer: 0,
-            operation: "ping".to_string(),
-            duration_ms: 0,
-            session_id: Uuid::nil(),
-            trace_id: Uuid::nil(),
-        }).is_err()
+        self.sender
+            .try_send(TelemetryEvent::Calculation {
+                layer: 0,
+                operation: "ping".to_string(),
+                duration_ms: 0,
+                session_id: Uuid::nil(),
+                trace_id: Uuid::nil(),
+            })
+            .is_err()
     }
 
     /// Shutdown the worker gracefully

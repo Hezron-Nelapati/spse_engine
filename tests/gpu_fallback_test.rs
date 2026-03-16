@@ -36,9 +36,9 @@ mod no_gpu_tests {
 
 mod cpu_fallback_tests {
     use spse_engine::config::GpuConfig;
-    use spse_engine::spatial_index::force_directed_layout;
-    use spse_engine::types::{Unit, UnitLevel, Link, MemoryType};
     use spse_engine::config::SemanticMapConfig;
+    use spse_engine::spatial_index::force_directed_layout;
+    use spse_engine::types::{Link, MemoryType, Unit, UnitLevel};
     use uuid::Uuid;
 
     fn create_test_units(count: usize) -> Vec<Unit> {
@@ -52,11 +52,7 @@ mod cpu_fallback_tests {
                 utility_score: 0.5,
                 confidence: 0.5,
                 trust_score: 0.5,
-                semantic_position: [
-                    (i as f32 % 10.0) - 5.0,
-                    ((i / 10) as f32 % 10.0) - 5.0,
-                    0.0,
-                ],
+                semantic_position: [(i as f32 % 10.0) - 5.0, ((i / 10) as f32 % 10.0) - 5.0, 0.0],
                 anchor_status: false,
                 links: vec![],
                 memory_type: MemoryType::Episodic,
@@ -75,9 +71,9 @@ mod cpu_fallback_tests {
         // Small datasets should use CPU (below GPU threshold)
         let units = create_test_units(10);
         let config = SemanticMapConfig::default();
-        
+
         let result = force_directed_layout(&units, &config);
-        
+
         assert!(!result.rolled_back);
         assert_eq!(result.position_updates.len(), 10);
     }
@@ -87,12 +83,12 @@ mod cpu_fallback_tests {
         // Medium dataset - should work regardless of GPU availability
         let units = create_test_units(50);
         let config = SemanticMapConfig::default();
-        
+
         let result = force_directed_layout(&units, &config);
-        
+
         // Should produce valid results
         assert_eq!(result.position_updates.len(), 50);
-        
+
         // All positions should be within bounds
         for (_, pos) in &result.position_updates {
             assert!(pos[0].abs() <= config.layout_boundary);
@@ -104,7 +100,7 @@ mod cpu_fallback_tests {
     #[test]
     fn test_gpu_config_defaults() {
         let config = GpuConfig::default();
-        
+
         assert!(config.enabled);
         assert!(!config.force_cpu);
         assert_eq!(config.power_preference, "high");
@@ -120,7 +116,7 @@ mod cpu_fallback_tests {
     fn test_gpu_config_force_cpu() {
         let mut config = GpuConfig::default();
         config.force_cpu = true;
-        
+
         // When force_cpu is true, GPU should not be used
         assert!(config.force_cpu);
         assert!(config.enabled); // enabled but forced off

@@ -3,7 +3,7 @@
 //! Parallelizes distance calculations for spatial queries and similarity scoring.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, ComputePipeline, BindGroupLayout};
+use wgpu::{BindGroupLayout, ComputePipeline, Device, Queue};
 
 use crate::gpu::device::GpuDevice;
 
@@ -168,7 +168,8 @@ impl GpuDistanceCalculator {
         );
 
         // Write data
-        self.queue.write_buffer(&position_buffer, 0, bytemuck::cast_slice(positions));
+        self.queue
+            .write_buffer(&position_buffer, 0, bytemuck::cast_slice(positions));
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -203,9 +204,11 @@ impl GpuDistanceCalculator {
         });
 
         // Run compute pass
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Distance Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Distance Encoder"),
+            });
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -214,7 +217,7 @@ impl GpuDistanceCalculator {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            
+
             let workgroups = (count + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
@@ -237,7 +240,8 @@ impl GpuDistanceCalculator {
         });
         self.device.poll(wgpu::Maintain::Wait);
 
-        rx.recv().map_err(|e| format!("Failed to receive mapping result: {}", e))?
+        rx.recv()
+            .map_err(|e| format!("Failed to receive mapping result: {}", e))?
             .map_err(|e| format!("Failed to map buffer: {}", e))?;
 
         let data = buffer_slice.get_mapped_range();
@@ -256,7 +260,7 @@ impl GpuDistanceCalculator {
         radius: f32,
     ) -> Result<Vec<usize>, String> {
         let results = self.distances_from_center(positions, center)?;
-        
+
         Ok(results
             .into_iter()
             .enumerate()
@@ -282,11 +286,16 @@ pub fn find_nearby_gpu(
 ) -> Option<Vec<usize>> {
     let gpu = crate::gpu::global_device()?;
     let calc = GpuDistanceCalculator::new(&gpu).ok()?;
-    
+
     let gpu_positions: Vec<GpuVec3> = positions
         .iter()
-        .map(|p| GpuVec3 { x: p[0], y: p[1], z: p[2], _padding: 0.0 })
+        .map(|p| GpuVec3 {
+            x: p[0],
+            y: p[1],
+            z: p[2],
+            _padding: 0.0,
+        })
         .collect();
-    
+
     calc.within_radius(&gpu_positions, center, radius).ok()
 }

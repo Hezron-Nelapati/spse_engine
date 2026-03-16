@@ -124,8 +124,11 @@ async fn main() {
     let baseline = run_pollution_trial(&EngineConfig::default()).await;
     println!(
         "  baseline: units={} findings={} rate={:.3} preserved={} overall={:.3}",
-        baseline.total_units, baseline.pollution_findings, baseline.pollution_rate,
-        baseline.valid_units_preserved, baseline.overall_score
+        baseline.total_units,
+        baseline.pollution_findings,
+        baseline.pollution_rate,
+        baseline.valid_units_preserved,
+        baseline.overall_score
     );
     let baseline_score = baseline.overall_score;
     all_results.push(PollutionTrialResult {
@@ -144,8 +147,13 @@ async fn main() {
             let result = run_pollution_trial(&config).await;
             println!(
                 "  {}={:.2}: units={} findings={} rate={:.3} preserved={} overall={:.3}",
-                dim.name, value, result.total_units, result.pollution_findings,
-                result.pollution_rate, result.valid_units_preserved, result.overall_score
+                dim.name,
+                value,
+                result.total_units,
+                result.pollution_findings,
+                result.pollution_rate,
+                result.valid_units_preserved,
+                result.overall_score
             );
 
             let entry = best_per_dimension
@@ -164,7 +172,12 @@ async fn main() {
     }
 
     // Generate report
-    let report = render_report(baseline_score, &all_results, &best_per_dimension, &dimensions);
+    let report = render_report(
+        baseline_score,
+        &all_results,
+        &best_per_dimension,
+        &dimensions,
+    );
     fs::create_dir_all("benchmarks").expect("create benchmarks dir");
     fs::write("benchmarks/pollution_sweep_report.md", &report).expect("write report");
 
@@ -202,7 +215,10 @@ async fn run_pollution_trial(config: &EngineConfig) -> PollutionTrialResult {
     // Audit remaining pollution
     let pollution_findings = engine.audit_pollution(100);
     let findings_count = pollution_findings.len() as u64
-        + governance_report.as_ref().map(|r| r.purged_polluted_units).unwrap_or(0);
+        + governance_report
+            .as_ref()
+            .map(|r| r.purged_polluted_units)
+            .unwrap_or(0);
 
     // Check how many valid probes are still answerable
     let mut valid_preserved = 0u64;
@@ -230,8 +246,7 @@ async fn run_pollution_trial(config: &EngineConfig) -> PollutionTrialResult {
     let _ = fs::remove_file(&db_path);
 
     // Score: maximize preservation, minimize pollution
-    let overall_score = (0.50 * preservation_rate)
-        + (0.50 * (1.0 - pollution_rate).max(0.0));
+    let overall_score = (0.50 * preservation_rate) + (0.50 * (1.0 - pollution_rate).max(0.0));
 
     PollutionTrialResult {
         dimension: String::new(),
@@ -262,7 +277,10 @@ fn render_report(
         "Generated: {}\n\n",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     ));
-    report.push_str(&format!("Baseline overall score: **{:.3}**\n\n", baseline_score));
+    report.push_str(&format!(
+        "Baseline overall score: **{:.3}**\n\n",
+        baseline_score
+    ));
 
     report.push_str("## Optimal Pollution Config Values\n\n");
     report.push_str("| Config Parameter | Optimal Value | Score | Delta vs Baseline |\n");

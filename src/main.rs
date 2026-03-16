@@ -112,7 +112,9 @@ async fn main() {
                 }
             } else {
                 let engine = Arc::new(Engine::new());
-                let status = engine.train_with_scope(execution_mode, scope, source.as_deref()).await;
+                let status = engine
+                    .train_with_scope(execution_mode, scope, source.as_deref())
+                    .await;
                 if json {
                     println!(
                         "{}",
@@ -169,43 +171,54 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::GenerateSeed { phase, output_dir, json } => {
-            match phase.as_str() {
-                "dryrun" => {
-                    let config = DryRunDatasetConfig {
-                        output_dir,
-                        ..Default::default()
-                    };
-                    let result = generate_dryrun_datasets(&config);
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&result).expect("serialize result"));
+        Commands::GenerateSeed {
+            phase,
+            output_dir,
+            json,
+        } => match phase.as_str() {
+            "dryrun" => {
+                let config = DryRunDatasetConfig {
+                    output_dir,
+                    ..Default::default()
+                };
+                let result = generate_dryrun_datasets(&config);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).expect("serialize result")
+                    );
+                } else {
+                    println!("Generated DryRun datasets:");
+                    println!(
+                        "  Intent dataset: {} ({} dialogues)",
+                        result.intent_dataset_path, result.intent_dialogue_count
+                    );
+                    println!(
+                        "  Entity dataset: {} ({} entities)",
+                        result.entity_dataset_path, result.entity_count
+                    );
+                    println!("  Intents covered: {}", result.intents_covered.len());
+                    if result.quality_passed {
+                        println!("  Quality: PASSED");
                     } else {
-                        println!("Generated DryRun datasets:");
-                        println!("  Intent dataset: {} ({} dialogues)", result.intent_dataset_path, result.intent_dialogue_count);
-                        println!("  Entity dataset: {} ({} entities)", result.entity_dataset_path, result.entity_count);
-                        println!("  Intents covered: {}", result.intents_covered.len());
-                        if result.quality_passed {
-                            println!("  Quality: PASSED");
-                        } else {
-                            println!("  Quality: NEEDS ATTENTION");
-                        }
-                        if !result.warnings.is_empty() {
-                            println!("  Warnings:");
-                            for w in &result.warnings {
-                                println!("    - {}", w);
-                            }
-                        }
+                        println!("  Quality: NEEDS ATTENTION");
                     }
-                    if !result.quality_passed {
-                        std::process::exit(1);
+                    if !result.warnings.is_empty() {
+                        println!("  Warnings:");
+                        for w in &result.warnings {
+                            println!("    - {}", w);
+                        }
                     }
                 }
-                other => {
-                    eprintln!("Unknown phase: {}. Supported phases: dryrun", other);
+                if !result.quality_passed {
                     std::process::exit(1);
                 }
             }
-        }
+            other => {
+                eprintln!("Unknown phase: {}. Supported phases: dryrun", other);
+                std::process::exit(1);
+            }
+        },
     }
 }
 

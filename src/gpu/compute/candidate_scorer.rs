@@ -4,26 +4,29 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, BindGroupLayout, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, BindingType, ShaderStages, BufferBindingType, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{
+    BindGroupLayout, BindGroupLayoutDescriptor, BindingType, BufferBindingType, ComputePipeline,
+    Device, PipelineLayoutDescriptor, Queue, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+};
 
 use crate::config::ScoringWeights;
-use crate::types::{Unit, ScoredCandidate, ScoreBreakdown, ContextMatrix, SequenceState, MergedState};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
+use crate::types::{
+    ContextMatrix, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit,
+};
 use once_cell::sync::Lazy;
 
 /// Global cached GPU candidate scorer (lazy initialized)
 static GPU_SCORER: Lazy<Option<Arc<GpuCandidateScorer>>> = Lazy::new(|| {
-    crate::gpu::global_device().and_then(|gpu| {
-        match GpuCandidateScorer::new(&gpu) {
-            Ok(scorer) => {
-                log::info!("GPU candidate scorer initialized");
-                Some(Arc::new(scorer))
-            }
-            Err(e) => {
-                log::warn!("Failed to initialize GPU scorer: {}", e);
-                None
-            }
+    crate::gpu::global_device().and_then(|gpu| match GpuCandidateScorer::new(&gpu) {
+        Ok(scorer) => {
+            log::info!("GPU candidate scorer initialized");
+            Some(Arc::new(scorer))
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize GPU scorer: {}", e);
+            None
         }
     })
 });
@@ -188,8 +191,10 @@ impl GpuCandidateScorer {
         );
 
         // Write data to buffers
-        self.queue.write_buffer(&candidate_buffer, 0, bytemuck::cast_slice(candidates));
-        self.queue.write_buffer(&weights_buffer, 0, bytemuck::cast_slice(&[*weights]));
+        self.queue
+            .write_buffer(&candidate_buffer, 0, bytemuck::cast_slice(candidates));
+        self.queue
+            .write_buffer(&weights_buffer, 0, bytemuck::cast_slice(&[*weights]));
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -216,9 +221,11 @@ impl GpuCandidateScorer {
         });
 
         // Create command encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Candidate Scoring Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Candidate Scoring Encoder"),
+            });
 
         // Run compute pass
         {
@@ -228,7 +235,7 @@ impl GpuCandidateScorer {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            
+
             let workgroups = (candidate_count + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
@@ -253,7 +260,8 @@ impl GpuCandidateScorer {
         });
         self.device.poll(wgpu::Maintain::Wait);
 
-        rx.recv().map_err(|e| format!("Failed to receive mapping result: {}", e))?
+        rx.recv()
+            .map_err(|e| format!("Failed to receive mapping result: {}", e))?
             .map_err(|e| format!("Failed to map buffer: {}", e))?;
 
         let data = buffer_slice.get_mapped_range();
@@ -346,7 +354,7 @@ pub fn score_candidates(
                     .zip(candidates.iter())
                     .map(|(result, unit)| {
                         let _uuid = uuid::Uuid::from_u128(
-                            (result.unit_id_high as u128) << 32 | result.unit_id_low as u128
+                            (result.unit_id_high as u128) << 32 | result.unit_id_low as u128,
                         );
                         ScoredCandidate {
                             unit_id: unit.id,
@@ -376,7 +384,9 @@ fn score_candidates_cpu(
     merged: &MergedState,
     weights: &ScoringWeights,
 ) -> Vec<ScoredCandidate> {
-    crate::reasoning::search::CandidateScorer::score(candidates, context, sequence, merged, weights, None, None)
+    crate::reasoning::search::CandidateScorer::score(
+        candidates, context, sequence, merged, weights, None, None,
+    )
 }
 
 /// Prepare candidate data for GPU
@@ -390,7 +400,11 @@ fn prepare_gpu_candidates(
 
     let merged_candidate_ids: HashSet<_> = merged.candidate_ids.iter().copied().collect();
     let recent_unit_ids: HashSet<_> = sequence.recent_unit_ids.iter().copied().collect();
-    let task_entities: Vec<_> = sequence.task_entities.iter().map(|e| e.to_lowercase()).collect();
+    let task_entities: Vec<_> = sequence
+        .task_entities
+        .iter()
+        .map(|e| e.to_lowercase())
+        .collect();
 
     // Pre-compute summary_lower once
     let summary_lower = if !context.summary_lower.is_empty() {
@@ -408,7 +422,7 @@ fn prepare_gpu_candidates(
             } else {
                 std::borrow::Cow::Owned(unit.content.to_lowercase())
             };
-            
+
             let spatial_fit = if merged_candidate_ids.contains(&unit.id) {
                 0.9
             } else {
@@ -417,7 +431,7 @@ fn prepare_gpu_candidates(
 
             let level_mult = level_multiplier(unit.level);
             let context_fit = context_match(&lowered, summary_lower) * level_mult;
-            
+
             let sequence_fit = if recent_unit_ids.contains(&unit.id) {
                 0.95 * level_mult
             } else if task_entities.iter().any(|e| lowered.contains(e.as_str())) {
@@ -432,8 +446,10 @@ fn prepare_gpu_candidates(
             let evidence_support = evidence_match(&lowered, merged) * level_mult;
 
             let uuid_bytes = unit.id.as_bytes();
-            let unit_id_low = u32::from_le_bytes([uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3]]);
-            let unit_id_high = u32::from_le_bytes([uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7]]);
+            let unit_id_low =
+                u32::from_le_bytes([uuid_bytes[0], uuid_bytes[1], uuid_bytes[2], uuid_bytes[3]]);
+            let unit_id_high =
+                u32::from_le_bytes([uuid_bytes[4], uuid_bytes[5], uuid_bytes[6], uuid_bytes[7]]);
 
             GpuCandidateData {
                 spatial_fit,

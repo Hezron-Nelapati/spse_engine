@@ -1,44 +1,43 @@
-use crate::config::{
-    EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig,
-    ReasoningLoopConfig, RetrievalThresholds, ScoringWeights, TrustConfig,
-};
-use crate::document::{
-    answer_question, load_documents_from_paths_with_config, parse_inline_document_request,
-    DocumentAnswer, DocumentQueryState,
-};
 use crate::classification::builder::UnitBuilder;
 use crate::classification::hierarchy::HierarchicalUnitOrganizer;
 use crate::classification::input;
 use crate::classification::intent::IntentDetector;
 use crate::classification::query::{focus_query_text, SafeQueryBuilder};
 use crate::classification::safety::TrustSafetyValidator;
-use crate::reasoning::feedback::FeedbackController;
-use crate::reasoning::merge::EvidenceMerger;
-use crate::reasoning::retrieval::RetrievalPipeline;
-use crate::reasoning::search::{top_unit_ids, CandidateScorer, score_candidates_gpu_accelerated};
+use crate::config::{
+    EngineConfig, EscapeProfile, FineResolverConfig, IntentShapingConfig, ReasoningLoopConfig,
+    RetrievalThresholds, ScoringWeights, TrustConfig,
+};
+use crate::document::{
+    answer_question, load_documents_from_paths_with_config, parse_inline_document_request,
+    DocumentAnswer, DocumentQueryState,
+};
+use crate::memory::store::{MemorySnapshot, MemoryStore};
+use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
 use crate::predictive::output::OutputDecoder;
 use crate::predictive::resolver::FineResolver;
 use crate::predictive::router::SemanticRouter;
-use crate::memory::store::{MemorySnapshot, MemoryStore};
-use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
+use crate::reasoning::feedback::FeedbackController;
+use crate::reasoning::merge::EvidenceMerger;
+use crate::reasoning::retrieval::RetrievalPipeline;
+use crate::reasoning::search::{score_candidates_gpu_accelerated, top_unit_ids, CandidateScorer};
 use crate::scheduler::{PriorityScheduler, WorkPriority};
-use crate::telemetry::{
-    LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent,
-    TelemetryWorker, TelemetryWorkerConfig, TraceContext, TraceId,
-};
 use crate::telemetry::test_observer::{
     ObservationMemory, ObservationRetrieval, ObservationScoring, ObservationTimings,
     ObservationUnits, ScoreBreakdown as ObservedScoreBreakdown, TestObserver,
 };
+use crate::telemetry::{
+    LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent, TelemetryWorker,
+    TelemetryWorkerConfig, TraceContext, TraceId,
+};
 use crate::training::{self, TrainingScope};
 use crate::types::{
-    ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport, ExplainTrace,
-    InputPacket, IntentKind, IntentProfile, JobState, LayerNote, MemoryChannel, MemoryType,
-    MergedState, OutputType, ProcessResult, QueueDepths, ReasoningResult, ReasoningState,
-    ResolverMode, RetrievedDocument, RoutingResult, SearchDecision,
-    SequenceState, SourceKind, ThoughtUnit, TrainBatchRequest, TrainingExecutionMode,
-    TrainingJobStatus, TrainingMetrics, TrainingPhaseKind, TrainingPhaseStatus,
-    Unit, UnitHierarchy,
+    ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport,
+    ExplainTrace, InputPacket, IntentKind, IntentProfile, JobState, LayerNote, MemoryChannel,
+    MemoryType, MergedState, OutputType, ProcessResult, QueueDepths, ReasoningResult,
+    ReasoningState, ResolverMode, RetrievedDocument, RoutingResult, SearchDecision, SequenceState,
+    SourceKind, ThoughtUnit, TrainBatchRequest, TrainingExecutionMode, TrainingJobStatus,
+    TrainingMetrics, TrainingPhaseKind, TrainingPhaseStatus, Unit, UnitHierarchy,
 };
 use arc_swap::ArcSwap;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -164,7 +163,8 @@ impl Engine {
                 flush_interval_ms: config.telemetry.worker.flush_interval_ms,
                 channel_capacity: config.telemetry.worker.channel_capacity,
                 sample_rate: config.telemetry.worker.sample_rate,
-            }).ok()
+            })
+            .ok()
         } else {
             None
         };
@@ -187,17 +187,18 @@ impl Engine {
 
         // Phase 4: Initialize trace context
         let trace_context = Arc::new(Mutex::new(TraceContext::new()));
-        
+
         // Initialize classification calculator
-        let classification_calculator = crate::classification::ClassificationCalculator::with_weights(
-            config.classification.w_structure,
-            config.classification.w_punctuation,
-            config.classification.w_semantic,
-            config.classification.w_derived,
-            config.classification.w_intent_hash,
-            config.classification.w_tone_hash,
-        );
-        
+        let classification_calculator =
+            crate::classification::ClassificationCalculator::with_weights(
+                config.classification.w_structure,
+                config.classification.w_punctuation,
+                config.classification.w_semantic,
+                config.classification.w_derived,
+                config.classification.w_intent_hash,
+                config.classification.w_tone_hash,
+            );
+
         // Initialize spatial grid for classification patterns
         let spatial_grid = Arc::new(Mutex::new(crate::spatial_index::SpatialGrid::new(
             config.classification.spatial_cell_size,
@@ -429,9 +430,13 @@ impl Engine {
     }
 
     /// Process text with explicit retrieval override
-    pub async fn process_with_retrieval(&self, text: &str, retrieval_enabled: bool) -> ProcessResult {
+    pub async fn process_with_retrieval(
+        &self,
+        text: &str,
+        retrieval_enabled: bool,
+    ) -> ProcessResult {
         let _permit = self.scheduler.acquire(WorkPriority::Inference);
-        
+
         // First check for inline document paths - document ingestion always works
         let inline_request = parse_inline_document_request(text);
         if !inline_request.paths.is_empty() {
@@ -504,17 +509,13 @@ impl Engine {
                 }
             }
         }
-        
+
         // Check session documents for follow-up questions
         let session = self.session_snapshot();
         if !session.documents.is_empty() {
             let sequence = self.current_sequence_state();
-            let pre_intent = self.resolve_intent_profile(
-                text,
-                &ContextMatrix::default(),
-                &sequence,
-                true,
-            );
+            let pre_intent =
+                self.resolve_intent_profile(text, &ContextMatrix::default(), &sequence, true);
             if let Some(answer) = answer_question(
                 text,
                 &session.documents,
@@ -534,8 +535,9 @@ impl Engine {
                 }
             }
         }
-        
-        self.process_prompt(text, None, Vec::new(), retrieval_enabled).await
+
+        self.process_prompt(text, None, Vec::new(), retrieval_enabled)
+            .await
     }
 
     pub fn clear_session_documents(&self) -> usize {
@@ -676,7 +678,8 @@ impl Engine {
     ) -> TrainingJobStatus {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
         let job_id = format!("train_{}", Uuid::new_v4().simple());
-        let mut plan = training::build_training_plan_with_config(&self.config, execution_mode, scope);
+        let mut plan =
+            training::build_training_plan_with_config(&self.config, execution_mode, scope);
         if let Some(filter) = source_filter {
             for phase in &mut plan.phases {
                 phase.sources.retain(|s| s.name.as_deref() == Some(filter));
@@ -691,7 +694,11 @@ impl Engine {
         job_id
     }
 
-    pub fn start_train_with_scope(&self, _execution_mode: TrainingExecutionMode, _scope: TrainingScope) -> String {
+    pub fn start_train_with_scope(
+        &self,
+        _execution_mode: TrainingExecutionMode,
+        _scope: TrainingScope,
+    ) -> String {
         let job_id = format!("train_{}", Uuid::new_v4().simple());
         // Spawn happens in api.rs handler to avoid lifetime issues
         job_id
@@ -706,7 +713,7 @@ impl Engine {
     pub async fn train_batch(&self, request: TrainBatchRequest) -> TrainingJobStatus {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
         let job_id = format!("train_batch_{}", Uuid::new_v4().simple());
-        
+
         // Build a minimal training plan from the batch request
         let plan = training::TrainingPlan {
             phases: vec![training::TrainingPhasePlan {
@@ -718,7 +725,7 @@ impl Engine {
                 min_semantic_routing_accuracy: None,
             }],
         };
-        
+
         self.run_training_plan_with_id(job_id, plan).await
     }
 
@@ -731,15 +738,19 @@ impl Engine {
             job_id: job_id.clone(),
             status: JobState::Processing,
             active_phase: plan.phases.first().map(|p| p.phase),
-            phase_statuses: plan.phases.iter().map(|p| TrainingPhaseStatus {
-                phase: p.phase,
-                status: JobState::Queued,
-                batches_completed: 0,
-                batches_target: p.batches_target,
-                sources_processed: 0,
-                sources_total: p.sources.len(),
-                metrics: TrainingMetrics::default(),
-            }).collect(),
+            phase_statuses: plan
+                .phases
+                .iter()
+                .map(|p| TrainingPhaseStatus {
+                    phase: p.phase,
+                    status: JobState::Queued,
+                    batches_completed: 0,
+                    batches_target: p.batches_target,
+                    sources_processed: 0,
+                    sources_total: p.sources.len(),
+                    metrics: TrainingMetrics::default(),
+                })
+                .collect(),
             progress: crate::types::TrainingProgress::default(),
             learning_metrics: crate::types::LearningMetrics::default(),
             performance: crate::types::PerformanceMetrics::default(),
@@ -806,7 +817,10 @@ impl Engine {
 
                 let item_limit = resolved.stream.item_limit.unwrap_or(200_000);
                 let target_memory = resolved.target_memory.unwrap_or(MemoryType::Episodic);
-                let channels = resolved.memory_channels.clone().unwrap_or_else(|| vec![MemoryChannel::Main]);
+                let channels = resolved
+                    .memory_channels
+                    .clone()
+                    .unwrap_or_else(|| vec![MemoryChannel::Main]);
                 let source_name = resolved.name.clone().unwrap_or_default();
 
                 run_logger.log_progress(&format!(
@@ -834,7 +848,8 @@ impl Engine {
                 let mut bytes_read: u64 = 0;
                 let mut batch_index: u64 = 0;
                 let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
-                let training_batch_size: usize = self.config.builder.training_batch_size.unwrap_or(500) as usize;
+                let training_batch_size: usize =
+                    self.config.builder.training_batch_size.unwrap_or(500) as usize;
 
                 let is_classification_source = source_name == "seed_classification";
 
@@ -895,9 +910,8 @@ impl Engine {
                                     crate::classification::builder::UnitBuilder::build_units_static(
                                         &packet, config_ref,
                                     );
-                                let hierarchy = HierarchicalUnitOrganizer::organize(
-                                    &build_output, config_ref,
-                                );
+                                let hierarchy =
+                                    HierarchicalUnitOrganizer::organize(&build_output, config_ref);
                                 let context_label = example
                                     .context
                                     .clone()
@@ -905,9 +919,11 @@ impl Engine {
                                 // Pre-compute classification signature in parallel
                                 let classification_data = hasher_ref.as_ref().and_then(|hasher| {
                                     let gt = parse_classification_ground_truth(&example)?;
-                                    let sig = crate::classification::ClassificationSignature::compute(
-                                        &example.question, hasher,
-                                    );
+                                    let sig =
+                                        crate::classification::ClassificationSignature::compute(
+                                            &example.question,
+                                            hasher,
+                                        );
                                     Some((sig, gt))
                                 });
                                 Some((example, hierarchy, context_label, classification_data))
@@ -919,9 +935,10 @@ impl Engine {
                         // Sequential: ingest all prepared hierarchies under a single lock
                         let ingest_start = Instant::now();
                         {
-                            let mut memory =
-                                self.memory.lock().expect("memory mutex poisoned");
-                            for (example, hierarchy, context_label, _classification_data) in &prepared {
+                            let mut memory = self.memory.lock().expect("memory mutex poisoned");
+                            for (example, hierarchy, context_label, _classification_data) in
+                                &prepared
+                            {
                                 let active_ids = memory.ingest_hierarchy_with_channels(
                                     hierarchy,
                                     SourceKind::TrainingDocument,
@@ -943,25 +960,36 @@ impl Engine {
 
                             // Classification pattern storage (signatures pre-computed in parallel)
                             if is_classification_source {
-                                let mut spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
+                                let mut spatial = self
+                                    .spatial_grid
+                                    .lock()
+                                    .expect("spatial grid mutex poisoned");
                                 for (_, _, _, classification_data) in &prepared {
                                     if let Some((sig, gt)) = classification_data {
                                         let sig_hash = sig.signature_hash().to_string();
-                                        if let Some(existing_id) = memory.classification_pattern_by_signature(&sig_hash) {
-                                            if let Some(mut existing) = memory.get_classification_pattern(existing_id) {
+                                        if let Some(existing_id) =
+                                            memory.classification_pattern_by_signature(&sig_hash)
+                                        {
+                                            if let Some(mut existing) =
+                                                memory.get_classification_pattern(existing_id)
+                                            {
                                                 existing.record_success();
                                                 memory.update_classification_pattern(existing);
                                             }
                                         } else {
-                                            let mut new_pattern = crate::classification::ClassificationPattern::new(
-                                                sig.clone(),
-                                                gt.intent,
-                                                gt.tone,
-                                                gt.resolver_mode,
-                                                gt.domain.clone(),
-                                            );
+                                            let mut new_pattern =
+                                                crate::classification::ClassificationPattern::new(
+                                                    sig.clone(),
+                                                    gt.intent,
+                                                    gt.tone,
+                                                    gt.resolver_mode,
+                                                    gt.domain.clone(),
+                                                );
                                             new_pattern.record_success();
-                                            spatial.insert(new_pattern.unit_id, &sig.semantic_centroid);
+                                            spatial.insert(
+                                                new_pattern.unit_id,
+                                                &sig.semantic_centroid,
+                                            );
                                             // Accumulate into per-intent/tone centroids
                                             let fv = sig.to_feature_vector();
                                             memory.accumulate_centroid(gt.intent, gt.tone, &fv);
@@ -1044,9 +1072,8 @@ impl Engine {
             // Run governance after each phase
             {
                 let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                let report = memory.prune_to_memory_budget(
-                    (phase.options.max_memory_delta_mb * 1024.0) as i64,
-                );
+                let report = memory
+                    .prune_to_memory_budget((phase.options.max_memory_delta_mb * 1024.0) as i64);
                 run_logger.log_progress(&format!(
                     "  [governance] pruned {} units, {} candidates",
                     report.pruned_units, report.pruned_candidates
@@ -1058,11 +1085,7 @@ impl Engine {
                 run_logger.log_progress("  [spatial] rebuilding index...");
                 let memory = self.memory.lock().expect("memory mutex poisoned");
                 let all_units = memory.all_units();
-                let routing = route_units(
-                    &all_units,
-                    &all_units,
-                    &self.config.semantic_map,
-                );
+                let routing = route_units(&all_units, &all_units, &self.config.semantic_map);
                 drop(memory);
                 let mut memory = self.memory.lock().expect("memory mutex poisoned");
                 memory.update_positions(&routing.position_updates);
@@ -1098,7 +1121,9 @@ impl Engine {
 
         run_logger.log_progress(&format!(
             "[training] complete: {} examples, {} units in {:.1}s",
-            total_examples, total_units, total_elapsed.as_secs_f64()
+            total_examples,
+            total_units,
+            total_elapsed.as_secs_f64()
         ));
         run_logger.log_progress(&format!(
             "[training] output: {}",
@@ -1230,14 +1255,19 @@ impl Engine {
         let active_units = snapshot.get_units(&active_ids);
 
         let layer_5_start = Instant::now();
-        let routing = route_units_with_cached_grid(&active_units, snapshot.spatial_grid(), &self.config.semantic_map);
+        let routing = route_units_with_cached_grid(
+            &active_units,
+            snapshot.spatial_grid(),
+            &self.config.semantic_map,
+        );
         let layer_5_routing_time_ms = layer_5_start.elapsed().as_millis() as u64;
         self.latency_monitor.record(5, layer_5_routing_time_ms);
 
         {
             let mut memory = self.memory.lock().expect("memory mutex poisoned");
             memory.update_positions(&routing.position_updates);
-            let capped_neighbors: Vec<Uuid> = routing.neighbor_ids.iter().copied().take(16).collect();
+            let capped_neighbors: Vec<Uuid> =
+                routing.neighbor_ids.iter().copied().take(16).collect();
             for active_id in &active_ids {
                 memory.connect_units(*active_id, &capped_neighbors, 0.35);
             }
@@ -1377,11 +1407,15 @@ impl Engine {
             // Skip publish_memory_snapshot here — get units directly from cache
             let merged_input_units = {
                 let memory = self.memory.lock().expect("memory mutex poisoned");
-                let mut units: Vec<Unit> = candidate_ids.iter()
+                let mut units: Vec<Unit> = candidate_ids
+                    .iter()
                     .filter_map(|id| memory.get_unit(id).cloned())
                     .collect();
-                units.extend(evidence_ids.iter()
-                    .filter_map(|id| memory.get_unit(id).cloned()));
+                units.extend(
+                    evidence_ids
+                        .iter()
+                        .filter_map(|id| memory.get_unit(id).cloned()),
+                );
                 units
             };
 
@@ -1446,13 +1480,13 @@ impl Engine {
             }
         });
         let layer_16_start = Instant::now();
-        
+
         // Collect anchor units for shaping (high-trust factual anchors)
         let anchor_units: Vec<&Unit> = final_candidates
             .iter()
             .filter(|unit| unit.trust_score >= adaptive.shaping.anchor_trust_threshold)
             .collect();
-        
+
         let resolved = FineResolver::select_with_shaping(
             &scored,
             resolver_mode,
@@ -1477,10 +1511,7 @@ impl Engine {
 
         // Phase 3: Dynamic Reasoning Loop — triggered by confidence gating
         let reasoning_start = Instant::now();
-        let initial_confidence = resolved
-            .as_ref()
-            .map(|r| r.score)
-            .unwrap_or(0.0);
+        let initial_confidence = resolved.as_ref().map(|r| r.score).unwrap_or(0.0);
         let reasoning_result = if self.config.auto_inference.reasoning_loop.enabled {
             self.execute_reasoning_loop(
                 &packet.original_text,
@@ -1516,8 +1547,8 @@ impl Engine {
         // If retrieval failed, provide a helpful message instead of random memory content
         if retrieval_failed && !decoded.grounded {
             let prompt_lower = packet.original_text.to_lowercase();
-            let is_realtime_query = prompt_lower.contains("current") 
-                || prompt_lower.contains("latest") 
+            let is_realtime_query = prompt_lower.contains("current")
+                || prompt_lower.contains("latest")
                 || prompt_lower.contains("recent")
                 || prompt_lower.contains("today")
                 || prompt_lower.contains("now")
@@ -1527,7 +1558,7 @@ impl Engine {
                 || prompt_lower.contains("winner")
                 || prompt_lower.contains("2026")
                 || prompt_lower.contains("2025");
-            
+
             if is_realtime_query {
                 decoded.text = format!(
                     "I don't have access to current real-time information about {}. My knowledge is based on general knowledge sources and may not reflect recent events or live data.",
@@ -1557,7 +1588,8 @@ impl Engine {
                 ) {
                     let normalized_prompt = input::normalize_text(&packet.original_text);
                     let normalized_answer = input::normalize_text(&evidence_answer.text);
-                    let confidence_threshold = self.config.resolver.evidence_answer_confidence_threshold;
+                    let confidence_threshold =
+                        self.config.resolver.evidence_answer_confidence_threshold;
                     if !normalized_answer.is_empty()
                         && normalized_answer != normalized_prompt
                         && evidence_answer.confidence >= confidence_threshold
@@ -1577,7 +1609,8 @@ impl Engine {
             ) {
                 let normalized_prompt = input::normalize_text(&packet.original_text);
                 let normalized_answer = input::normalize_text(&evidence_answer.text);
-                let confidence_threshold = self.config.resolver.evidence_answer_confidence_threshold;
+                let confidence_threshold =
+                    self.config.resolver.evidence_answer_confidence_threshold;
                 if !normalized_answer.is_empty()
                     && normalized_answer != normalized_prompt
                     && evidence_answer.confidence >= confidence_threshold
@@ -1605,8 +1638,7 @@ impl Engine {
                 sequence_state.task_entities.clone(),
             );
 
-            if sequence_state.turn_index > 0 && sequence_state.turn_index % 5 == 0
-            {
+            if sequence_state.turn_index > 0 && sequence_state.turn_index % 5 == 0 {
                 Some(memory.run_maintenance_lightweight(&self.config.governance))
             } else {
                 None
@@ -1763,7 +1795,10 @@ impl Engine {
         state.max_steps_reached = state.current_step >= config.max_internal_steps - 1;
 
         // Build final output
-        let final_confidence = *state.confidence_trajectory.last().unwrap_or(&initial_confidence);
+        let final_confidence = *state
+            .confidence_trajectory
+            .last()
+            .unwrap_or(&initial_confidence);
         let output = OutputType::FinalAnswer(String::new());
 
         ReasoningResult {
@@ -1779,7 +1814,12 @@ impl Engine {
     /// Generate a thought unit for the reasoning loop.
     /// This is a placeholder implementation - actual thought generation would use
     /// the candidate pool and context to generate internal reasoning steps.
-    fn generate_thought_unit(&self, query: &str, step: usize, state: &ReasoningState) -> ThoughtUnit {
+    fn generate_thought_unit(
+        &self,
+        query: &str,
+        step: usize,
+        state: &ReasoningState,
+    ) -> ThoughtUnit {
         // First, try to adapt an existing reasoning pattern
         if let Some(pattern) = self.adapt_reasoning_pattern(query, step, state) {
             return pattern;
@@ -1803,13 +1843,17 @@ impl Engine {
 
     /// Adapt a reasoning pattern from memory to the current query context.
     /// Returns a ThoughtUnit if a suitable pattern is found, None otherwise.
-    fn adapt_reasoning_pattern(&self, query: &str, step: usize, state: &ReasoningState) -> Option<ThoughtUnit> {
+    fn adapt_reasoning_pattern(
+        &self,
+        query: &str,
+        step: usize,
+        state: &ReasoningState,
+    ) -> Option<ThoughtUnit> {
         let memory = self.memory.lock().expect("memory mutex poisoned");
 
         // Get reasoning patterns matching the query
         let patterns = memory.reasoning_patterns_for_query(
-            query,
-            None, // No type hint - let similarity determine
+            query, None, // No type hint - let similarity determine
             5,    // Top 5 patterns
         );
 
@@ -1856,10 +1900,9 @@ impl Engine {
 
         // Build a minimal hierarchy for the thought
         let mut hierarchy = UnitHierarchy::default();
-        hierarchy.levels.insert(
-            "Phrase".to_string(),
-            vec![activation],
-        );
+        hierarchy
+            .levels
+            .insert("Phrase".to_string(), vec![activation]);
 
         // Ingest into Reasoning channel, not Core
         memory.ingest_hierarchy_with_channels(
@@ -1928,20 +1971,24 @@ impl Engine {
     ) -> IntentProfile {
         // Use calculation-based classification
         let memory = self.memory.lock().expect("memory mutex poisoned");
-        let spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
-        
+        let spatial = self
+            .spatial_grid
+            .lock()
+            .expect("spatial grid mutex poisoned");
+
         let result = self.classification_calculator.calculate(
             raw_input,
             &memory,
             &spatial,
             &self.config.classification,
         );
-        
+
         drop(memory);
         drop(spatial);
-        
+
         // Convert ClassificationResult to IntentProfile
-        let low_confidence = result.confidence < self.config.classification.low_confidence_threshold;
+        let low_confidence =
+            result.confidence < self.config.classification.low_confidence_threshold;
         let fallback_mode = if matches!(result.intent, IntentKind::Unknown) || low_confidence {
             crate::types::IntentFallbackMode::RetrieveUnknown
         } else {
@@ -2331,13 +2378,13 @@ impl Engine {
         }
         let _ = self.feedback_tx.try_send(feedback);
     }
-    
+
     /// Ingest a labeled dialogue for unified training (classification + core memory).
-    /// 
+    ///
     /// # Layer 9 Compliance (Silent Training Boundary)
     /// The presence of the JSON implies authorized ingestion. Intent field is used for
     /// memory tagging, not to gate ingestion. Layer 9 retrieval decisioning is bypassed.
-    /// 
+    ///
     /// # Layer 21 Compliance (Core Memory Gate)
     /// If memory_target is Core, units are placed in StagingEpisodic state with elevated
     /// utility score. Core promotion requires:
@@ -2350,31 +2397,41 @@ impl Engine {
         options: &UnifiedTrainingOptions,
     ) -> crate::types::UnifiedTrainingReport {
         use crate::classification::MemoryTarget;
-        use crate::types::{MemoryType, MemoryChannel, TrainingValidationError, ValidationErrorCategory};
-        
+        use crate::types::{
+            MemoryChannel, MemoryType, TrainingValidationError, ValidationErrorCategory,
+        };
+
         let mut report = crate::types::UnifiedTrainingReport {
             dialogue_id: dialogue.id.clone(),
             turns_processed: dialogue.turns.len() as u32,
             ..Default::default()
         };
-        
+
         // Determine memory type based on memory_target (Layer 21 compliance)
         let (default_memory_type, utility_boost) = match dialogue.metadata.memory_target {
             MemoryTarget::Core => {
                 // StagingEpisodic: high utility but requires corroboration
                 report.core_target_staged = true;
-                (MemoryType::Episodic, self.config.governance.staging_episodic_utility_boost)
+                (
+                    MemoryType::Episodic,
+                    self.config.governance.staging_episodic_utility_boost,
+                )
             }
-            MemoryTarget::StagingEpisodic => {
-                (MemoryType::Episodic, self.config.governance.staging_episodic_utility_boost)
-            }
-            MemoryTarget::Episodic => {
-                (MemoryType::Episodic, self.config.governance.bootstrap_seed_utility_floor)
-            }
+            MemoryTarget::StagingEpisodic => (
+                MemoryType::Episodic,
+                self.config.governance.staging_episodic_utility_boost,
+            ),
+            MemoryTarget::Episodic => (
+                MemoryType::Episodic,
+                self.config.governance.bootstrap_seed_utility_floor,
+            ),
         };
-        
+
         // Parse memory channels
-        let channels: Vec<MemoryChannel> = dialogue.metadata.channels.iter()
+        let channels: Vec<MemoryChannel> = dialogue
+            .metadata
+            .channels
+            .iter()
             .filter_map(|c| match c.as_str() {
                 "Main" => Some(MemoryChannel::Main),
                 "Intent" => Some(MemoryChannel::Intent),
@@ -2388,7 +2445,7 @@ impl Engine {
             channels
         };
         report.channels_populated = dialogue.metadata.channels.clone();
-        
+
         // Process each turn
         for turn in &dialogue.turns {
             // Build units from turn content (Layer 2)
@@ -2412,19 +2469,34 @@ impl Engine {
                     let mut levels = std::collections::BTreeMap::new();
                     for unit in &build_output.activated_units {
                         let key = format!("{:?}", unit.level).to_lowercase();
-                        levels.entry(key).or_insert_with(Vec::new).push(unit.clone());
+                        levels
+                            .entry(key)
+                            .or_insert_with(Vec::new)
+                            .push(unit.clone());
                     }
                     levels
                 },
                 anchors: Vec::new(),
                 entities: Vec::new(),
             };
-            
+
             // Track unit counts for validation
-            let phrase_count = hierarchy.levels.get("phrase").map(|v| v.len() as u32).unwrap_or(0);
-            let sentence_count = hierarchy.levels.get("sentence").map(|v| v.len() as u32).unwrap_or(0);
-            let _word_count = hierarchy.levels.get("word").map(|v| v.len() as u32).unwrap_or(0);
-            
+            let phrase_count = hierarchy
+                .levels
+                .get("phrase")
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let sentence_count = hierarchy
+                .levels
+                .get("sentence")
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            let _word_count = hierarchy
+                .levels
+                .get("word")
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+
             // Validate expected_unit_count (Layer 18 feedback)
             if let Some(expected_phrase) = turn.expected_unit_count.phrase {
                 if phrase_count != expected_phrase {
@@ -2446,7 +2518,7 @@ impl Engine {
                     });
                 }
             }
-            
+
             // Ingest into memory with intent tagging (bypass Layer 9 gating)
             let context_label = format!("unified_training:{}:{}", dialogue.id, turn.role);
             let active_ids = {
@@ -2460,14 +2532,17 @@ impl Engine {
                     &channels,
                 )
             };
-            
+
             report.units_built += active_ids.len() as u64;
-            
+
             // Classification training if enabled
             if options.train_classification {
                 let outcome = {
                     let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                    let mut spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
+                    let mut spatial = self
+                        .spatial_grid
+                        .lock()
+                        .expect("spatial grid mutex poisoned");
                     // Create new trainer with calculator from config weights
                     let mut trainer = crate::classification::ClassificationTrainer::new(
                         crate::classification::ClassificationCalculator::with_weights(
@@ -2490,10 +2565,12 @@ impl Engine {
                 report.classification_outcome = Some(outcome);
             }
         }
-        
+
         // Emit validation errors as Layer 18 feedback
         if !report.validation_errors.is_empty() {
-            let feedback: Vec<crate::types::FeedbackEvent> = report.validation_errors.iter()
+            let feedback: Vec<crate::types::FeedbackEvent> = report
+                .validation_errors
+                .iter()
                 .map(|err| crate::types::FeedbackEvent {
                     layer: 18,
                     event: match err.category {
@@ -2501,14 +2578,15 @@ impl Engine {
                         ValidationErrorCategory::AnchorDetection => "anchor_detection_error",
                         ValidationErrorCategory::EntityExtraction => "entity_extraction_error",
                         ValidationErrorCategory::TrustQuality => "trust_quality_error",
-                    }.to_string(),
+                    }
+                    .to_string(),
                     impact: 0.5,
                     target_unit_id: None,
                 })
                 .collect();
             self.enqueue_feedback(feedback);
         }
-        
+
         report
     }
 }
@@ -2913,7 +2991,10 @@ fn build_trace(
             [
                 ("reasoning_triggered", "true".to_string()),
                 ("steps_taken", reasoning_steps_taken.to_string()),
-                ("final_confidence", format!("{:.3}", reasoning_final_confidence)),
+                (
+                    "final_confidence",
+                    format!("{:.3}", reasoning_final_confidence),
+                ),
             ],
         ));
     }
@@ -3832,16 +3913,16 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
     for doc in documents {
         let title_terms = normalized_terms(&doc.title);
         let title_overlap = token_overlap(&prompt_terms, &title_terms);
-        
+
         // Exact match bonus: prioritize documents whose title exactly matches query
         let title_lower = doc.title.to_lowercase();
         let prompt_lower = prompt.to_lowercase();
         let _exact_title_match = title_lower.trim() == prompt_lower.trim()
-            || title_lower.starts_with(&format!("{} ", prompt_lower)) == false 
+            || title_lower.starts_with(&format!("{} ", prompt_lower)) == false
                 && title_lower.contains(&prompt_lower) == false;
-        
+
         // Penalize titles that are supersets (e.g., "Donald Trump (song)" when querying "Donald Trump")
-        let is_superset_title = title_lower.contains(&prompt_lower) 
+        let is_superset_title = title_lower.contains(&prompt_lower)
             && title_lower != prompt_lower
             && !title_lower.starts_with(&prompt_lower);
         let exact_match_bonus = if title_lower.trim() == prompt_lower.trim() {
@@ -3851,7 +3932,7 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
         } else {
             0.0
         };
-        
+
         let doc_body_terms = normalized_terms(&doc.normalized_content)
             .into_iter()
             .take(180)
@@ -3860,7 +3941,8 @@ fn grounded_evidence_answer(prompt: &str, documents: &[RetrievedDocument]) -> Op
         let ambiguity_penalty =
             evidence_ambiguity_penalty(&raw_prompt, &doc.title, &doc.raw_content);
         let doc_score = ((0.42 * title_overlap) + (0.33 * doc_overlap) + (0.20 * doc.trust_score)
-            - (0.18 * ambiguity_penalty) + exact_match_bonus)
+            - (0.18 * ambiguity_penalty)
+            + exact_match_bonus)
             .clamp(0.0, 1.0);
 
         for sentence in simple_sentences(&doc.raw_content) {
@@ -4872,7 +4954,9 @@ impl<'a> ExpressionParser<'a> {
 
 /// Parse GroundTruth from a seed TrainingExample's context field.
 /// Format: "classification:Intent:Tone:ResolverMode"
-fn parse_classification_ground_truth(example: &crate::seed::TrainingExample) -> Option<crate::types::GroundTruth> {
+fn parse_classification_ground_truth(
+    example: &crate::seed::TrainingExample,
+) -> Option<crate::types::GroundTruth> {
     let ctx = example.context.as_deref()?;
     let parts: Vec<&str> = ctx.split(':').collect();
     if parts.len() < 4 || parts[0] != "classification" {
@@ -4932,9 +5016,6 @@ fn route_candidate_units(
 ) -> crate::types::CandidateRoute {
     SemanticRouter::new(semantic_map).route_candidates(routing, all_units, max_candidates, escape)
 }
-
-
-
 
 fn spawn_maintenance(
     memory: Arc<Mutex<MemoryStore>>,
@@ -5003,13 +5084,9 @@ fn flush_feedback_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        evaluate_expression_input, grounded_evidence_answer,
-        reshape_output_for_intent,
-    };
+    use super::{evaluate_expression_input, grounded_evidence_answer, reshape_output_for_intent};
     use crate::types::{
-        IntentKind, MemoryType, RetrievedDocument, ScoreBreakdown,
-        ScoredCandidate,
+        IntentKind, MemoryType, RetrievedDocument, ScoreBreakdown, ScoredCandidate,
     };
     use chrono::Utc;
     use uuid::Uuid;

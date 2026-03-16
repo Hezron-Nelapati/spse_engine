@@ -2606,7 +2606,9 @@ impl EngineConfig {
             1.0,
         )?;
         if self.auto_inference.reasoning_loop.max_internal_steps == 0 {
-            return Err("auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string());
+            return Err(
+                "auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string(),
+            );
         }
         validate_range(
             "auto_inference.creative_spark.global_stochastic_floor",
@@ -2622,7 +2624,9 @@ impl EngineConfig {
         )?;
         validate_range(
             "auto_inference.creative_spark.anchor_protection_strictness",
-            self.auto_inference.creative_spark.anchor_protection_strictness,
+            self.auto_inference
+                .creative_spark
+                .anchor_protection_strictness,
             0.0,
             1.0,
         )?;
@@ -2651,7 +2655,9 @@ impl EngineConfig {
             1.0,
         )?;
         if self.auto_inference.dynamic_memory.base_memory_limit_mb == 0 {
-            return Err("auto_inference.dynamic_memory.base_memory_limit_mb must be >= 1".to_string());
+            return Err(
+                "auto_inference.dynamic_memory.base_memory_limit_mb must be >= 1".to_string(),
+            );
         }
         if self.auto_inference.dynamic_memory.max_memory_limit_mb
             < self.auto_inference.dynamic_memory.base_memory_limit_mb

@@ -1,7 +1,7 @@
 use crate::config::{FineResolverConfig, ReasoningLoopConfig, RetrievalThresholds};
 use crate::types::{
-    ConfidenceStats, ContextMatrix, IntentFallbackMode, IntentKind,
-    IntentProfile, ScoredCandidate, SearchDecision, SequenceState,
+    ConfidenceStats, ContextMatrix, IntentFallbackMode, IntentKind, IntentProfile, ScoredCandidate,
+    SearchDecision, SequenceState,
 };
 
 pub struct IntentDetector;
@@ -80,8 +80,13 @@ impl IntentDetector {
                 | IntentKind::Translate
                 | IntentKind::Brainstorm
         );
-        let open_world_force =
-            should_force_external_retrieval(raw_input, intent, scored, stats.mean_confidence, resolver_config.factual_intent_retrieval_threshold);
+        let open_world_force = should_force_external_retrieval(
+            raw_input,
+            intent,
+            scored,
+            stats.mean_confidence,
+            resolver_config.factual_intent_retrieval_threshold,
+        );
         if open_world_force {
             reasons.push("open_world_low_confidence_retrieval".to_string());
         }
@@ -103,10 +108,7 @@ impl IntentDetector {
         }
     }
 
-    pub fn should_trigger_reasoning(
-        intent: &IntentProfile,
-        config: &ReasoningLoopConfig,
-    ) -> bool {
+    pub fn should_trigger_reasoning(intent: &IntentProfile, config: &ReasoningLoopConfig) -> bool {
         if intent.confidence < config.trigger_confidence_floor {
             return true;
         }
@@ -129,15 +131,15 @@ impl IntentDetector {
             IntentKind::Analyze | IntentKind::Plan | IntentKind::Debug | IntentKind::Explain
         );
         let has_low_structural_confidence = confidence_stats.disagreement > 0.4;
-        
+
         crate::types::ReasoningGateDecision {
-            should_retrieve_reasoning: has_factual_knowledge 
-                && has_logical_complexity 
+            should_retrieve_reasoning: has_factual_knowledge
+                && has_logical_complexity
                 && has_low_structural_confidence,
             reasoning_type_hint: Self::infer_reasoning_type(intent),
         }
     }
-    
+
     fn infer_reasoning_type(intent: &IntentProfile) -> crate::types::ReasoningType {
         match intent.primary {
             IntentKind::Analyze => crate::types::ReasoningType::Logical,
@@ -233,7 +235,7 @@ fn should_force_external_retrieval(
         intent.primary,
         IntentKind::Question | IntentKind::Verify | IntentKind::Explain | IntentKind::Extract
     );
-    
+
     if factual_intent && top.score < factual_intent_threshold {
         return true;
     }
@@ -295,10 +297,7 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::IntentDetector;
-    use crate::types::{
-        MemoryType, ScoreBreakdown,
-        ScoredCandidate,
-    };
+    use crate::types::{MemoryType, ScoreBreakdown, ScoredCandidate};
     use uuid::Uuid;
 
     #[test]

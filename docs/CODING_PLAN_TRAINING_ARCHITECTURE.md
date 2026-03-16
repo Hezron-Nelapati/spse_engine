@@ -22,7 +22,7 @@
 10. [Phase 9: Integration Testing](#10-phase-9-integration-testing)
 11. [Phase 10: On-the-fly Learning](#11-phase-10-on-the-fly-learning)
 12. [Phase 11: Architecture Feature Implementation](#12-phase-11-architecture-feature-implementation)
-13. [Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit)](#13-phase-12-architecture-fixes)
+13. [Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit, Code Audit Findings)](#13-phase-12-architecture-fixes)
 14. [Config Changes Summary](#14-config-changes-summary)
 15. [File Manifest](#15-file-manifest)
 
@@ -102,10 +102,15 @@ Phase 11 (Architecture Feature Implementation) → depends on Phases 2, 4, 5, 10
   ├── 11J (Dynamic Hub Election) → depends on 11G (Hub Management)
   └── 11K (Feedback Queue) → depends on Phase 10 (On-the-fly Learning, feedback)
 
-Phase 12 (Architecture Fixes) → depends on Phases 2, 4
+Phase 12 (Architecture Fixes) → depends on Phases 2, 3, 4
   ├── 12A (Confidence Formula) → depends on Phase 2 (ClassificationCalculator)
   ├── 12B (Beam Search + Per-Profile Max Steps) → depends on Phase 4 (Graph Walker)
-  └── 12C (A* Exploration Limit) → depends on Phase 4 (Pathfinding)
+  ├── 12C (A* Exploration Limit) → depends on Phase 4 (Pathfinding)
+  ├── 12D (Brainstorm Suppression Fix) → depends on Phase 2 (IntentDetector)
+  ├── 12E (Evidence Merge Contradiction Penalty) → depends on Phase 3 (EvidenceMerger)
+  ├── 12F (Token Overlap O(n+m)) → no dependencies (standalone perf fix)
+  ├── 12G (Freshness Keyword Expansion) → no dependencies (standalone fix)
+  └── 12H (Disagreement Reasoning Trigger) → depends on Phase 3 (ReasoningLoopConfig)
 ```
 
 ### Estimated Effort
@@ -124,8 +129,8 @@ Phase 12 (Architecture Fixes) → depends on Phases 2, 4
 | 9. Integration Tests | 1 | 1 | ~600 | P1 | |
 | 10. On-the-fly Learning | 0 | 3 | ~120 | P1 | |
 | 11. Architecture Features | 6 | 12 | ~1900 | P0–P2 | |
-| 12. Architecture Fixes | 0 | 3 | ~250 | P0 | |
-| **Total** | **18** | **~46** | **~9770** | | |
+| 12. Architecture Fixes | 0 | 5 | ~400 | P0 | |
+| **Total** | **18** | **~48** | **~9920** | | |
 
 ---
 
@@ -3195,9 +3200,9 @@ layer_5_semantic_map:
 
 ---
 
-## 13. Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit)
+## 13. Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit, Code Audit Findings)
 
-Three critical fixes to bring inference-path logic in line with the updated architecture (§3.5, §4.2, §5.4).
+Three critical fixes plus five code-audit findings (§6.3) to bring inference-path logic in line with the updated architecture (§3.2, §3.5, §3.10, §4.2, §4.3, §4.5, §5.4).
 
 ### Task 12A: Confidence Formula Fix (`src/classification/calculator.rs`)
 
@@ -3290,6 +3295,127 @@ while let Some(current) = open_set.pop() {
 - `astar_respects_exploration_limit`
 - `astar_returns_partial_path_on_limit`
 - `dense_hub_does_not_cause_timeout`
+
+### Task 12D: Remove Brainstorm from Social/Local Suppression List (`src/classification/intent.rs`)
+
+**Architecture Reference:** §3.10, §4.2, §6.3 Finding 1
+
+**Problem:** `IntentDetector::assess()` includes `IntentKind::Brainstorm` in the `social_or_local` suppression set alongside `Greeting`, `Farewell`, `Gratitude`, and `Continue`. This causes brainstorm queries to bypass the full retrieval gating assessment, treating them identically to social intents. The architecture explicitly specifies that brainstorm queries should reach the reasoning pipeline with an exploratory profile (temperature=0.90, beam_width=10) and only suppress **factual** retrieval by default — not skip the reasoning path entirely.
+
+**Fix:** Remove `IntentKind::Brainstorm` from the `social_or_local` intent set in `IntentDetector::assess()`. This is a single-line deletion. The brainstorm adaptive profile already provides the correct exploratory behavior once the query reaches the reasoning loop.
+
+**Files modified:** `src/classification/intent.rs`
+**Tests:**
+- `brainstorm_intent_not_suppressed_by_social_gate`
+- `brainstorm_reaches_reasoning_loop_when_confidence_low`
+- `brainstorm_does_not_force_factual_retrieval_when_confident`
+
+### Task 12E: Add Contradiction Penalty to Evidence Merge (`src/reasoning/merge.rs`)
+
+**Architecture Reference:** §4.3, §6.3 Finding 2
+
+**Problem:** `EvidenceMerger::merge()` detects conflicts between internal memory and external evidence and logs them to telemetry, but does not reduce the `evidence_support` score for conflicted candidates. The trust-weighted support is computed identically whether or not contradictions are present. This violates the documented design intent: "contradiction handling penalizes, rather than silently averaging over, conflicting evidence."
+
+**Fix:** After conflict detection in `merge()`, apply `config.evidence_merge.merge_contradiction_penalty` (new field, default: 0.25) to the `evidence_support` value of any candidate whose backing evidence was flagged as contradicted. This penalty is applied before the merged candidates are returned to L14 for scoring.
+
+```rust
+// In EvidenceMerger::merge(), after conflict detection block:
+if has_conflict {
+    evidence_support *= 1.0 - self.config.evidence_merge.merge_contradiction_penalty;
+}
+```
+
+**Files modified:** `src/reasoning/merge.rs`, `src/config/mod.rs`, `config/config.yaml`
+**Config addition:** `layer_13_evidence_merge.merge_contradiction_penalty: f32` (default: 0.25)
+**Tests:**
+- `contradicted_evidence_receives_penalty`
+- `non_contradicted_evidence_unchanged`
+- `penalty_scales_with_config_value`
+- `zero_penalty_preserves_original_behavior`
+
+### Task 12F: Optimize Token Overlap to O(n+m) (`src/classification/intent.rs`)
+
+**Architecture Reference:** §4.8, §6.3 Finding 3
+
+**Problem:** The `token_overlap()` utility function uses nested iteration (`.any()` inside a loop), resulting in O(n×m) complexity. For longer inputs or large evidence pools this is a hot-path bottleneck inconsistent with the bounded hot-path cost principle.
+
+**Fix:** Replace the nested iteration with a `HashSet`-based approach:
+
+```rust
+fn token_overlap(a: &[String], b: &[String]) -> f32 {
+    if a.is_empty() || b.is_empty() { return 0.0; }
+    let set_b: std::collections::HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
+    let overlap = a.iter().filter(|t| set_b.contains(t.as_str())).count();
+    overlap as f32 / a.len().max(1) as f32
+}
+```
+
+**Files modified:** `src/classification/intent.rs`
+**Tests:**
+- `token_overlap_hashset_matches_naive_results`
+- `token_overlap_empty_inputs_return_zero`
+- `token_overlap_performance_large_inputs` (benchmark: 1000-token inputs complete < 1ms)
+
+### Task 12G: Expand Freshness Temporal Keyword List (`src/classification/intent.rs`)
+
+**Architecture Reference:** §3.2, §6.3 Finding 4
+
+**Problem:** The freshness signal computation uses a hardcoded temporal keyword list that is missing common indicators: "current", "latest", "new", "update", "upcoming", "ongoing", "breaking". Time-sensitive queries using these terms fail to trigger the freshness signal, causing under-retrieval for genuinely stale-sensitive queries.
+
+**Fix:** Add the missing keywords to the temporal keyword list in `IntentDetector::assess()`. Long-term, consider externalizing the list to `config/freshness_keywords.yaml` per the "no hardcoded thresholds" design principle.
+
+**Files modified:** `src/classification/intent.rs`
+**Tests:**
+- `freshness_detects_current_keyword`
+- `freshness_detects_latest_keyword`
+- `freshness_detects_breaking_keyword`
+- `freshness_does_not_trigger_on_non_temporal_text`
+
+### Task 12H: Add Disagreement-Based Reasoning Trigger (`src/config/mod.rs`, `src/engine.rs`)
+
+**Architecture Reference:** §4.5, §6.3 Finding 5
+
+**Problem:** The reasoning loop is triggered only when L14 candidate confidence falls below `trigger_confidence_floor` (0.40). There is no trigger for high-disagreement cases where the top candidates have similar scores but represent conflicting answers. Confidence may be above the floor (e.g., 0.45) while the answer is unreliable due to a near-tie between contradictory candidates.
+
+**Fix:** Add `disagreement_trigger_threshold: f32` (default: 0.15) to `ReasoningLoopConfig`. In `engine.rs`, after L14 scoring, check whether the score gap between the top two candidates is below this threshold AND both exceed a minimum viability score. If so, trigger the reasoning loop regardless of absolute confidence.
+
+```rust
+// In ReasoningLoopConfig (src/config/mod.rs):
+pub disagreement_trigger_threshold: Option<f32>, // default: 0.15
+
+// In engine.rs, after L14 scoring:
+let top_gap = scored[0].score - scored.get(1).map(|s| s.score).unwrap_or(0.0);
+let disagreement_trigger = self.config.auto_inference.reasoning_loop
+    .disagreement_trigger_threshold.unwrap_or(0.15);
+if top_gap < disagreement_trigger && scored.len() >= 2
+    && scored[0].score > self.config.resolver.min_confidence_floor {
+    // Trigger reasoning loop for ambiguous-but-viable candidates
+    reasoning_needed = true;
+}
+```
+
+**Files modified:** `src/config/mod.rs`, `src/engine.rs`, `config/config.yaml`
+**Config addition:** `auto_inference.reasoning_loop.disagreement_trigger_threshold: f32` (default: 0.15)
+**Tests:**
+- `disagreement_triggers_reasoning_when_gap_small`
+- `no_disagreement_trigger_when_gap_large`
+- `disagreement_trigger_respects_min_viability`
+- `disagreement_trigger_disabled_when_none`
+
+### Phase 12 Acceptance Gate
+
+#### Design Principle
+
+Architecture fixes are successful only if they bring inference-path behavior into alignment with the documented architecture without introducing regressions in existing warm-path performance.
+
+#### Acceptance Criteria
+
+- Brainstorm queries must reach the reasoning loop when confidence is below the trigger floor (12D).
+- Contradicted evidence must produce lower `evidence_support` scores than non-contradicted evidence (12E).
+- Token overlap must produce identical results to the previous implementation while completing in O(n+m) (12F).
+- All seven added temporal keywords must trigger the freshness signal when present (12G).
+- Near-tied candidate scores must trigger the reasoning loop when disagreement threshold is met (12H).
+- No regression in warm-path latency (social short-circuit, factual direct answer) after all fixes applied.
 
 ---
 
@@ -3387,6 +3513,8 @@ All new config fields with their defaults:
 | `silent_training.quarantine` | `enabled` | `bool` | true | Enable intent quarantine for silent training |
 | | `conflict_threshold` | `f32` | 0.85 | Cosine similarity above which pattern conflicts |
 | | `min_examples` | `u32` | 10 | Min examples before pattern is considered valid |
+| `layer_13_evidence_merge` | `merge_contradiction_penalty` | `f32` | 0.25 | Evidence support reduction for contradicted candidates (§6.3 Finding 2) |
+| `auto_inference.reasoning_loop` | `disagreement_trigger_threshold` | `f32` | 0.15 | Score gap below which reasoning loop triggers for ambiguous candidates (§6.3 Finding 5) |
 
 ---
 
@@ -3413,29 +3541,29 @@ All new config fields with their defaults:
 | `config/pos_clusters.yaml` | 11F | POS cluster centroids for domain-anchor blending |
 | `config/function_words/en.yaml` | 11J | English function words reference list |
 
-### Modified Files (~22)
+### Modified Files (~24)
 
 | File | Phase | Changes |
 |------|-------|---------|
 | `src/types.rs` | 1, 11D | Add loss types, SystemTrainingReport, EdgeStatus enum |
 | `src/seed/mod.rs` | 1 | Extend TrainingExample, add new module exports |
-| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig, PosClusterConfig, HubManagementConfig, ContextBloomConfig, QuarantineConfig |
-| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management, context_bloom, quarantine sections |
+| `src/config/mod.rs` | 1, 10, 11, 12E, 12H | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig, PosClusterConfig, HubManagementConfig, ContextBloomConfig, QuarantineConfig, merge_contradiction_penalty, disagreement_trigger_threshold |
+| `config/config.yaml` | 1, 10, 11, 12E, 12H | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management, context_bloom, quarantine sections, merge_contradiction_penalty, disagreement_trigger_threshold |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
 | `src/classification/trainer.rs` | 2, 11I | Full rewrite: centroid + sweep + calibration; quarantine buffer wiring |
 | `src/classification/calculator.rs` | 2, 7, 11A, 12A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring, confidence formula fix (margin-blend) |
 | `src/classification/signature.rs` | 7, 11A | Add POS tag LRU cache, extend to 82-float with semantic flags |
 | `src/classification/mod.rs` | 11A, 11C | Add semantic_anchors, semantic_zones module exports |
 | `src/classification/input.rs` | 11J | Add language/script detection for function word bootstrap |
-| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G, 11H, 11K, 12B | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating, context bloom walk gating, trace_id wiring, beam search + per-profile max_steps |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G, 11H, 11K, 12B, 12H | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating, context bloom walk gating, trace_id wiring, beam search + per-profile max_steps, disagreement-based reasoning trigger |
 | `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
 | `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
 | `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
 | `src/spatial_index.rs` | 4, 7, 11C | Add update_position(), batch_update_positions(), neighbor cache, adaptive dims, zone enforcement |
 | `src/training/pipeline.rs` | 3, 11E, 11I | Wire train_reasoning(), structural feedback split/merge proposals with data inheritance, SessionIntentBuffer quarantine |
-| `src/classification/intent.rs` | 10 | Add cold-start detection to assess() |
+| `src/classification/intent.rs` | 10, 12D, 12F, 12G | Add cold-start detection to assess(), remove Brainstorm from social_or_local, optimize token_overlap to O(n+m), expand freshness temporal keywords |
 | `src/reasoning/retrieval.rs` | 11B | Add MetadataSummary extraction during L12 normalization |
-| `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator with lazy gating |
+| `src/reasoning/merge.rs` | 10, 11B, 12E | Add edge injection after evidence merge, micro-validator with lazy gating, contradiction penalty on evidence_support |
 | `src/reasoning/feedback.rs` | 5, 10, 11E, 11K | Wire consistency corrections, implicit feedback, Tier3OveruseTracker with hysteresis, FeedbackQueue with trace-ID matching |
 | `src/predictive/router.rs` | 11D, 11F, 11G, 11H, 11J, 12C | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion, ContextBloom + migration, betweenness centrality + dynamic hub election + language bootstrap, A* exploration limit |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
@@ -3455,8 +3583,10 @@ Week 8-9: Phase 11 (Architecture Feature Implementation) — sub-tasks can paral
          11C (Adaptive Dims + Anchor Locking) + 11G (Hub Management) + 11H (Context Bloom)
          11D (TTG Lease Edges) + 11E (Structural Feedback + Hysteresis)
          11I (Silent Training Quarantine) + 11J (Dynamic Hub Election) + 11K (Feedback Queue)
-Week 9: Phase 12 (Architecture Fixes) — can start after Phase 2+4:
+Week 9: Phase 12 (Architecture Fixes) — can start after Phase 2+3+4:
          12A (Confidence Formula) + 12B (Beam Search) + 12C (A* Limit)
+         12D (Brainstorm Fix) + 12F (Token Overlap) + 12G (Freshness Keywords) — no deps, can start earlier
+         12E (Evidence Contradiction Penalty) + 12H (Disagreement Trigger) — after Phase 3
 ```
 
 ### Verification Commands

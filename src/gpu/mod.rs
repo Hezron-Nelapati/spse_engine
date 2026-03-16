@@ -15,19 +15,19 @@ pub mod compute;
 mod device;
 
 #[cfg(feature = "gpu")]
-pub use compute::{GpuCandidateScorer, GpuForceLayout, GpuDistanceCalculator};
+pub use compute::{GpuCandidateScorer, GpuDistanceCalculator, GpuForceLayout};
 #[cfg(feature = "gpu")]
-pub use device::{GpuDevice, GpuCapabilities, GpuConfig as DeviceGpuConfig};
+pub use device::{GpuCapabilities, GpuConfig as DeviceGpuConfig, GpuDevice};
 
 #[cfg(feature = "gpu")]
-use std::sync::Arc;
-#[cfg(feature = "gpu")]
 use once_cell::sync::Lazy;
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
 
 /// Global GPU device instance (lazy initialized)
 #[cfg(feature = "gpu")]
-static GPU_DEVICE: Lazy<Option<Arc<GpuDevice>>> = Lazy::new(|| {
-    match futures::executor::block_on(GpuDevice::new()) {
+static GPU_DEVICE: Lazy<Option<Arc<GpuDevice>>> =
+    Lazy::new(|| match futures::executor::block_on(GpuDevice::new()) {
         Ok(device) => {
             log::info!("GPU acceleration enabled: {:?}", device.capabilities());
             Some(Arc::new(device))
@@ -36,8 +36,7 @@ static GPU_DEVICE: Lazy<Option<Arc<GpuDevice>>> = Lazy::new(|| {
             log::warn!("GPU acceleration disabled: {}", e);
             None
         }
-    }
-});
+    });
 
 /// Get the global GPU device if available
 #[cfg(feature = "gpu")]

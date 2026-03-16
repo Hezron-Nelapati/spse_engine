@@ -219,7 +219,7 @@ impl FineResolver {
     fn contradicts_anchor(candidate_content: &str, anchor: &Unit) -> bool {
         use crate::common::matching::categories::{MATH_PATTERNS, NEGATION_PATTERNS};
         use crate::common::similarity::SimilarityUtils;
-        
+
         let candidate_lower = candidate_content.to_lowercase();
         let anchor_lower = anchor.content.to_lowercase();
 
@@ -248,5 +248,4 @@ impl FineResolver {
 
         false
     }
-
 }

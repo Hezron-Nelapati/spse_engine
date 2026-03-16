@@ -4,26 +4,27 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, BindGroupLayout, BindGroupDescriptor, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{
+    BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, ComputePipeline, Device,
+    PipelineLayoutDescriptor, Queue, ShaderModuleDescriptor, ShaderSource,
+};
 
-use crate::types::{ContextMatrix, RetrievedDocument};
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
-use once_cell::sync::Lazy;
+use crate::types::{ContextMatrix, RetrievedDocument};
 use bytemuck::{Pod, Zeroable};
+use once_cell::sync::Lazy;
 
 /// Global cached GPU evidence merger (lazy initialized)
 static GPU_EVIDENCE_MERGER: Lazy<Option<Arc<GpuEvidenceMerger>>> = Lazy::new(|| {
-    crate::gpu::global_device().and_then(|gpu| {
-        match GpuEvidenceMerger::new(&gpu) {
-            Ok(merger) => {
-                log::info!("GPU evidence merger initialized");
-                Some(Arc::new(merger))
-            }
-            Err(e) => {
-                log::warn!("Failed to initialize GPU evidence merger: {}", e);
-                None
-            }
+    crate::gpu::global_device().and_then(|gpu| match GpuEvidenceMerger::new(&gpu) {
+        Ok(merger) => {
+            log::info!("GPU evidence merger initialized");
+            Some(Arc::new(merger))
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize GPU evidence merger: {}", e);
+            None
         }
     })
 });
@@ -193,7 +194,7 @@ impl GpuEvidenceMerger {
         documents: &[RetrievedDocument],
     ) -> Result<Vec<GpuOverlapResult>, String> {
         let doc_count = documents.len().min(MAX_DOCUMENTS);
-        
+
         // Prepare context cells
         let mut cells = Vec::with_capacity(MAX_CONTEXT_CELLS);
         for cell in context.cells.iter().take(MAX_CONTEXT_CELLS) {
@@ -283,20 +284,24 @@ impl GpuEvidenceMerger {
         // Write data
         for (i, cell) in cells.iter().enumerate() {
             let offset = (i * std::mem::size_of::<GpuContextCell>()) as u64;
-            self.queue.write_buffer(&cells_buffer, offset, bytemuck::bytes_of(cell));
+            self.queue
+                .write_buffer(&cells_buffer, offset, bytemuck::bytes_of(cell));
         }
 
         for (i, doc) in docs.iter().enumerate() {
             let offset = (i * std::mem::size_of::<GpuDocument>()) as u64;
-            self.queue.write_buffer(&docs_buffer, offset, bytemuck::bytes_of(doc));
+            self.queue
+                .write_buffer(&docs_buffer, offset, bytemuck::bytes_of(doc));
         }
 
         let counts: [u32; 4] = [
             context.cells.len().min(MAX_CONTEXT_CELLS) as u32,
             doc_count as u32,
-            0, 0
+            0,
+            0,
         ];
-        self.queue.write_buffer(&count_buffer, 0, bytemuck::bytes_of(&counts));
+        self.queue
+            .write_buffer(&count_buffer, 0, bytemuck::bytes_of(&counts));
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
@@ -323,9 +328,11 @@ impl GpuEvidenceMerger {
         });
 
         // Create command encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Evidence Merge Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Evidence Merge Encoder"),
+            });
 
         // Run compute pass
         {
@@ -335,7 +342,7 @@ impl GpuEvidenceMerger {
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            
+
             let workgroups = (doc_count as u32 + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
@@ -359,7 +366,9 @@ impl GpuEvidenceMerger {
             tx.send(result).unwrap();
         });
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().map_err(|e| format!("Failed to map buffer: {}", e))?;
+        rx.recv()
+            .unwrap()
+            .map_err(|e| format!("Failed to map buffer: {}", e))?;
 
         let data = buffer_slice.get_mapped_range();
         let results: Vec<GpuOverlapResult> = data
@@ -385,10 +394,12 @@ pub fn check_overlap_gpu(
     if let Some(merger) = get_gpu_evidence_merger() {
         match merger.check_overlap_gpu(context, documents) {
             Ok(results) => {
-                return Some(results
-                    .into_iter()
-                    .map(|r| (r.doc_index as usize, r.overlap_count > 0))
-                    .collect());
+                return Some(
+                    results
+                        .into_iter()
+                        .map(|r| (r.doc_index as usize, r.overlap_count > 0))
+                        .collect(),
+                );
             }
             Err(e) => {
                 log::warn!("GPU evidence merge failed: {}", e);

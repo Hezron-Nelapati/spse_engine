@@ -4,11 +4,11 @@
 //! This is the most compute-intensive operation in the engine.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, ComputePipeline, BindGroupLayout};
+use wgpu::{BindGroupLayout, ComputePipeline, Device, Queue};
 
 use crate::config::SemanticMapConfig;
-use crate::types::Unit;
 use crate::gpu::device::GpuDevice;
+use crate::types::Unit;
 
 /// GPU-accelerated force-directed layout
 pub struct GpuForceLayout {
@@ -58,12 +58,12 @@ pub struct GpuEdge {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuLayoutConfig {
-    pub k: f32,                    // ideal distance
-    pub repulsive_coeff: f32,      // repulsive force coefficient
-    pub attractive_coeff: f32,     // attractive force coefficient
-    pub temperature: f32,          // current temperature
-    pub max_displacement: f32,     // max displacement per iteration
-    pub boundary: f32,             // layout boundary
+    pub k: f32,                // ideal distance
+    pub repulsive_coeff: f32,  // repulsive force coefficient
+    pub attractive_coeff: f32, // attractive force coefficient
+    pub temperature: f32,      // current temperature
+    pub max_displacement: f32, // max displacement per iteration
+    pub boundary: f32,         // layout boundary
     pub node_count: u32,
     pub edge_count: u32,
     pub _padding: [u32; 2],
@@ -79,12 +79,16 @@ impl GpuForceLayout {
         // Create shader modules
         let repulsive_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Repulsive Force Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/force_repulsive.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/force_repulsive.wgsl").into(),
+            ),
         });
 
         let attractive_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Attractive Force Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/force_attractive.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/force_attractive.wgsl").into(),
+            ),
         });
 
         // Create bind group layout (wgpu v22 API requires 'count' field)
@@ -155,14 +159,15 @@ impl GpuForceLayout {
             cache: None,
         });
 
-        let attractive_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Attractive Force Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &attractive_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let attractive_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Attractive Force Pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &attractive_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         Ok(Self {
             device,
@@ -188,7 +193,9 @@ impl GpuForceLayout {
         let position_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Positions Buffer"),
             size: (node_count as u64) * std::mem::size_of::<GpuPosition>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -216,8 +223,10 @@ impl GpuForceLayout {
         );
 
         // Write initial data
-        self.queue.write_buffer(&position_buffer, 0, bytemuck::cast_slice(positions));
-        self.queue.write_buffer(&edge_buffer, 0, bytemuck::cast_slice(edges));
+        self.queue
+            .write_buffer(&position_buffer, 0, bytemuck::cast_slice(positions));
+        self.queue
+            .write_buffer(&edge_buffer, 0, bytemuck::cast_slice(edges));
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -244,9 +253,11 @@ impl GpuForceLayout {
         });
 
         // Create command encoder
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Force Layout Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Force Layout Encoder"),
+            });
 
         // Run repulsive forces pass (O(n²) - most expensive)
         {
@@ -256,7 +267,7 @@ impl GpuForceLayout {
             });
             compute_pass.set_pipeline(&self.repulsive_pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            
+
             // Each workgroup handles a tile of the interaction matrix
             let workgroups = (node_count + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(workgroups, workgroups, 1);
@@ -270,7 +281,7 @@ impl GpuForceLayout {
             });
             compute_pass.set_pipeline(&self.attractive_pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            
+
             let edge_workgroups = (edge_count + self.workgroup_size - 1) / self.workgroup_size;
             compute_pass.dispatch_workgroups(edge_workgroups.max(1), 1, 1);
         }
@@ -286,9 +297,11 @@ impl GpuForceLayout {
             mapped_at_creation: false,
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Readback Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Readback Encoder"),
+            });
         encoder.copy_buffer_to_buffer(
             &position_buffer,
             0,
@@ -306,7 +319,8 @@ impl GpuForceLayout {
         });
         self.device.poll(wgpu::Maintain::Wait);
 
-        rx.recv().map_err(|e| format!("Failed to receive mapping result: {}", e))?
+        rx.recv()
+            .map_err(|e| format!("Failed to receive mapping result: {}", e))?
             .map_err(|e| format!("Failed to map buffer: {}", e))?;
 
         let data = buffer_slice.get_mapped_range();
@@ -322,7 +336,8 @@ impl GpuForceLayout {
                 if old.is_anchor == 1 {
                     0.0
                 } else {
-                    ((new.x - old.x).powi(2) + (new.y - old.y).powi(2) + (new.z - old.z).powi(2)).sqrt()
+                    ((new.x - old.x).powi(2) + (new.y - old.y).powi(2) + (new.z - old.z).powi(2))
+                        .sqrt()
                 }
             })
             .sum();
@@ -342,10 +357,7 @@ pub struct GpuLayoutOutcome {
 }
 
 /// Run force-directed layout on GPU if available
-pub fn force_layout_gpu(
-    units: &[Unit],
-    config: &SemanticMapConfig,
-) -> Option<GpuLayoutOutcome> {
+pub fn force_layout_gpu(units: &[Unit], config: &SemanticMapConfig) -> Option<GpuLayoutOutcome> {
     let gpu = crate::gpu::global_device()?;
     let scorer = GpuForceLayout::new(&gpu).ok()?;
 
@@ -375,7 +387,7 @@ pub fn force_layout_gpu(
         .collect();
 
     let edges = prepare_edges(&selected);
-    
+
     let k = ideal_distance(selected.len(), config);
     let mut gpu_config = GpuLayoutConfig {
         k,
@@ -400,27 +412,31 @@ pub fn force_layout_gpu(
     for _ in 0..config.max_layout_iterations {
         if let Ok(mean_disp) = scorer.iterate_gpu(&mut positions, &edges, &gpu_config) {
             let energy = calculate_energy(&positions, &edges, &gpu_config);
-            
+
             if energy < best_energy {
                 best_energy = energy;
                 best_positions = positions.clone();
             }
-            
+
             if energy > previous_energy {
                 increases += 1;
                 if increases >= config.energy_rollback_threshold as usize {
                     let rolled_back = best_energy <= initial_energy;
-                    let final_positions = if rolled_back { best_positions } else { initial_positions };
-                    
+                    let final_positions = if rolled_back {
+                        best_positions
+                    } else {
+                        initial_positions
+                    };
+
                     return Some(build_outcome(&selected, &final_positions, rolled_back));
                 }
             } else {
                 increases = 0;
             }
-            
+
             previous_energy = energy;
             gpu_config.temperature *= 0.90;
-            
+
             if mean_disp <= config.convergence_tolerance {
                 break;
             }
@@ -511,7 +527,11 @@ fn calculate_energy(positions: &[GpuPosition], edges: &[GpuEdge], config: &GpuLa
     energy
 }
 
-fn build_outcome(units: &[&Unit], positions: &[GpuPosition], rolled_back: bool) -> GpuLayoutOutcome {
+fn build_outcome(
+    units: &[&Unit],
+    positions: &[GpuPosition],
+    rolled_back: bool,
+) -> GpuLayoutOutcome {
     let position_updates: Vec<_> = units
         .iter()
         .zip(positions.iter())

@@ -1,7 +1,10 @@
 use crate::config::EngineConfig;
-use crate::open_sources;
-use crate::types::{TrainingExecutionMode, TrainingJobStatus, TrainingOptions, TrainingPhaseKind, TrainingSource, ReasoningTrace, MemoryType, MemoryChannel, SourceKind};
 use crate::memory::store::MemoryStore;
+use crate::open_sources;
+use crate::types::{
+    MemoryChannel, MemoryType, ReasoningTrace, SourceKind, TrainingExecutionMode,
+    TrainingJobStatus, TrainingOptions, TrainingPhaseKind, TrainingSource,
+};
 use chrono::Utc;
 use serde::Serialize;
 use std::fs;
@@ -290,7 +293,12 @@ pub fn render_training_plan_with_config(
 }
 
 fn seed_sources() -> Vec<TrainingSource> {
-    let names = ["seed_entities", "seed_intelligence", "seed_dialogues", "seed_classification"];
+    let names = [
+        "seed_entities",
+        "seed_intelligence",
+        "seed_dialogues",
+        "seed_classification",
+    ];
     names.iter().map(|name| source(name)).collect()
 }
 
@@ -299,12 +307,15 @@ fn bootstrap_phase(
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
     // Use all 4 generated seed datasets for bootstrap training
-    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
-        s.stream.max_input_bytes = Some(1024 * 1024 * 1024); // 1GB per source
-        s.stream.item_limit = Some(200_000);
-        s.stream.batch_size = Some(500);
-        s
-    }).collect();
+    let sources: Vec<TrainingSource> = seed_sources()
+        .into_iter()
+        .map(|mut s| {
+            s.stream.max_input_bytes = Some(1024 * 1024 * 1024); // 1GB per source
+            s.stream.item_limit = Some(200_000);
+            s.stream.batch_size = Some(500);
+            s
+        })
+        .collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Bootstrap,
@@ -327,11 +338,14 @@ fn validation_phase(
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
     // Validation samples from all 4 seed datasets to verify ingestion quality.
-    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
-        s.stream.item_limit = Some(5_000);
-        s.stream.batch_size = Some(250);
-        s
-    }).collect();
+    let sources: Vec<TrainingSource> = seed_sources()
+        .into_iter()
+        .map(|mut s| {
+            s.stream.item_limit = Some(5_000);
+            s.stream.batch_size = Some(250);
+            s
+        })
+        .collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::Validation,
@@ -377,12 +391,15 @@ fn dry_run_phase(
     execution_mode: TrainingExecutionMode,
 ) -> TrainingPhasePlan {
     // Dry run uses all 4 seed datasets with same limits as bootstrap
-    let sources: Vec<TrainingSource> = seed_sources().into_iter().map(|mut s| {
-        s.stream.max_input_bytes = Some(1024 * 1024 * 1024);
-        s.stream.item_limit = Some(200_000);
-        s.stream.batch_size = Some(500);
-        s
-    }).collect();
+    let sources: Vec<TrainingSource> = seed_sources()
+        .into_iter()
+        .map(|mut s| {
+            s.stream.max_input_bytes = Some(1024 * 1024 * 1024);
+            s.stream.item_limit = Some(200_000);
+            s.stream.batch_size = Some(500);
+            s
+        })
+        .collect();
 
     TrainingPhasePlan {
         phase: TrainingPhaseKind::DryRun,
@@ -497,7 +514,8 @@ pub fn ingest_reasoning_trace(
 
     for (step_idx, step) in trace.steps.iter().enumerate() {
         // Get confidence from trajectory if available
-        let confidence = trace.confidence_trajectory
+        let confidence = trace
+            .confidence_trajectory
             .get(step_idx)
             .copied()
             .unwrap_or(0.5);
@@ -516,7 +534,9 @@ pub fn ingest_reasoning_trace(
 
         // Build hierarchy for this step
         let mut hierarchy = UnitHierarchy::default();
-        hierarchy.levels.insert("Phrase".to_string(), vec![activation.clone()]);
+        hierarchy
+            .levels
+            .insert("Phrase".to_string(), vec![activation.clone()]);
 
         // Ingest into Reasoning channel only (not Core)
         let ingested_ids = memory.ingest_hierarchy_with_channels(

@@ -12,9 +12,8 @@
 
 use crate::seed::bulk_generator::{
     self, expand_template, human_bytes, pick, pick_idx, pick_str, seeded_rng, topics_for_domain,
-    JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DETAIL_POOLS, DOMAINS,
-    REASONING_CALCULATIONS, REASONING_CONCLUSIONS, REASONING_INFERENCES,
-    REASONING_PREMISES, REASONING_VERIFICATIONS,
+    JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DETAIL_POOLS, DOMAINS, REASONING_CALCULATIONS,
+    REASONING_CONCLUSIONS, REASONING_INFERENCES, REASONING_PREMISES, REASONING_VERIFICATIONS,
 };
 use crate::seed::TrainingExample;
 use crate::types::{
@@ -199,7 +198,9 @@ pub fn generate_bulk_intelligence(output_path: &Path, target_bytes: u64, seed: u
         let topic_b = pick(&mut rng, topics);
 
         let example = generate_multi_step_retrieval(&mut rng, domain, topic, topic_b);
-        writer.write_example(&example).expect("write multi-step retrieval");
+        writer
+            .write_example(&example)
+            .expect("write multi-step retrieval");
         count += 1;
     }
 
@@ -225,8 +226,14 @@ pub fn generate_bulk_intelligence(output_path: &Path, target_bytes: u64, seed: u
             writer.write_example(&ex).expect("write social");
         } else if roll < 0.7 {
             let (tq, _ta) = pick(&mut rng, bulk_generator::GRATITUDE_VARIATIONS);
-            let question = format!("{} — your explanation of {} in {} was very helpful.", tq, topic, domain);
-            let answer = format!("You're welcome! To recap on {} in {}: {} Happy to help further.", topic, domain, body);
+            let question = format!(
+                "{} — your explanation of {} in {} was very helpful.",
+                tq, topic, domain
+            );
+            let answer = format!(
+                "You're welcome! To recap on {} in {}: {} Happy to help further.",
+                topic, domain, body
+            );
             let ex = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Gratitude)
                 .with_entities(vec![topic.to_string(), domain.to_string()])
@@ -235,8 +242,14 @@ pub fn generate_bulk_intelligence(output_path: &Path, target_bytes: u64, seed: u
             writer.write_example(&ex).expect("write social");
         } else {
             let (fq, _fa) = pick(&mut rng, bulk_generator::FAREWELL_VARIATIONS);
-            let question = format!("{} — that covers what I needed about {} in {}.", fq, topic, domain);
-            let answer = format!("Goodbye! Final note on {} in {}: {} Feel free to return anytime.", topic, domain, body);
+            let question = format!(
+                "{} — that covers what I needed about {} in {}.",
+                fq, topic, domain
+            );
+            let answer = format!(
+                "Goodbye! Final note on {} in {}: {} Feel free to return anytime.",
+                topic, domain, body
+            );
             let ex = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Farewell)
                 .with_entities(vec![topic.to_string(), domain.to_string()])
@@ -259,7 +272,9 @@ fn generate_reasoning_chain(
     reasoning_type: ReasoningType,
 ) -> TrainingExample {
     let q_template = pick(rng, bulk_generator::QUESTION_TEMPLATES);
-    let question = q_template.0.replace("{}", &format!("{} in {}", topic, domain));
+    let question = q_template
+        .0
+        .replace("{}", &format!("{} in {}", topic, domain));
 
     let t_prefix = pick_str(rng, ANSWER_PREFIXES);
     let prefix = expand_template(rng, t_prefix, domain, topic);
@@ -272,7 +287,10 @@ fn generate_reasoning_chain(
 
     // Premise
     steps.push(ReasoningStep {
-        content: { let t = pick_str(rng, REASONING_PREMISES); expand_template(rng, t, domain, topic) },
+        content: {
+            let t = pick_str(rng, REASONING_PREMISES);
+            expand_template(rng, t, domain, topic)
+        },
         step_type: ReasoningStepType::Premise,
         anchor_step: true,
         dependencies: vec![],
@@ -284,17 +302,26 @@ fn generate_reasoning_chain(
         let step_type_roll: f32 = rng.gen();
         let (content, step_type) = if step_type_roll < 0.45 {
             (
-                { let t = pick_str(rng, REASONING_INFERENCES); expand_template(rng, t, domain, topic) },
+                {
+                    let t = pick_str(rng, REASONING_INFERENCES);
+                    expand_template(rng, t, domain, topic)
+                },
                 ReasoningStepType::Inference,
             )
         } else if step_type_roll < 0.75 {
             (
-                { let t = pick_str(rng, REASONING_CALCULATIONS); expand_template(rng, t, domain, topic) },
+                {
+                    let t = pick_str(rng, REASONING_CALCULATIONS);
+                    expand_template(rng, t, domain, topic)
+                },
                 ReasoningStepType::Calculation,
             )
         } else {
             (
-                { let t = pick_str(rng, REASONING_VERIFICATIONS); expand_template(rng, t, domain, topic) },
+                {
+                    let t = pick_str(rng, REASONING_VERIFICATIONS);
+                    expand_template(rng, t, domain, topic)
+                },
                 ReasoningStepType::Verification,
             )
         };
@@ -309,7 +336,10 @@ fn generate_reasoning_chain(
 
     // Conclusion
     steps.push(ReasoningStep {
-        content: { let t = pick_str(rng, REASONING_CONCLUSIONS); expand_template(rng, t, domain, topic) },
+        content: {
+            let t = pick_str(rng, REASONING_CONCLUSIONS);
+            expand_template(rng, t, domain, topic)
+        },
         step_type: ReasoningStepType::Conclusion,
         anchor_step: true,
         dependencies: vec![step_count - 2],
@@ -333,10 +363,18 @@ fn generate_reasoning_chain(
         }),
         intent: Some(format!("{:?}", intent)),
         entities: vec![topic.to_string(), domain.to_string()],
-        channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+        channels: vec![
+            MemoryChannel::Main,
+            MemoryChannel::Reasoning,
+            MemoryChannel::Intent,
+        ],
         curriculum: crate::seed::CurriculumMetadata {
             curriculum_score: rng.gen_range(100..130),
-            memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+            memory_channels: vec![
+                MemoryChannel::Main,
+                MemoryChannel::Reasoning,
+                MemoryChannel::Intent,
+            ],
             ..Default::default()
         },
         quality_gates: Default::default(),
@@ -356,11 +394,17 @@ fn generate_retrieval_trigger(
     let answer_prefix = pick_str(rng, RETRIEVAL_ANSWER_PREFIXES);
     let t_body = pick_str(rng, ANSWER_BODIES);
     let body = expand_template(rng, t_body, domain, topic);
-    let answer = format!("{} Based on {}, {} involves several key aspects. {}", answer_prefix, domain, topic, body);
+    let answer = format!(
+        "{} Based on {}, {} involves several key aspects. {}",
+        answer_prefix, domain, topic, body
+    );
 
     let steps = vec![
         ReasoningStep {
-            content: format!("This question about {} requires current data from {}.", topic, domain),
+            content: format!(
+                "This question about {} requires current data from {}.",
+                topic, domain
+            ),
             step_type: ReasoningStepType::Premise,
             anchor_step: true,
             dependencies: vec![],
@@ -404,10 +448,18 @@ fn generate_retrieval_trigger(
         }),
         intent: Some("Question".to_string()),
         entities: vec![topic.to_string()],
-        channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+        channels: vec![
+            MemoryChannel::Main,
+            MemoryChannel::Reasoning,
+            MemoryChannel::Intent,
+        ],
         curriculum: crate::seed::CurriculumMetadata {
             curriculum_score: rng.gen_range(120..130),
-            memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+            memory_channels: vec![
+                MemoryChannel::Main,
+                MemoryChannel::Reasoning,
+                MemoryChannel::Intent,
+            ],
             ..Default::default()
         },
         quality_gates: Default::default(),
@@ -423,7 +475,10 @@ fn generate_confidence_gate(
 ) -> TrainingExample {
     if high_confidence {
         let detail = pick_str(rng, bulk_generator::DETAIL_POOLS);
-        let question = format!("What are the fundamental principles of {} and {} in {}?", topic, detail, domain);
+        let question = format!(
+            "What are the fundamental principles of {} and {} in {}?",
+            topic, detail, domain
+        );
         let t_body = pick_str(rng, ANSWER_BODIES);
         let body = expand_template(rng, t_body, domain, topic);
         let t_conf = pick_str(rng, CONFIDENCE_HIGH_TEMPLATES);
@@ -432,7 +487,10 @@ fn generate_confidence_gate(
 
         let steps = vec![
             ReasoningStep {
-                content: format!("This is a foundational {} question about {}.", domain, topic),
+                content: format!(
+                    "This is a foundational {} question about {}.",
+                    domain, topic
+                ),
                 step_type: ReasoningStepType::Premise,
                 anchor_step: true,
                 dependencies: vec![],
@@ -446,7 +504,10 @@ fn generate_confidence_gate(
                 structure_hash: None,
             },
             ReasoningStep {
-                content: { let t = pick_str(rng, REASONING_INFERENCES); expand_template(rng, t, domain, topic) },
+                content: {
+                    let t = pick_str(rng, REASONING_INFERENCES);
+                    expand_template(rng, t, domain, topic)
+                },
                 step_type: ReasoningStepType::Inference,
                 anchor_step: false,
                 dependencies: vec![1],
@@ -474,10 +535,18 @@ fn generate_confidence_gate(
             }),
             intent: Some("Question".to_string()),
             entities: vec![topic.to_string()],
-            channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+            channels: vec![
+                MemoryChannel::Main,
+                MemoryChannel::Reasoning,
+                MemoryChannel::Intent,
+            ],
             curriculum: crate::seed::CurriculumMetadata {
                 curriculum_score: rng.gen_range(110..125),
-                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+                memory_channels: vec![
+                    MemoryChannel::Main,
+                    MemoryChannel::Reasoning,
+                    MemoryChannel::Intent,
+                ],
                 ..Default::default()
             },
             quality_gates: Default::default(),
@@ -500,7 +569,10 @@ fn generate_confidence_gate(
 
         let steps = vec![
             ReasoningStep {
-                content: format!("This requires precise, current {} data about {}.", domain, topic),
+                content: format!(
+                    "This requires precise, current {} data about {}.",
+                    domain, topic
+                ),
                 step_type: ReasoningStepType::Premise,
                 anchor_step: true,
                 dependencies: vec![],
@@ -542,10 +614,18 @@ fn generate_confidence_gate(
             }),
             intent: Some("Question".to_string()),
             entities: vec![topic.to_string()],
-            channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+            channels: vec![
+                MemoryChannel::Main,
+                MemoryChannel::Reasoning,
+                MemoryChannel::Intent,
+            ],
             curriculum: crate::seed::CurriculumMetadata {
                 curriculum_score: rng.gen_range(115..128),
-                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+                memory_channels: vec![
+                    MemoryChannel::Main,
+                    MemoryChannel::Reasoning,
+                    MemoryChannel::Intent,
+                ],
                 ..Default::default()
             },
             quality_gates: Default::default(),
@@ -750,7 +830,10 @@ fn generate_multi_step_retrieval(
         .replace("{stage_count}", &stage_count.to_string());
     let last_dep = steps.len() - 1;
     steps.push(ReasoningStep {
-        content: format!("Synthesis complete: {}", synthesis.chars().take(200).collect::<String>()),
+        content: format!(
+            "Synthesis complete: {}",
+            synthesis.chars().take(200).collect::<String>()
+        ),
         step_type: ReasoningStepType::Conclusion,
         anchor_step: true,
         dependencies: vec![last_dep],
@@ -781,15 +864,31 @@ fn generate_multi_step_retrieval(
             steps,
             reasoning_type: ReasoningType::General,
             confidence_trajectory,
-            entities: vec![topic_a.to_string(), effective_topic_b.to_string(), domain.to_string()],
+            entities: vec![
+                topic_a.to_string(),
+                effective_topic_b.to_string(),
+                domain.to_string(),
+            ],
             structure_hash: None,
         }),
         intent: Some("Analyze".to_string()),
-        entities: vec![topic_a.to_string(), effective_topic_b.to_string(), domain.to_string()],
-        channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+        entities: vec![
+            topic_a.to_string(),
+            effective_topic_b.to_string(),
+            domain.to_string(),
+        ],
+        channels: vec![
+            MemoryChannel::Main,
+            MemoryChannel::Reasoning,
+            MemoryChannel::Intent,
+        ],
         curriculum: crate::seed::CurriculumMetadata {
             curriculum_score: rng.gen_range(130..145),
-            memory_channels: vec![MemoryChannel::Main, MemoryChannel::Reasoning, MemoryChannel::Intent],
+            memory_channels: vec![
+                MemoryChannel::Main,
+                MemoryChannel::Reasoning,
+                MemoryChannel::Intent,
+            ],
             ..Default::default()
         },
         quality_gates: Default::default(),
@@ -797,11 +896,7 @@ fn generate_multi_step_retrieval(
     }
 }
 
-fn generate_multi_hop(
-    rng: &mut rand::rngs::StdRng,
-    domain: &str,
-    topic: &str,
-) -> TrainingExample {
+fn generate_multi_hop(rng: &mut rand::rngs::StdRng, domain: &str, topic: &str) -> TrainingExample {
     let hop_count: usize = rng.gen_range(3..6);
     let question = format!(
         "Trace the chain of dependencies in {} starting from {} through {} intermediate steps.",
@@ -822,7 +917,13 @@ fn generate_multi_hop(
     for i in 0..hop_count {
         let detail = pick_str(rng, DETAIL_POOLS);
         steps.push(ReasoningStep {
-            content: format!("Hop {}: {} connects to {} in the {} chain.", i + 1, topic, detail, domain),
+            content: format!(
+                "Hop {}: {} connects to {} in the {} chain.",
+                i + 1,
+                topic,
+                detail,
+                domain
+            ),
             step_type: ReasoningStepType::Inference,
             anchor_step: false,
             dependencies: vec![i],
@@ -882,14 +983,20 @@ fn generate_self_correction(
     domain: &str,
     topic: &str,
 ) -> TrainingExample {
-    let question = format!("Analyze {} in {} — be careful about common pitfalls.", topic, domain);
+    let question = format!(
+        "Analyze {} in {} — be careful about common pitfalls.",
+        topic, domain
+    );
 
     let correction_marker = pick_str(rng, SELF_CORRECTION_MARKERS);
     let t_inf = pick_str(rng, REASONING_INFERENCES);
     let correct_inference = expand_template(rng, t_inf, domain, topic);
     let t_body = pick_str(rng, ANSWER_BODIES);
     let body = expand_template(rng, t_body, domain, topic);
-    let answer = format!("{} After correcting initial assumptions: {}", correction_marker, body);
+    let answer = format!(
+        "{} After correcting initial assumptions: {}",
+        correction_marker, body
+    );
 
     let steps = vec![
         ReasoningStep {
@@ -900,14 +1007,20 @@ fn generate_self_correction(
             structure_hash: None,
         },
         ReasoningStep {
-            content: format!("Initial hypothesis: straightforward application of standard {} principles.", domain),
+            content: format!(
+                "Initial hypothesis: straightforward application of standard {} principles.",
+                domain
+            ),
             step_type: ReasoningStepType::Hypothesis,
             anchor_step: false,
             dependencies: vec![0],
             structure_hash: None,
         },
         ReasoningStep {
-            content: format!("{} The initial approach overlooked key constraints in {}.", correction_marker, topic),
+            content: format!(
+                "{} The initial approach overlooked key constraints in {}.",
+                correction_marker, topic
+            ),
             step_type: ReasoningStepType::Verification,
             anchor_step: false,
             dependencies: vec![1],
@@ -921,14 +1034,20 @@ fn generate_self_correction(
             structure_hash: None,
         },
         ReasoningStep {
-            content: { let t = pick_str(rng, REASONING_VERIFICATIONS); expand_template(rng, t, domain, topic) },
+            content: {
+                let t = pick_str(rng, REASONING_VERIFICATIONS);
+                expand_template(rng, t, domain, topic)
+            },
             step_type: ReasoningStepType::Verification,
             anchor_step: false,
             dependencies: vec![3],
             structure_hash: None,
         },
         ReasoningStep {
-            content: { let t = pick_str(rng, REASONING_CONCLUSIONS); expand_template(rng, t, domain, topic) },
+            content: {
+                let t = pick_str(rng, REASONING_CONCLUSIONS);
+                expand_template(rng, t, domain, topic)
+            },
             step_type: ReasoningStepType::Conclusion,
             anchor_step: true,
             dependencies: vec![4],
@@ -1346,14 +1465,22 @@ mod tests {
     #[test]
     fn generates_nonempty_seed_set() {
         let seeds = generate_intelligence_seeds();
-        assert!(seeds.len() >= 15, "expected at least 15 intelligence seeds, got {}", seeds.len());
+        assert!(
+            seeds.len() >= 15,
+            "expected at least 15 intelligence seeds, got {}",
+            seeds.len()
+        );
     }
 
     #[test]
     fn all_seeds_have_intent() {
         let seeds = generate_intelligence_seeds();
         for seed in &seeds {
-            assert!(seed.intent.is_some(), "seed '{}' missing intent", seed.question);
+            assert!(
+                seed.intent.is_some(),
+                "seed '{}' missing intent",
+                seed.question
+            );
         }
     }
 
@@ -1362,7 +1489,11 @@ mod tests {
         let seeds = generate_intelligence_seeds();
         let with_reasoning = seeds.iter().filter(|s| s.reasoning.is_some()).count();
         // Most seeds should have reasoning traces (all except social short-circuits)
-        assert!(with_reasoning >= 15, "expected at least 15 seeds with reasoning, got {}", with_reasoning);
+        assert!(
+            with_reasoning >= 15,
+            "expected at least 15 seeds with reasoning, got {}",
+            with_reasoning
+        );
     }
 
     #[test]
@@ -1370,16 +1501,28 @@ mod tests {
         let seeds = generate_intelligence_seeds();
         let retrieval_seeds: Vec<_> = seeds
             .iter()
-            .filter(|s| s.context.as_deref().map(|c| c.starts_with("retrieval_trigger")).unwrap_or(false))
+            .filter(|s| {
+                s.context
+                    .as_deref()
+                    .map(|c| c.starts_with("retrieval_trigger"))
+                    .unwrap_or(false)
+            })
             .collect();
-        assert!(retrieval_seeds.len() >= 5, "expected at least 5 retrieval trigger seeds");
+        assert!(
+            retrieval_seeds.len() >= 5,
+            "expected at least 5 retrieval trigger seeds"
+        );
     }
 
     #[test]
     fn curriculum_scores_are_positive() {
         let seeds = generate_intelligence_seeds();
         for seed in &seeds {
-            assert!(seed.curriculum.curriculum_score > 0, "seed '{}' has non-positive score", seed.question);
+            assert!(
+                seed.curriculum.curriculum_score > 0,
+                "seed '{}' has non-positive score",
+                seed.question
+            );
         }
     }
 }

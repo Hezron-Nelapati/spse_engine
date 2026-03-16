@@ -6,8 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use spse_engine::classification::{
+    builder::UnitBuilder, hierarchy::HierarchicalUnitOrganizer, input,
+};
 use spse_engine::config::{GovernanceConfig, UnitBuilderConfig};
-use spse_engine::classification::{builder::UnitBuilder, hierarchy::HierarchicalUnitOrganizer, input};
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::types::{SourceKind, UnitLevel};
 
@@ -34,28 +36,38 @@ pub struct TestDocument {
 /// Load large corpus from test_data/large_corpus directory (70MB+)
 pub fn load_large_corpus() -> Result<TestContent, Box<dyn std::error::Error>> {
     let corpus_dir = Path::new("test_data/large_corpus");
-    
+
     if !corpus_dir.exists() {
         return Err("Large corpus not found. Run: python3 scripts/generate_large_corpus.py".into());
     }
-    
+
     let mut documents = Vec::new();
     let mut total_bytes = 0;
-    
+
     let categories = [
-        "escaped_unicode", "outer_punct", "url_fragments", "broken_json",
-        "encoding_issues", "sql_patterns", "html_markup", "control_chars",
-        "emoji_content", "code_fragments", "adversarial", "whitespace_anomaly",
-        "numeric_fragments", "mixed_realistic",
+        "escaped_unicode",
+        "outer_punct",
+        "url_fragments",
+        "broken_json",
+        "encoding_issues",
+        "sql_patterns",
+        "html_markup",
+        "control_chars",
+        "emoji_content",
+        "code_fragments",
+        "adversarial",
+        "whitespace_anomaly",
+        "numeric_fragments",
+        "mixed_realistic",
     ];
-    
+
     for category in &categories {
         let file_path = corpus_dir.join(format!("{}.txt", category));
         if file_path.exists() {
             let content = fs::read_to_string(&file_path)?;
             let bytes = content.len();
             total_bytes += bytes;
-            
+
             // Split into chunks for processing (each line is a document)
             for line in content.lines() {
                 if !line.trim().is_empty() {
@@ -66,14 +78,17 @@ pub fn load_large_corpus() -> Result<TestContent, Box<dyn std::error::Error>> {
                     });
                 }
             }
-            
+
             println!("  {}: {:.2} MB", category, bytes as f64 / 1024.0 / 1024.0);
         }
     }
-    
-    println!("Total corpus: {:.2} MB ({} documents)", 
-        total_bytes as f64 / 1024.0 / 1024.0, documents.len());
-    
+
+    println!(
+        "Total corpus: {:.2} MB ({} documents)",
+        total_bytes as f64 / 1024.0 / 1024.0,
+        documents.len()
+    );
+
     Ok(TestContent {
         documents,
         expected_clean: HashSet::new(),
@@ -94,23 +109,28 @@ pub fn generate_test_content() -> TestContent {
         // Unicode escape sequences that should NOT become units
         ("The symbol \\u0259 represents a schwa.", "escaped_unicode"),
         ("Temperature: 90\\u00B0C (194\\u00B0F)", "escaped_unicode"),
-        ("File: \\u00E9\\u00E8\\u00EA accented chars", "escaped_unicode"),
+        (
+            "File: \\u00E9\\u00E8\\u00EA accented chars",
+            "escaped_unicode",
+        ),
         ("Price: 99\\u20AC for the item", "escaped_unicode"),
         // These should become clean units
         ("The café has naïve façade designs.", "clean_unicode"),
         ("München and Zürich are cities.", "clean_unicode"),
     ];
-    
+
     for (text, category) in unicode_pollution_docs {
         documents.push(TestDocument {
             content: text.to_string(),
             category: category.to_string(),
             bytes: text.len(),
         });
-        
+
         if category == "clean_unicode" {
             for word in text.split_whitespace() {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                let clean = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
                 if clean.len() >= 3 {
                     expected_clean.insert(clean);
                 }
@@ -127,8 +147,14 @@ pub fn generate_test_content() -> TestContent {
     // Byte-window creates fragments with trailing/leading punctuation
     let punct_pollution_docs = vec![
         // These create polluted fragments like "claude-", "sudan_", "file."
-        ("Claude- is an AI assistant. Claude-3 is newer.", "outer_punct"),
-        ("Check the file.txt for details. file.png is an image.", "outer_punct"),
+        (
+            "Claude- is an AI assistant. Claude-3 is newer.",
+            "outer_punct",
+        ),
+        (
+            "Check the file.txt for details. file.png is an image.",
+            "outer_punct",
+        ),
         ("Sudan_ is a country. Sudan_r is a region.", "outer_punct"),
         ("Visit https://example.com/page-1 for info.", "outer_punct"),
         ("The result: 42.5 is the answer.", "outer_punct"),
@@ -136,17 +162,19 @@ pub fn generate_test_content() -> TestContent {
         ("Claude is an AI assistant.", "clean"),
         ("The file contains important data.", "clean"),
     ];
-    
+
     for (text, category) in punct_pollution_docs {
         documents.push(TestDocument {
             content: text.to_string(),
             category: category.to_string(),
             bytes: text.len(),
         });
-        
+
         if category == "clean" {
             for word in text.split_whitespace() {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                let clean = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
                 if clean.len() >= 3 {
                     expected_clean.insert(clean);
                 }
@@ -162,24 +190,32 @@ pub fn generate_test_content() -> TestContent {
     // Byte-window cuts words mid-character, creating partials
     let edge_trim_docs = vec![
         // These create partials like "atholic", "audel", "ubang"
-        ("Catholic Church is ancient. Catholic traditions continue.", "edge_trim"),
-        ("Baudelaire was a poet. Baudelaire wrote Les Fleurs.", "edge_trim"),
+        (
+            "Catholic Church is ancient. Catholic traditions continue.",
+            "edge_trim",
+        ),
+        (
+            "Baudelaire was a poet. Baudelaire wrote Les Fleurs.",
+            "edge_trim",
+        ),
         ("Subang is a town. Subang Jaya is a city.", "edge_trim"),
         // Clean versions
         ("The Catholic Church has traditions.", "clean"),
         ("Baudelaire was a famous poet.", "clean"),
     ];
-    
+
     for (text, category) in edge_trim_docs {
         documents.push(TestDocument {
             content: text.to_string(),
             category: category.to_string(),
             bytes: text.len(),
         });
-        
+
         if category == "clean" {
             for word in text.split_whitespace() {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                let clean = word
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
                 if clean.len() >= 3 {
                     expected_clean.insert(clean);
                 }
@@ -193,12 +229,21 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 4: URL/Path Fragments
     let url_docs = vec![
-        ("Download from https://example.com/file-v2.3.1.tar.gz", "url_fragments"),
-        ("Path: /home/user/documents/report-2024.pdf", "url_fragments"),
-        ("API endpoint: https://api.example.com/v1/users/123", "url_fragments"),
+        (
+            "Download from https://example.com/file-v2.3.1.tar.gz",
+            "url_fragments",
+        ),
+        (
+            "Path: /home/user/documents/report-2024.pdf",
+            "url_fragments",
+        ),
+        (
+            "API endpoint: https://api.example.com/v1/users/123",
+            "url_fragments",
+        ),
         ("The map.png file is an image.", "url_fragments"),
     ];
-    
+
     for (text, category) in url_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -206,27 +251,32 @@ pub fn generate_test_content() -> TestContent {
             bytes: text.len(),
         });
     }
-    
+
     expected_polluted.insert("-map.png".to_string());
     expected_polluted.insert("api/".to_string());
     expected_polluted.insert("v1/".to_string());
 
     // Category 5: Repetitive Content (should create good units)
     let repetitive_docs = vec![
-        ("reasoning reasoning reasoning is important for AI.", "repetitive"),
+        (
+            "reasoning reasoning reasoning is important for AI.",
+            "repetitive",
+        ),
         ("The anchor anchor anchor provides stability.", "repetitive"),
         ("Memory memory memory stores information.", "repetitive"),
     ];
-    
+
     for (text, category) in repetitive_docs {
         documents.push(TestDocument {
             content: text.to_string(),
             category: category.to_string(),
             bytes: text.len(),
         });
-        
+
         for word in text.split_whitespace() {
-            let clean = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            let clean = word
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
             if clean.len() >= 3 && clean != "is" && clean != "the" && clean != "for" {
                 expected_clean.insert(clean);
             }
@@ -235,22 +285,28 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 6: Mixed Content (realistic test)
     let mixed_docs = vec![
-        (r#"The temperature today is 25°C (77°F). The café "L'Étoile" serves coffee.
+        (
+            r#"The temperature today is 25°C (77°F). The café "L'Étoile" serves coffee.
             Visit https://example.com for more info.
             The Catholic Church in München has historical significance.
-            Reasoning about these topics requires careful analysis."#, "mixed"),
-        (r#"Data: {"temp": 90, "unit": "°C", "file": "report-2024.pdf"}
+            Reasoning about these topics requires careful analysis."#,
+            "mixed",
+        ),
+        (
+            r#"Data: {"temp": 90, "unit": "°C", "file": "report-2024.pdf"}
             The analysis shows significant patterns.
-            Subang Jaya and Ulan-Ude are cities in Asia."#, "mixed"),
+            Subang Jaya and Ulan-Ude are cities in Asia."#,
+            "mixed",
+        ),
     ];
-    
+
     for (text, category) in mixed_docs {
         documents.push(TestDocument {
             content: text.to_string(),
             category: category.to_string(),
             bytes: text.len(),
         });
-        
+
         if category == "mixed" {
             expected_clean.insert("temperature".to_string());
             expected_clean.insert("café".to_string());
@@ -262,13 +318,28 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 7: Known Pollution Patterns from TSV
     let known_pollution_patterns = vec![
-        ("E.u0259. is a notation. E.u0259 appears often.", "known_pollution"),
-        ("sudan_ is a variant. sudan_ appears in data.", "known_pollution"),
-        ("Colucci. is a name. Colucci. appears frequently.", "known_pollution"),
-        ("Claude_D is a version. Claude_D is referenced.", "known_pollution"),
-        ("lan-Ude is a city. lan-Ude is in Russia.", "known_pollution"),
+        (
+            "E.u0259. is a notation. E.u0259 appears often.",
+            "known_pollution",
+        ),
+        (
+            "sudan_ is a variant. sudan_ appears in data.",
+            "known_pollution",
+        ),
+        (
+            "Colucci. is a name. Colucci. appears frequently.",
+            "known_pollution",
+        ),
+        (
+            "Claude_D is a version. Claude_D is referenced.",
+            "known_pollution",
+        ),
+        (
+            "lan-Ude is a city. lan-Ude is in Russia.",
+            "known_pollution",
+        ),
     ];
-    
+
     for (text, category) in known_pollution_patterns {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -276,7 +347,7 @@ pub fn generate_test_content() -> TestContent {
             bytes: text.len(),
         });
     }
-    
+
     // Add known pollution patterns
     expected_polluted.insert("e.u0259.".to_string());
     expected_polluted.insert("sudan_".to_string());
@@ -297,7 +368,7 @@ pub fn generate_test_content() -> TestContent {
         ("Mixed\r\nline\r\nendings", "control_chars"),
         ("Bell\x07and\x08backspace", "control_chars"),
     ];
-    
+
     for (text, category) in control_char_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -311,12 +382,18 @@ pub fn generate_test_content() -> TestContent {
         (r#"{"key": "value", "broken: missing_quote}"#, "broken_json"),
         (r#"{"nested": {"deep": {"unclosed": "yes""#, "broken_json"),
         (r#"[1, 2, 3, {"mixed": array}]"#, "broken_json"),
-        (r#"{"escaped": \"bad\", "quote": "unmatched}"#, "broken_json"),
+        (
+            r#"{"escaped": \"bad\", "quote": "unmatched}"#,
+            "broken_json",
+        ),
         (r#"{"unicode": "\u00", "truncated": true}"#, "broken_json"),
-        (r#"{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7}"#, "broken_json"),
+        (
+            r#"{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7}"#,
+            "broken_json",
+        ),
         (r#"{"key": "value with \n newline \t tab"}"#, "broken_json"),
     ];
-    
+
     for (text, category) in broken_json_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -327,14 +404,17 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 10: Mixed encodings and mojibake
     let encoding_docs = vec![
-        ("CafÃ© with mojibake from UTF-8 misdecoded as Latin-1", "encoding_issues"),
+        (
+            "CafÃ© with mojibake from UTF-8 misdecoded as Latin-1",
+            "encoding_issues",
+        ),
         ("Ã¼ber Ã¶ffentlich Ã¤ndern", "encoding_issues"),
         ("ÐÑÑÑÐ¸Ð¹ (Russian in wrong encoding)", "encoding_issues"),
         ("æ—¥æœ¬èªž (Japanese mojibake)", "encoding_issues"),
         ("Valid UTF-8: 日本語 한국어 العربية", "encoding_issues"),
         ("Mixed: café, über, naïve, 日本語", "encoding_issues"),
     ];
-    
+
     for (text, category) in encoding_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -345,14 +425,32 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 11: Extremely long tokens and repeated characters
     let extreme_length_docs = vec![
-        ("Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "extreme_length"),
-        ("Supercalifragilisticexpialidocious is a long word.", "extreme_length"),
-        ("Pneumonoultramicroscopicsilicovolcanoconiosis is even longer.", "extreme_length"),
-        ("Hippopotomonstrosesquippedaliophobia is ironic.", "extreme_length"),
-        ("Repetition: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "extreme_length"),
-        ("Numbers: 1234567890123456789012345678901234567890", "extreme_length"),
+        (
+            "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "extreme_length",
+        ),
+        (
+            "Supercalifragilisticexpialidocious is a long word.",
+            "extreme_length",
+        ),
+        (
+            "Pneumonoultramicroscopicsilicovolcanoconiosis is even longer.",
+            "extreme_length",
+        ),
+        (
+            "Hippopotomonstrosesquippedaliophobia is ironic.",
+            "extreme_length",
+        ),
+        (
+            "Repetition: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "extreme_length",
+        ),
+        (
+            "Numbers: 1234567890123456789012345678901234567890",
+            "extreme_length",
+        ),
     ];
-    
+
     for (text, category) in extreme_length_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -369,7 +467,7 @@ pub fn generate_test_content() -> TestContent {
         ("1' OR '1'='1", "sql_patterns"),
         ("INSERT INTO logs VALUES ('test')", "sql_patterns"),
     ];
-    
+
     for (text, category) in sql_patterns_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -387,7 +485,7 @@ pub fn generate_test_content() -> TestContent {
         ("<script>alert('xss')</script>", "markup"),
         ("Text with <b>bold</b> and <i>italic</i>", "markup"),
     ];
-    
+
     for (text, category) in markup_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -399,13 +497,19 @@ pub fn generate_test_content() -> TestContent {
     // Category 14: Email and address fragments
     let contact_docs = vec![
         ("Contact: user@example.com for support", "contact_fragments"),
-        ("Email: john.doe+tag@subdomain.example.org", "contact_fragments"),
+        (
+            "Email: john.doe+tag@subdomain.example.org",
+            "contact_fragments",
+        ),
         ("Phone: +1 (555) 123-4567", "contact_fragments"),
-        ("Address: 123 Main St, City, State 12345", "contact_fragments"),
+        (
+            "Address: 123 Main St, City, State 12345",
+            "contact_fragments",
+        ),
         ("IP: 192.168.1.1 is private", "contact_fragments"),
         ("MAC: 00:1A:2B:3C:4D:5E", "contact_fragments"),
     ];
-    
+
     for (text, category) in contact_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -419,10 +523,13 @@ pub fn generate_test_content() -> TestContent {
         ("Base64: SGVsbG8gV29ybGQh", "encoded_content"),
         ("Hex: 48656c6c6f20576f726c64", "encoded_content"),
         ("URL encoded: Hello%20World%21", "encoded_content"),
-        ("HTML entity: &#72;&#101;&#108;&#108;&#111;", "encoded_content"),
+        (
+            "HTML entity: &#72;&#101;&#108;&#108;&#111;",
+            "encoded_content",
+        ),
         ("Quoted printable: Hello=20World=21", "encoded_content"),
     ];
-    
+
     for (text, category) in encoded_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -436,11 +543,14 @@ pub fn generate_test_content() -> TestContent {
         ("Multiple   spaces   between   words", "whitespace_anomaly"),
         ("Tabs\t\t\tmultiple\t\ttabs", "whitespace_anomaly"),
         ("  Leading and trailing  ", "whitespace_anomaly"),
-        ("Non-breaking\u{00A0}space\u{00A0}here", "whitespace_anomaly"),
+        (
+            "Non-breaking\u{00A0}space\u{00A0}here",
+            "whitespace_anomaly",
+        ),
         ("Zero\u{200B}width\u{200B}space", "whitespace_anomaly"),
         ("Em\u{2003}space\u{2003}wide", "whitespace_anomaly"),
     ];
-    
+
     for (text, category) in whitespace_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -457,10 +567,13 @@ pub fn generate_test_content() -> TestContent {
         ("Percentage: 99.9%", "numeric_fragments"),
         ("Scientific: 1.23e-10", "numeric_fragments"),
         ("Hex color: #FF5733", "numeric_fragments"),
-        ("UUID: 550e8400-e29b-41d4-a716-446655440000", "numeric_fragments"),
+        (
+            "UUID: 550e8400-e29b-41d4-a716-446655440000",
+            "numeric_fragments",
+        ),
         ("Version: v2.3.1-beta.2+build.123", "numeric_fragments"),
     ];
-    
+
     for (text, category) in numeric_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -478,7 +591,7 @@ pub fn generate_test_content() -> TestContent {
         ("Currency: $ € £ ¥ ₹ ₿", "emoji_content"),
         ("Dingbats: ✆ ✇ ✈ ✉ ☎ ☏", "emoji_content"),
     ];
-    
+
     for (text, category) in emoji_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -496,7 +609,7 @@ pub fn generate_test_content() -> TestContent {
         ("#include <stdio.h>\nint main()", "code_fragments"),
         ("package main\nimport \"fmt\"", "code_fragments"),
     ];
-    
+
     for (text, category) in code_fragments_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -507,14 +620,17 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 20: Adversarial patterns
     let adversarial_docs = vec![
-        ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "adversarial"),
+        (
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "adversarial",
+        ),
         ("a a a a a a a a a a a a a a a a a a a a", "adversarial"),
         ("wordwordwordwordwordwordwordwordwordword", "adversarial"),
         ("AaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa", "adversarial"),
         ("123123123123123123123123123123123123123", "adversarial"),
         ("!@#$%^&*()_+-=[]{}|;':\",./<>?", "adversarial"),
     ];
-    
+
     for (text, category) in adversarial_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -525,14 +641,32 @@ pub fn generate_test_content() -> TestContent {
 
     // Category 21: Real-world messy data
     let messy_real_docs = vec![
-        (r#"{"question":"What is 2+2?","context":"Math basics","answer":"4"}"#, "messy_real"),
-        ("User123 commented: 'Great article!!! 5/5 stars 👍👍👍'", "messy_real"),
-        ("RT @user: Check this out! https://t.co/abc123 #hashtag", "messy_real"),
-        ("[ERROR] 2024-01-15 10:30:45 - Connection failed (code: 500)", "messy_real"),
-        ("SELECT u.name, COUNT(*) FROM users u JOIN posts p ON u.id = p.user_id", "messy_real"),
-        ("Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "messy_real"),
+        (
+            r#"{"question":"What is 2+2?","context":"Math basics","answer":"4"}"#,
+            "messy_real",
+        ),
+        (
+            "User123 commented: 'Great article!!! 5/5 stars 👍👍👍'",
+            "messy_real",
+        ),
+        (
+            "RT @user: Check this out! https://t.co/abc123 #hashtag",
+            "messy_real",
+        ),
+        (
+            "[ERROR] 2024-01-15 10:30:45 - Connection failed (code: 500)",
+            "messy_real",
+        ),
+        (
+            "SELECT u.name, COUNT(*) FROM users u JOIN posts p ON u.id = p.user_id",
+            "messy_real",
+        ),
+        (
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            "messy_real",
+        ),
     ];
-    
+
     for (text, category) in messy_real_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -551,7 +685,7 @@ pub fn generate_test_content() -> TestContent {
         ("---", "minimal"),
         ("___", "minimal"),
     ];
-    
+
     for (text, category) in minimal_docs {
         documents.push(TestDocument {
             content: text.to_string(),
@@ -561,7 +695,7 @@ pub fn generate_test_content() -> TestContent {
     }
 
     let total_bytes: usize = documents.iter().map(|d| d.bytes).sum();
-    
+
     TestContent {
         documents,
         expected_clean,
@@ -618,7 +752,7 @@ impl PollutionConfig {
             ..UnitBuilderConfig::default()
         }
     }
-    
+
     pub fn to_governance_config(&self) -> GovernanceConfig {
         GovernanceConfig {
             pollution_detection_enabled: true,
@@ -680,39 +814,43 @@ pub fn run_pollution_test(
         db_path.to_str().expect("valid path"),
         &config.to_governance_config(),
     );
-    
+
     let builder_config = config.to_unit_builder_config();
-    
+
     // Batch documents for efficiency (combine multiple small docs into one)
     let _batch_size = 1000;
     let mut batch = String::new();
     let mut batch_count = 0;
-    
+
     for (i, doc) in test_content.documents.iter().enumerate() {
         batch.push_str(&doc.content);
         batch.push('\n');
-        
+
         if batch.len() >= 50000 || i == test_content.documents.len() - 1 {
             let packet = input::ingest_raw(&batch, true);
             let output = UnitBuilder::ingest_with_config(&packet, &builder_config);
             let hierarchy = HierarchicalUnitOrganizer::organize(&output, &builder_config);
-            store.ingest_hierarchy(&hierarchy, SourceKind::TrainingDocument, &format!("batch_{}", batch_count));
-            
+            store.ingest_hierarchy(
+                &hierarchy,
+                SourceKind::TrainingDocument,
+                &format!("batch_{}", batch_count),
+            );
+
             batch.clear();
             batch_count += 1;
-            
+
             if batch_count % 100 == 0 {
                 print!(".");
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
         }
     }
-    
+
     println!(" Processed {} batches", batch_count);
-    
+
     // Flush any remaining pending writes
     store.flush_pending_writes();
-    
+
     // Analyze pollution
     analyze_pollution(&store, config, test_content)
 }
@@ -725,9 +863,10 @@ fn analyze_pollution(
     let units = store.all_units();
     let mut polluted_units = Vec::new();
     let mut pollution_by_category: HashMap<String, usize> = HashMap::new();
-    
+
     for unit in &units {
-        let pollution = detect_pollution(&unit.content, &unit.normalized, unit.level, unit.frequency);
+        let pollution =
+            detect_pollution(&unit.content, &unit.normalized, unit.level, unit.frequency);
         if !pollution.reasons.is_empty() {
             for reason in &pollution.reasons {
                 *pollution_by_category.entry(reason.clone()).or_insert(0) += 1;
@@ -742,30 +881,34 @@ fn analyze_pollution(
             });
         }
     }
-    
+
     // Sort by pollution score
-    polluted_units.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    
+    polluted_units.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let total_units = units.len();
     let polluted_count = polluted_units.len();
     let clean_count = total_units.saturating_sub(polluted_count);
-    
+
     // Calculate pollution score (0 = no pollution, 1 = all polluted)
     let pollution_ratio = if total_units > 0 {
         polluted_count as f32 / total_units as f32
     } else {
         0.0
     };
-    
+
     // Factor in severity
     let avg_severity = if !polluted_units.is_empty() {
         polluted_units.iter().map(|u| u.score).sum::<f32>() / polluted_units.len() as f32
     } else {
         0.0
     };
-    
+
     let pollution_score = pollution_ratio * (0.5 + 0.5 * avg_severity);
-    
+
     Ok(PollutionResult {
         total_units,
         clean_units: clean_count,
@@ -788,10 +931,15 @@ struct PollutionDetection {
     reasons: Vec<String>,
 }
 
-fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency: u64) -> PollutionDetection {
+fn detect_pollution(
+    content: &str,
+    normalized: &str,
+    level: UnitLevel,
+    frequency: u64,
+) -> PollutionDetection {
     let mut score: f32 = 0.0;
     let mut reasons = Vec::new();
-    
+
     // Check 1: Escaped unicode patterns (uXXXX or uXXXXXX)
     if normalized.contains("u0") && normalized.len() <= 10 {
         let unicode_pattern = regex::Regex::new(r"u[0-9a-f]{4,6}").unwrap();
@@ -800,18 +948,18 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             reasons.push("escaped_unicode".to_string());
         }
     }
-    
+
     // Check 2: Outer punctuation (trailing/leading non-alphanumeric)
     let trimmed = content.trim_matches(|c: char| !c.is_alphanumeric());
     if trimmed.len() < content.len() && trimmed.len() >= 2 {
         let has_leading_punct = !content.starts_with(|c: char| c.is_alphanumeric());
         let has_trailing_punct = !content.ends_with(|c: char| c.is_alphanumeric());
-        
+
         if has_leading_punct || has_trailing_punct {
             // Check if it's a legitimate hyphenated word
             let punct_count = content.chars().filter(|c| !c.is_alphanumeric()).count();
             let alpha_count = content.chars().filter(|c| c.is_alphanumeric()).count();
-            
+
             if punct_count > 0 && alpha_count > 0 {
                 let punct_ratio = punct_count as f32 / content.len() as f32;
                 if punct_ratio > 0.15 && !content.contains(|c: char| c.is_whitespace()) {
@@ -821,7 +969,7 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             }
         }
     }
-    
+
     // Check 3: Edge-trimmed partial words
     if level == UnitLevel::Word || level == UnitLevel::Subword {
         // Check if it's a partial of a common word
@@ -831,7 +979,7 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             ("ubang", "subang"),
             ("her team", "her team"), // legitimate phrase
         ];
-        
+
         for (partial, _) in &partial_patterns {
             if normalized.contains(partial) && normalized.len() < 12 {
                 // Check if it's not a full word
@@ -843,7 +991,7 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             }
         }
     }
-    
+
     // Check 4: URL/path fragments
     if normalized.contains('/') || normalized.contains(':') {
         if normalized.len() < 20 && !normalized.contains(' ') {
@@ -855,14 +1003,14 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             }
         }
     }
-    
+
     // Check 5: File extension fragments
     let ext_pattern = regex::Regex::new(r"\.(png|jpg|pdf|txt|gz|tar|zip)$").unwrap();
     if ext_pattern.is_match(normalized) && normalized.len() < 15 {
         score += 0.5;
         reasons.push("file_extension".to_string());
     }
-    
+
     // Check 6: Subword pollution (too short for word level)
     if level == UnitLevel::Subword && normalized.len() >= 4 && normalized.len() <= 6 {
         // Check if it's all lowercase and looks like a word fragment
@@ -876,142 +1024,178 @@ fn detect_pollution(content: &str, normalized: &str, level: UnitLevel, frequency
             }
         }
     }
-    
+
     // Check 7: High frequency pollution (repeated bad patterns)
     if frequency > 5 && score > 0.0 {
         score *= 1.2; // Amplify pollution score for frequent pollution
         reasons.push("high_frequency".to_string());
     }
-    
-    PollutionDetection { score: score.min(1.0_f32), reasons }
+
+    PollutionDetection {
+        score: score.min(1.0_f32),
+        reasons,
+    }
 }
 
 // ============================================================================
 // Config Sweep
 // ============================================================================
 
-pub fn config_sweep(test_content: &TestContent) -> Result<Vec<(String, PollutionResult)>, Box<dyn std::error::Error>> {
+pub fn config_sweep(
+    test_content: &TestContent,
+) -> Result<Vec<(String, PollutionResult)>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
-    
+
     // Define config variations to test
     let configs = generate_config_variations();
-    
+
     for (name, config) in configs {
-        let db_path = std::env::temp_dir().join(format!("pollution_sweep_{}.db", uuid::Uuid::new_v4()));
-        
+        let db_path =
+            std::env::temp_dir().join(format!("pollution_sweep_{}.db", uuid::Uuid::new_v4()));
+
         let result = run_pollution_test(test_content, &config, &db_path)?;
-        
+
         let mut result_with_config = result.clone();
         result_with_config.config_yaml_patch = generate_yaml_patch(&config);
-        
+
         results.push((name, result_with_config));
-        
+
         // Cleanup
         let _ = std::fs::remove_file(&db_path);
     }
-    
+
     Ok(results)
 }
 
 fn generate_config_variations() -> Vec<(String, PollutionConfig)> {
     let mut configs = Vec::new();
-    
+
     // Default config
     configs.push(("default".to_string(), PollutionConfig::default()));
-    
+
     // Variation 1: Higher frequency threshold (stricter)
-    configs.push(("high_freq_threshold".to_string(), PollutionConfig {
-        min_frequency: 4,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "high_freq_threshold".to_string(),
+        PollutionConfig {
+            min_frequency: 4,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 2: Larger minimum window (avoid small fragments)
-    configs.push(("larger_min_window".to_string(), PollutionConfig {
-        window_sizes: vec![4, 5, 6, 7, 8],
-        min_fragment_length: 5,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "larger_min_window".to_string(),
+        PollutionConfig {
+            window_sizes: vec![4, 5, 6, 7, 8],
+            min_fragment_length: 5,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 3: Stricter punctuation handling
-    configs.push(("strict_punct".to_string(), PollutionConfig {
-        punctuation_ratio: 0.35,
-        no_boundary_penalty: -0.25,
-        edge_boundary_bonus: 0.02,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "strict_punct".to_string(),
+        PollutionConfig {
+            punctuation_ratio: 0.35,
+            no_boundary_penalty: -0.25,
+            edge_boundary_bonus: 0.02,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 4: Higher utility threshold
-    configs.push(("high_utility".to_string(), PollutionConfig {
-        utility_threshold: 0.15,
-        full_boundary_bonus: 0.25,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "high_utility".to_string(),
+        PollutionConfig {
+            utility_threshold: 0.15,
+            full_boundary_bonus: 0.25,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 5: Combined strict settings
-    configs.push(("strict_combined".to_string(), PollutionConfig {
-        min_frequency: 3,
-        window_sizes: vec![3, 4, 5, 6, 7, 8],
-        min_fragment_length: 5,
-        punctuation_ratio: 0.40,
-        utility_threshold: 0.12,
-        full_boundary_bonus: 0.22,
-        edge_boundary_bonus: 0.03,
-        no_boundary_penalty: -0.18,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "strict_combined".to_string(),
+        PollutionConfig {
+            min_frequency: 3,
+            window_sizes: vec![3, 4, 5, 6, 7, 8],
+            min_fragment_length: 5,
+            punctuation_ratio: 0.40,
+            utility_threshold: 0.12,
+            full_boundary_bonus: 0.22,
+            edge_boundary_bonus: 0.03,
+            no_boundary_penalty: -0.18,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 6: Very strict (may filter too much)
-    configs.push(("very_strict".to_string(), PollutionConfig {
-        min_frequency: 5,
-        window_sizes: vec![5, 6, 7, 8],
-        min_fragment_length: 6,
-        punctuation_ratio: 0.30,
-        utility_threshold: 0.20,
-        full_boundary_bonus: 0.30,
-        edge_boundary_bonus: 0.01,
-        no_boundary_penalty: -0.30,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "very_strict".to_string(),
+        PollutionConfig {
+            min_frequency: 5,
+            window_sizes: vec![5, 6, 7, 8],
+            min_fragment_length: 6,
+            punctuation_ratio: 0.30,
+            utility_threshold: 0.20,
+            full_boundary_bonus: 0.30,
+            edge_boundary_bonus: 0.01,
+            no_boundary_penalty: -0.30,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 7: Focus on boundary detection
-    configs.push(("boundary_focused".to_string(), PollutionConfig {
-        full_boundary_bonus: 0.35,
-        edge_boundary_bonus: 0.08,
-        no_boundary_penalty: -0.35,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "boundary_focused".to_string(),
+        PollutionConfig {
+            full_boundary_bonus: 0.35,
+            edge_boundary_bonus: 0.08,
+            no_boundary_penalty: -0.35,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 8: Lenient (for comparison)
-    configs.push(("lenient".to_string(), PollutionConfig {
-        min_frequency: 1,
-        window_sizes: vec![2, 3, 4, 5, 6, 7, 8],
-        min_fragment_length: 3,
-        punctuation_ratio: 0.65,
-        utility_threshold: 0.05,
-        no_boundary_penalty: -0.05,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "lenient".to_string(),
+        PollutionConfig {
+            min_frequency: 1,
+            window_sizes: vec![2, 3, 4, 5, 6, 7, 8],
+            min_fragment_length: 3,
+            punctuation_ratio: 0.65,
+            utility_threshold: 0.05,
+            no_boundary_penalty: -0.05,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 9: Anti-unicode pollution specific
-    configs.push(("anti_unicode".to_string(), PollutionConfig {
-        min_fragment_length: 5,
-        punctuation_ratio: 0.35,
-        ..PollutionConfig::default()
-    }));
-    
+    configs.push((
+        "anti_unicode".to_string(),
+        PollutionConfig {
+            min_fragment_length: 5,
+            punctuation_ratio: 0.35,
+            ..PollutionConfig::default()
+        },
+    ));
+
     // Variation 10: Balanced optimal (educated guess)
-    configs.push(("balanced_optimal".to_string(), PollutionConfig {
-        min_frequency: 3,
-        window_sizes: vec![3, 4, 5, 6, 7, 8],
-        min_fragment_length: 4,
-        punctuation_ratio: 0.45,
-        utility_threshold: 0.10,
-        full_boundary_bonus: 0.20,
-        edge_boundary_bonus: 0.04,
-        no_boundary_penalty: -0.15,
-        global_corroboration_freq: 4,
-    }));
-    
+    configs.push((
+        "balanced_optimal".to_string(),
+        PollutionConfig {
+            min_frequency: 3,
+            window_sizes: vec![3, 4, 5, 6, 7, 8],
+            min_fragment_length: 4,
+            punctuation_ratio: 0.45,
+            utility_threshold: 0.10,
+            full_boundary_bonus: 0.20,
+            edge_boundary_bonus: 0.04,
+            no_boundary_penalty: -0.15,
+            global_corroboration_freq: 4,
+        },
+    ));
+
     configs
 }
 
@@ -1059,12 +1243,13 @@ pub struct PollutionReport {
 pub fn pollution_report(db_path: &Path) -> Result<PollutionReport, Box<dyn std::error::Error>> {
     let store = MemoryStore::new(db_path.to_str().expect("valid path"));
     let units = store.all_units();
-    
+
     let mut polluted_units = Vec::new();
     let mut pollution_by_category: HashMap<String, usize> = HashMap::new();
-    
+
     for unit in &units {
-        let pollution = detect_pollution(&unit.content, &unit.normalized, unit.level, unit.frequency);
+        let pollution =
+            detect_pollution(&unit.content, &unit.normalized, unit.level, unit.frequency);
         if !pollution.reasons.is_empty() {
             for reason in &pollution.reasons {
                 *pollution_by_category.entry(reason.clone()).or_insert(0) += 1;
@@ -1079,9 +1264,13 @@ pub fn pollution_report(db_path: &Path) -> Result<PollutionReport, Box<dyn std::
             });
         }
     }
-    
-    polluted_units.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    
+
+    polluted_units.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let total_units = units.len();
     let polluted_count = polluted_units.len();
     let pollution_ratio = if total_units > 0 {
@@ -1089,40 +1278,42 @@ pub fn pollution_report(db_path: &Path) -> Result<PollutionReport, Box<dyn std::
     } else {
         0.0
     };
-    
+
     // Generate recommendations
     let mut recommendations = Vec::new();
-    
+
     if pollution_by_category.get("escaped_unicode").unwrap_or(&0) > &5 {
         recommendations.push(
-            "Add unicode escape detection in normalize_window() to reject \\uXXXX patterns".to_string()
+            "Add unicode escape detection in normalize_window() to reject \\uXXXX patterns"
+                .to_string(),
         );
     }
-    
+
     if pollution_by_category.get("outer_punct").unwrap_or(&0) > &10 {
         recommendations.push(
             "Increase min_fragment_length and add outer punctuation stripping in should_reject_fragment()".to_string()
         );
     }
-    
+
     if pollution_by_category.get("edge_trim").unwrap_or(&0) > &5 {
         recommendations.push(
-            "Increase rolling_hash_window_sizes minimum to avoid byte-boundary cuts".to_string()
+            "Increase rolling_hash_window_sizes minimum to avoid byte-boundary cuts".to_string(),
         );
     }
-    
+
     if pollution_by_category.get("urlish").unwrap_or(&0) > &3 {
         recommendations.push(
-            "Add URL/path detection in normalize_window() to reject fragments containing / or :".to_string()
+            "Add URL/path detection in normalize_window() to reject fragments containing / or :"
+                .to_string(),
         );
     }
-    
+
     if pollution_ratio > 0.15 {
         recommendations.push(
             "Overall pollution is high. Consider running config sweep with --sweep to find optimal settings".to_string()
         );
     }
-    
+
     Ok(PollutionReport {
         total_units,
         polluted_units: polluted_count,
@@ -1160,20 +1351,27 @@ pub struct SuggestedFix {
     pub implementation_hint: String,
 }
 
-pub fn analyze_pollution_patterns(test_content: &TestContent) -> Result<PatternAnalysis, Box<dyn std::error::Error>> {
+pub fn analyze_pollution_patterns(
+    test_content: &TestContent,
+) -> Result<PatternAnalysis, Box<dyn std::error::Error>> {
     let mut patterns = Vec::new();
-    
+
     // Pattern 1: Escaped Unicode
     patterns.push(PollutionPattern {
         name: "escaped_unicode".to_string(),
-        frequency: test_content.documents.iter()
+        frequency: test_content
+            .documents
+            .iter()
             .filter(|d| d.category == "escaped_unicode")
             .count(),
         example: "u0259, u00B0, u00E9".to_string(),
-        root_cause: "JSON escape sequences (\\uXXXX) are not filtered during text normalization".to_string(),
-        suggested_fix: "Add regex filter in normalize_window() to detect and reject \\uXXXX patterns".to_string(),
+        root_cause: "JSON escape sequences (\\uXXXX) are not filtered during text normalization"
+            .to_string(),
+        suggested_fix:
+            "Add regex filter in normalize_window() to detect and reject \\uXXXX patterns"
+                .to_string(),
     });
-    
+
     // Pattern 2: Outer Punctuation
     patterns.push(PollutionPattern {
         name: "outer_punct".to_string(),
@@ -1184,7 +1382,7 @@ pub fn analyze_pollution_patterns(test_content: &TestContent) -> Result<PatternA
         root_cause: "Byte-window captures text with trailing/leading punctuation that isn't stripped".to_string(),
         suggested_fix: "Strengthen should_reject_fragment() to reject units with outer punctuation unless full_token_boundary_hits > 0".to_string(),
     });
-    
+
     // Pattern 3: Edge Trimmed
     patterns.push(PollutionPattern {
         name: "edge_trim".to_string(),
@@ -1195,18 +1393,22 @@ pub fn analyze_pollution_patterns(test_content: &TestContent) -> Result<PatternA
         root_cause: "Rolling hash window cuts words at byte boundaries, creating partial words".to_string(),
         suggested_fix: "Increase minimum window size and require full_token_boundary_hits for single-token units".to_string(),
     });
-    
+
     // Pattern 4: URL Fragments
     patterns.push(PollutionPattern {
         name: "url_fragments".to_string(),
-        frequency: test_content.documents.iter()
+        frequency: test_content
+            .documents
+            .iter()
             .filter(|d| d.category == "url_fragments")
             .count(),
         example: "-map.png, api/, v1/".to_string(),
         root_cause: "URLs and paths are processed as regular text, creating fragments".to_string(),
-        suggested_fix: "Add URL detection in normalize_window() and reject fragments matching URL patterns".to_string(),
+        suggested_fix:
+            "Add URL detection in normalize_window() and reject fragments matching URL patterns"
+                .to_string(),
     });
-    
+
     // Generate suggested fixes
     let suggested_fixes = vec![
         SuggestedFix {
@@ -1222,7 +1424,8 @@ if normalized.contains("\\u") || normalized.contains("u0") {
         return None;
     }
 }
-"#.to_string(),
+"#
+            .to_string(),
         },
         SuggestedFix {
             description: "Strengthen outer punctuation rejection".to_string(),
@@ -1246,7 +1449,8 @@ fn should_reject_fragment(stats: &WindowStats, config: &UnitBuilderConfig) -> bo
     
     // ... rest of existing logic
 }
-"#.to_string(),
+"#
+            .to_string(),
         },
         SuggestedFix {
             description: "Add URL fragment detection".to_string(),
@@ -1266,7 +1470,8 @@ if normalized.matches('.').count() > 0 && normalized.len() < 15 {
         return None;
     }
 }
-"#.to_string(),
+"#
+            .to_string(),
         },
         SuggestedFix {
             description: "Increase default minimum window size".to_string(),
@@ -1277,10 +1482,11 @@ if normalized.matches('.').count() > 0 && normalized.len() < 15 {
 layer_2_unit_builder:
   rolling_hash_window_sizes: [3, 4, 5, 6, 7, 8]  # Start from 3 instead of 2
   min_fragment_length: 5  # Increase from 4
-"#.to_string(),
+"#
+            .to_string(),
         },
     ];
-    
+
     Ok(PatternAnalysis {
         patterns,
         suggested_fixes,

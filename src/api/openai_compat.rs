@@ -146,7 +146,7 @@ use crate::api::ApiState;
 // ============================================================================
 
 /// POST /v1/chat/completions
-/// 
+///
 /// OpenAI-compatible chat completions endpoint.
 /// All parameters except messages are ignored in Auto-Mode.
 pub async fn chat_completions(
@@ -178,17 +178,25 @@ pub async fn chat_completions(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let model = request.model.clone().unwrap_or_else(|| "spse-auto".to_string());
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| "spse-auto".to_string());
 
         // Process query first to get content
-        let result = state.engine.process(&request.messages.last().unwrap().content).await;
+        let result = state
+            .engine
+            .process(&request.messages.last().unwrap().content)
+            .await;
         let stream = create_stream(response_id, created, model, result.predicted_text);
-        
-        Ok(Sse::new(stream).keep_alive(
-            axum::response::sse::KeepAlive::new()
-                .interval(std::time::Duration::from_secs(15))
-                .text("ping"),
-        ).into_response())
+
+        Ok(Sse::new(stream)
+            .keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(15))
+                    .text("ping"),
+            )
+            .into_response())
     } else {
         // Non-streaming response
         let response = process_chat_completion(&state.engine, &request).await;
@@ -197,7 +205,7 @@ pub async fn chat_completions(
 }
 
 /// GET /v1/models
-/// 
+///
 /// List available models (all map to SPSE Auto-Mode).
 pub async fn list_models() -> impl IntoResponse {
     let models = ModelsResponse {
@@ -241,7 +249,7 @@ async fn process_chat_completion(
 
     // Check if retrieval is explicitly enabled for this request
     let retrieval_enabled = request.retrieval_enabled.unwrap_or(false);
-    
+
     // Process through engine with retrieval override
     // Note: In Auto-Mode, temperature, top_p, etc. are ignored
     let result = if retrieval_enabled {
@@ -256,10 +264,15 @@ async fn process_chat_completion(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let model = request.model.clone().unwrap_or_else(|| "spse-auto".to_string());
+    let model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| "spse-auto".to_string());
 
     // Estimate token usage (rough approximation)
-    let prompt_tokens: usize = request.messages.iter()
+    let prompt_tokens: usize = request
+        .messages
+        .iter()
         .map(|m| m.content.split_whitespace().count())
         .sum();
     let completion_tokens = result.predicted_text.split_whitespace().count();
@@ -299,50 +312,51 @@ fn create_stream(
     // Split content into chunks for streaming simulation
     let words: Vec<&str> = content.split_whitespace().collect();
     let chunk_size = (words.len() / 10).max(1);
-    
+
     let chunks: Vec<String> = words
         .chunks(chunk_size)
         .map(|chunk| chunk.join(" "))
         .collect();
 
     let num_chunks = chunks.len();
-    let stream = futures_util::stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
-        let delta = if i == 0 {
-            Delta {
-                role: Some("assistant".to_string()),
-                content: Some(chunk + " "),
-            }
-        } else {
-            Delta {
-                role: None,
-                content: Some(chunk + " "),
-            }
-        };
+    let stream =
+        futures_util::stream::iter(chunks.into_iter().enumerate().map(move |(i, chunk)| {
+            let delta = if i == 0 {
+                Delta {
+                    role: Some("assistant".to_string()),
+                    content: Some(chunk + " "),
+                }
+            } else {
+                Delta {
+                    role: None,
+                    content: Some(chunk + " "),
+                }
+            };
 
-        let finish_reason = if i == num_chunks - 1 {
-            Some("stop".to_string())
-        } else {
-            None
-        };
+            let finish_reason = if i == num_chunks - 1 {
+                Some("stop".to_string())
+            } else {
+                None
+            };
 
-        let chunk = ChatCompletionChunk {
-            id: response_id.clone(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.clone(),
-            choices: vec![StreamChoice {
-                index: 0,
-                delta,
-                finish_reason,
-            }],
-        };
+            let chunk = ChatCompletionChunk {
+                id: response_id.clone(),
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model: model.clone(),
+                choices: vec![StreamChoice {
+                    index: 0,
+                    delta,
+                    finish_reason,
+                }],
+            };
 
-        Ok(Event::default().json_data(chunk).unwrap())
-    }));
+            Ok(Event::default().json_data(chunk).unwrap())
+        }));
 
     // Add [DONE] marker at end
     let done_stream = futures_util::stream::once(async { Ok(Event::default().data("[DONE]")) });
-    
+
     futures_util::stream::select(stream, done_stream)
 }
 

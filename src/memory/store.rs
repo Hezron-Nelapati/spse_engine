@@ -5,8 +5,8 @@ use crate::spatial_index::{force_directed_layout, SpatialGrid};
 use crate::types::{
     ActivatedUnit, CandidateStatus, ChannelIsolationReport, ChannelIsolationViolation,
     DatabaseHealthMetrics, DatabaseMaturityStage, FeedbackEvent, GovernanceReport,
-    IsolationViolationType, Link, MemoryChannel, MemoryType, PollutionFinding,
-    PrunedUnitReference, SequenceState, SourceKind, Unit, UnitCandidate, UnitHierarchy, UnitLevel,
+    IsolationViolationType, Link, MemoryChannel, MemoryType, PollutionFinding, PrunedUnitReference,
+    SequenceState, SourceKind, Unit, UnitCandidate, UnitHierarchy, UnitLevel,
 };
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
@@ -89,7 +89,7 @@ pub struct MemoryStore {
     intent_channel_core_promotion_blocked: bool,
     semantic_map: SemanticMapConfig,
     /// Process anchors: reasoning patterns that should never be pruned
-    process_anchors: HashMap<u64, Uuid>,  // structure_hash -> unit_id
+    process_anchors: HashMap<u64, Uuid>, // structure_hash -> unit_id
     /// Reasoning pattern index for retrieval
     reasoning_index: HashMap<crate::types::ReasoningType, HashSet<Uuid>>,
     bloom_filter: UnitBloomFilter,
@@ -109,8 +109,8 @@ pub struct MemoryStore {
     classification_patterns: HashMap<Uuid, crate::classification::ClassificationPattern>,
     classification_by_signature: HashMap<String, Uuid>,
     // Nearest Centroid Classifier: per-intent and per-tone accumulated feature vectors
-    intent_centroids: HashMap<crate::types::IntentKind, (Vec<f32>, u64)>,  // (sum, count)
-    tone_centroids: HashMap<crate::types::ToneKind, (Vec<f32>, u64)>,      // (sum, count)
+    intent_centroids: HashMap<crate::types::IntentKind, (Vec<f32>, u64)>, // (sum, count)
+    tone_centroids: HashMap<crate::types::ToneKind, (Vec<f32>, u64)>,     // (sum, count)
 }
 
 #[derive(Default)]
@@ -203,14 +203,29 @@ impl MemorySnapshot {
         if self.units.len() <= limit {
             return self.units.clone();
         }
-        use std::collections::BinaryHeap;
         use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
         struct Scored(Arc<Unit>);
-        impl PartialEq for Scored { fn eq(&self, other: &Self) -> bool { self.0.utility_score == other.0.utility_score } }
+        impl PartialEq for Scored {
+            fn eq(&self, other: &Self) -> bool {
+                self.0.utility_score == other.0.utility_score
+            }
+        }
         impl Eq for Scored {}
         // Min-heap: reverse ordering so smallest is at top
-        impl PartialOrd for Scored { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) } }
-        impl Ord for Scored { fn cmp(&self, other: &Self) -> Ordering { self.0.utility_score.partial_cmp(&other.0.utility_score).unwrap_or(Ordering::Equal) } }
+        impl PartialOrd for Scored {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Scored {
+            fn cmp(&self, other: &Self) -> Ordering {
+                self.0
+                    .utility_score
+                    .partial_cmp(&other.0.utility_score)
+                    .unwrap_or(Ordering::Equal)
+            }
+        }
 
         let mut heap = BinaryHeap::with_capacity(limit + 1);
         for unit in &self.units {
@@ -220,7 +235,11 @@ impl MemorySnapshot {
             }
         }
         let mut result: Vec<Arc<Unit>> = heap.into_iter().map(|s| s.0).collect();
-        result.sort_by(|a, b| b.utility_score.partial_cmp(&a.utility_score).unwrap_or(Ordering::Equal));
+        result.sort_by(|a, b| {
+            b.utility_score
+                .partial_cmp(&a.utility_score)
+                .unwrap_or(Ordering::Equal)
+        });
         result
     }
 
@@ -377,7 +396,9 @@ impl MemoryStore {
             }
             // Reconstruct classification patterns from pattern-type units
             if unit.content.starts_with("pattern:") {
-                if let Some(pattern) = crate::classification::ClassificationPattern::from_unit(&unit) {
+                if let Some(pattern) =
+                    crate::classification::ClassificationPattern::from_unit(&unit)
+                {
                     let sig_hash = pattern.signature.signature_hash().to_string();
                     classification_by_signature.insert(sig_hash, pattern.unit_id);
                     classification_patterns.insert(pattern.unit_id, pattern);
@@ -493,7 +514,8 @@ impl MemoryStore {
         self.pollution_overlap_threshold = governance.pollution_overlap_threshold;
         self.pollution_quality_margin = governance.pollution_quality_margin;
         self.pollution_audit_limit = governance.pollution_audit_limit;
-        self.intent_channel_core_promotion_blocked = governance.intent_channel_core_promotion_blocked;
+        self.intent_channel_core_promotion_blocked =
+            governance.intent_channel_core_promotion_blocked;
     }
 
     pub fn apply_semantic_map_config(&mut self, semantic_map: &SemanticMapConfig) {
@@ -572,41 +594,55 @@ impl MemoryStore {
     // === Classification Pattern Methods ===
 
     /// Store a classification pattern in Intent memory channel.
-    pub fn store_classification_pattern(&mut self, pattern: crate::classification::ClassificationPattern) {
+    pub fn store_classification_pattern(
+        &mut self,
+        pattern: crate::classification::ClassificationPattern,
+    ) {
         let sig_hash = pattern.signature.signature_hash().to_string();
         let unit = pattern.to_unit();
-        
+
         // Store pattern
-        self.classification_patterns.insert(pattern.unit_id, pattern.clone());
-        self.classification_by_signature.insert(sig_hash, pattern.unit_id);
-        
+        self.classification_patterns
+            .insert(pattern.unit_id, pattern.clone());
+        self.classification_by_signature
+            .insert(sig_hash, pattern.unit_id);
+
         // Store unit in cache and channel index
         self.cache.insert(unit.id, Arc::new(unit.clone()));
         self.content_index.insert(unit.normalized.clone(), unit.id);
         for channel in &unit.memory_channels {
-            self.channel_index.entry(*channel).or_default().insert(unit.id);
+            self.channel_index
+                .entry(*channel)
+                .or_default()
+                .insert(unit.id);
         }
-        
+
         // Persist to database (deferred in training mode)
         self.persist(&unit);
     }
 
     /// Get a classification pattern by ID.
-    pub fn get_classification_pattern(&self, id: uuid::Uuid) -> Option<crate::classification::ClassificationPattern> {
+    pub fn get_classification_pattern(
+        &self,
+        id: uuid::Uuid,
+    ) -> Option<crate::classification::ClassificationPattern> {
         self.classification_patterns.get(&id).cloned()
     }
 
     /// Update an existing classification pattern.
-    pub fn update_classification_pattern(&mut self, pattern: crate::classification::ClassificationPattern) {
+    pub fn update_classification_pattern(
+        &mut self,
+        pattern: crate::classification::ClassificationPattern,
+    ) {
         if let Some(existing) = self.classification_patterns.get_mut(&pattern.unit_id) {
             *existing = pattern.clone();
-            
+
             // Update unit in cache
             let unit = pattern.to_unit();
             if let Some(cached_unit) = self.cache.get_mut(&pattern.unit_id) {
                 *cached_unit = Arc::new(unit.clone());
             }
-            
+
             // Persist to database (deferred in training mode)
             self.persist(&unit);
         }
@@ -641,14 +677,20 @@ impl MemoryStore {
         feature_vector: &[f32],
     ) {
         // Intent centroid
-        let (sum, count) = self.intent_centroids.entry(intent).or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
+        let (sum, count) = self
+            .intent_centroids
+            .entry(intent)
+            .or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
         for (s, v) in sum.iter_mut().zip(feature_vector.iter()) {
             *s += v;
         }
         *count += 1;
 
         // Tone centroid
-        let (sum, count) = self.tone_centroids.entry(tone).or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
+        let (sum, count) = self
+            .tone_centroids
+            .entry(tone)
+            .or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
         for (s, v) in sum.iter_mut().zip(feature_vector.iter()) {
             *s += v;
         }
@@ -657,18 +699,24 @@ impl MemoryStore {
 
     /// Get all intent centroids as (IntentKind, mean_feature_vector) pairs.
     pub fn intent_centroids(&self) -> Vec<(crate::types::IntentKind, Vec<f32>)> {
-        self.intent_centroids.iter().map(|(intent, (sum, count))| {
-            let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
-            (*intent, mean)
-        }).collect()
+        self.intent_centroids
+            .iter()
+            .map(|(intent, (sum, count))| {
+                let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
+                (*intent, mean)
+            })
+            .collect()
     }
 
     /// Get all tone centroids as (ToneKind, mean_feature_vector) pairs.
     pub fn tone_centroids(&self) -> Vec<(crate::types::ToneKind, Vec<f32>)> {
-        self.tone_centroids.iter().map(|(tone, (sum, count))| {
-            let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
-            (*tone, mean)
-        }).collect()
+        self.tone_centroids
+            .iter()
+            .map(|(tone, (sum, count))| {
+                let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
+                (*tone, mean)
+            })
+            .collect()
     }
 
     /// Rebuild centroids from all loaded classification patterns.
@@ -711,7 +759,7 @@ impl MemoryStore {
     pub fn register_process_anchor(&mut self, structure_hash: u64, unit_id: Uuid) {
         self.process_anchors.insert(structure_hash, unit_id);
     }
-    
+
     /// Mark a unit as a process unit (reasoning step).
     /// Process units are filtered by reasoning_patterns_for_query.
     pub fn mark_as_process_unit(&mut self, unit_id: Uuid) {
@@ -720,7 +768,7 @@ impl MemoryStore {
             unit.is_process_unit = true;
         }
     }
-    
+
     /// Check if a structure hash is a process anchor
     pub fn is_process_anchor(&self, structure_hash: u64) -> bool {
         self.process_anchors.contains_key(&structure_hash)
@@ -771,8 +819,8 @@ impl MemoryStore {
         }
 
         // Get candidate unit IDs from reasoning index if type hint provided
-        let type_filtered_ids: Option<HashSet<Uuid>> = reasoning_type_hint
-            .and_then(|rt| self.reasoning_index.get(&rt).cloned());
+        let type_filtered_ids: Option<HashSet<Uuid>> =
+            reasoning_type_hint.and_then(|rt| self.reasoning_index.get(&rt).cloned());
 
         // Score process units
         let mut scored: Vec<(Uuid, String, f32, crate::types::ReasoningType, bool)> = self
@@ -787,11 +835,12 @@ impl MemoryStore {
             })
             .filter_map(|unit| {
                 let overlap = lexical_overlap_score(&query_terms, &normalized_terms(&unit.content));
-                let substring = if query.contains(&unit.normalized) || unit.normalized.contains(query) {
-                    0.3
-                } else {
-                    0.0
-                };
+                let substring =
+                    if query.contains(&unit.normalized) || unit.normalized.contains(query) {
+                        0.3
+                    } else {
+                        0.0
+                    };
                 let score = (0.5 * overlap) + substring + (0.2 * unit.salience_score);
                 if score > 0.1 {
                     // Infer reasoning type from content heuristics (simplified)
@@ -801,7 +850,13 @@ impl MemoryStore {
                         .find(|(_, ids)| ids.contains(&unit.id))
                         .map(|(rt, _)| *rt)
                         .unwrap_or_default();
-                    Some((unit.id, unit.content.clone(), score, reasoning_type, unit.anchor_status))
+                    Some((
+                        unit.id,
+                        unit.content.clone(),
+                        score,
+                        reasoning_type,
+                        unit.anchor_status,
+                    ))
                 } else {
                     None
                 }
@@ -813,13 +868,15 @@ impl MemoryStore {
 
         scored
             .into_iter()
-            .map(|(unit_id, content, similarity, reasoning_type, is_anchor)| ReasoningPatternMatch {
-                unit_id,
-                content,
-                similarity,
-                reasoning_type,
-                is_anchor,
-            })
+            .map(
+                |(unit_id, content, similarity, reasoning_type, is_anchor)| ReasoningPatternMatch {
+                    unit_id,
+                    content,
+                    similarity,
+                    reasoning_type,
+                    is_anchor,
+                },
+            )
             .collect()
     }
 
@@ -894,7 +951,7 @@ impl MemoryStore {
     /// Returns a report of any isolation violations detected.
     pub fn validate_channel_isolation(&self) -> ChannelIsolationReport {
         let mut report = ChannelIsolationReport::default();
-        
+
         // Get all unit IDs across all channels
         let main_ids: HashSet<Uuid> = self
             .channel_index
@@ -924,34 +981,35 @@ impl MemoryStore {
             report.violations.push(ChannelIsolationViolation {
                 violation_type: IsolationViolationType::IntentNotInMain,
                 unit_ids: intent_not_in_main,
-                description: "Intent channel contains units not present in Main channel".to_string(),
+                description: "Intent channel contains units not present in Main channel"
+                    .to_string(),
             });
         }
 
         // Verify Reasoning units are also in Main
-        let reasoning_not_in_main: Vec<Uuid> = reasoning_ids.difference(&main_ids).copied().collect();
+        let reasoning_not_in_main: Vec<Uuid> =
+            reasoning_ids.difference(&main_ids).copied().collect();
         if !reasoning_not_in_main.is_empty() {
             report.violations.push(ChannelIsolationViolation {
                 violation_type: IsolationViolationType::ReasoningNotInMain,
                 unit_ids: reasoning_not_in_main,
-                description: "Reasoning channel contains units not present in Main channel".to_string(),
+                description: "Reasoning channel contains units not present in Main channel"
+                    .to_string(),
             });
         }
 
         // Check for content leakage between Intent and Reasoning channels
         // These should be independent - a unit shouldn't typically be in both
-        let intent_reasoning_overlap: Vec<Uuid> = intent_ids
-            .intersection(&reasoning_ids)
-            .copied()
-            .collect();
-        
+        let intent_reasoning_overlap: Vec<Uuid> =
+            intent_ids.intersection(&reasoning_ids).copied().collect();
+
         // Allow some overlap but flag excessive overlap
         let overlap_ratio = if intent_ids.is_empty() || reasoning_ids.is_empty() {
             0.0
         } else {
             intent_reasoning_overlap.len() as f32 / intent_ids.len().max(reasoning_ids.len()) as f32
         };
-        
+
         if overlap_ratio > 0.3 {
             report.violations.push(ChannelIsolationViolation {
                 violation_type: IsolationViolationType::ExcessiveIntentReasoningOverlap,
@@ -1194,7 +1252,11 @@ impl MemoryStore {
         }
 
         // Gate 2: Reject content that is purely numeric or single-char repetition
-        if content_len > 1 && normalized.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
+        if content_len > 1
+            && normalized
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+        {
             return false;
         }
 
@@ -1218,7 +1280,8 @@ impl MemoryStore {
                 return false;
             }
             // Reject content that looks like HTML/script artifacts
-            if normalized.contains("<script") || normalized.contains("javascript:")
+            if normalized.contains("<script")
+                || normalized.contains("javascript:")
                 || normalized.contains("cookie") && normalized.contains("accept")
             {
                 return false;
@@ -1378,13 +1441,18 @@ impl MemoryStore {
                 let existing = Arc::make_mut(existing_arc);
                 existing.frequency += activation.frequency.max(1);
                 // Apply utility boost for StagingEpisodic units
-                existing.utility_score = ((existing.utility_score * 0.7) + (activation.utility_score * 0.3)).max(utility_boost);
+                existing.utility_score = ((existing.utility_score * 0.7)
+                    + (activation.utility_score * 0.3))
+                    .max(utility_boost);
                 existing.salience_score =
                     (existing.salience_score * 0.6) + (activation.salience * 0.4);
                 existing.confidence = (existing.confidence * 0.7) + (activation.confidence * 0.3);
                 existing.last_seen_at = Utc::now();
                 existing.trust_score = (existing.trust_score + trust_delta).min(1.0);
-                if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument) {
+                if matches!(
+                    source,
+                    SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument
+                ) {
                     existing.corroboration_count += 1;
                 }
                 if promote_to_core {
@@ -1434,7 +1502,10 @@ impl MemoryStore {
             MemoryType::Episodic
         };
         unit.memory_channels = normalized_channels(memory_channels);
-        if matches!(source, SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument) {
+        if matches!(
+            source,
+            SourceKind::Retrieval | SourceKind::TrainingUrl | SourceKind::TrainingDocument
+        ) {
             unit.corroboration_count = 1;
         }
         Self::record_context(&mut unit, context_summary);
@@ -1595,7 +1666,10 @@ impl MemoryStore {
 
     /// Lightweight maintenance: pruning, promotion, decay — no SQLite writes, no layout, no snapshot.
     /// Suitable for inline calls during inference.
-    pub fn run_maintenance_lightweight(&mut self, governance: &GovernanceConfig) -> GovernanceReport {
+    pub fn run_maintenance_lightweight(
+        &mut self,
+        governance: &GovernanceConfig,
+    ) -> GovernanceReport {
         self.apply_governance(governance);
         let health = self.database_health();
         let prune_utility_threshold = self.prune_threshold_for(health.maturity_stage);
@@ -1606,7 +1680,9 @@ impl MemoryStore {
 
         for unit_arc in self.cache.values_mut() {
             let unit = Arc::make_mut(unit_arc);
-            if unit.anchor_status { anchors_protected += 1; }
+            if unit.anchor_status {
+                anchors_protected += 1;
+            }
             if unit.frequency >= self.core_promotion_threshold
                 || unit.corroboration_count >= self.promotion_min_corroborations
                 || unit.anchor_status
@@ -1694,10 +1770,13 @@ impl MemoryStore {
                 (Utc::now() - unit.created_at).num_hours().max(0) < anchor_grace_hours;
 
             // Never prune process anchors
-            let is_process_anchor = if let Some(_hash) = unit.is_process_unit.then(|| unit.content.as_str()).and_then(|_| {
-                // For simplicity here, we assume any process_unit in the process_anchors by ID is protected
-                Some(unit.id)
-            }) {
+            let is_process_anchor = if let Some(_hash) = unit
+                .is_process_unit
+                .then(|| unit.content.as_str())
+                .and_then(|_| {
+                    // For simplicity here, we assume any process_unit in the process_anchors by ID is protected
+                    Some(unit.id)
+                }) {
                 self.process_anchors.values().any(|&id| id == unit.id)
             } else {
                 false
@@ -1751,7 +1830,11 @@ impl MemoryStore {
 
         self.flush_pending_writes();
         let _ = self.db.batch_upsert_units(
-            &self.cache.values().map(|u| (**u).clone()).collect::<Vec<_>>(),
+            &self
+                .cache
+                .values()
+                .map(|u| (**u).clone())
+                .collect::<Vec<_>>(),
         );
 
         let snapshot_path = self
@@ -1816,7 +1899,9 @@ impl MemoryStore {
             .values()
             .filter(|unit| {
                 let is_process_anchor = self.process_anchors.values().any(|&id| id == unit.id);
-                !unit.anchor_status && !is_process_anchor && unit.memory_type == MemoryType::Episodic
+                !unit.anchor_status
+                    && !is_process_anchor
+                    && unit.memory_type == MemoryType::Episodic
             })
             .map(|unit| {
                 (
@@ -2091,7 +2176,9 @@ impl MemoryStore {
                     if source.links.iter().all(|existing| {
                         existing.target_id != target_id || existing.edge_type != link.edge_type
                     }) {
-                        source.links.push(Link::new(target_id, link.edge_type, link.weight));
+                        source
+                            .links
+                            .push(Link::new(target_id, link.edge_type, link.weight));
                     }
                 }
                 persisted = Some(source.clone());
@@ -2183,7 +2270,9 @@ impl MemoryStore {
                         if source.links.iter().all(|existing| {
                             existing.target_id != target_id || existing.edge_type != link.edge_type
                         }) {
-                            source.links.push(Link::new(target_id, link.edge_type, link.weight));
+                            source
+                                .links
+                                .push(Link::new(target_id, link.edge_type, link.weight));
                         }
                     }
                     persisted = Some(source.clone());
@@ -2204,7 +2293,10 @@ impl MemoryStore {
                 break;
             }
             for candidate in &candidates {
-                if self.content_index.contains_key(candidate.normalized.as_str()) {
+                if self
+                    .content_index
+                    .contains_key(candidate.normalized.as_str())
+                {
                     report.candidate_promotions += 1;
                     self.merge_candidate_into_active_unit(candidate);
                     continue;
@@ -2441,7 +2533,8 @@ impl MemoryStore {
                 }
                 seeded
             });
-        if candidate.id != incoming.id || candidate.observation_count != incoming.observation_count {
+        if candidate.id != incoming.id || candidate.observation_count != incoming.observation_count
+        {
             candidate.observation_count += incoming.observation_count.max(1);
             candidate.utility_score =
                 (candidate.utility_score * 0.75) + (incoming.utility_score * 0.25);
@@ -2457,11 +2550,14 @@ impl MemoryStore {
             };
             candidate.level = incoming.level;
             merge_channels(&mut candidate.memory_channels, &incoming.memory_channels);
-            if candidate.status != CandidateStatus::Active && candidate.observation_count >= threshold
+            if candidate.status != CandidateStatus::Active
+                && candidate.observation_count >= threshold
             {
                 candidate.status = CandidateStatus::Validated;
             }
-        } else if candidate.status != CandidateStatus::Active && candidate.observation_count >= threshold {
+        } else if candidate.status != CandidateStatus::Active
+            && candidate.observation_count >= threshold
+        {
             candidate.status = CandidateStatus::Validated;
         }
         self.candidate_id_index
@@ -2478,9 +2574,8 @@ impl MemoryStore {
         let penalty = self.pollution_penalty_factor;
         canonical.utility_score =
             (canonical.utility_score * (1.0 - penalty)) + (polluted.utility_score * penalty);
-        canonical.salience_score =
-            (canonical.salience_score * (1.0 - penalty * 1.2).max(0.0))
-                + (polluted.salience_score * (penalty * 1.2).min(1.0));
+        canonical.salience_score = (canonical.salience_score * (1.0 - penalty * 1.2).max(0.0))
+            + (polluted.salience_score * (penalty * 1.2).min(1.0));
         canonical.confidence = canonical.confidence.max(polluted.confidence);
         canonical.trust_score = canonical.trust_score.max(polluted.trust_score);
         canonical.corroboration_count += polluted.corroboration_count;
@@ -3350,7 +3445,8 @@ fn pollution_findings_for_records(
                 // Similarity gate: require minimum content similarity for multi-word content.
                 // Single-word variants are already validated by overlap_threshold above,
                 // and word-level Jaccard is meaningless for single tokens.
-                let is_multi_word = polluted.normalized.contains(' ') || canonical.normalized.contains(' ');
+                let is_multi_word =
+                    polluted.normalized.contains(' ') || canonical.normalized.contains(' ');
                 if is_multi_word {
                     let similarity = crate::common::similarity::SimilarityUtils::jaccard_similarity(
                         &polluted.normalized,
@@ -3424,7 +3520,10 @@ fn trim_outer_non_alphanumeric(text: &str) -> String {
 }
 
 fn is_edge_trim_reason(reason: &str) -> bool {
-    matches!(reason, "leading_fragment_variant" | "trailing_fragment_variant")
+    matches!(
+        reason,
+        "leading_fragment_variant" | "trailing_fragment_variant"
+    )
 }
 
 fn is_clean_alphanumeric_word(record: &StoredRecord) -> bool {
@@ -3503,20 +3602,18 @@ fn candidate_status_rank(status: CandidateStatus) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        pollution_findings_for_records, MemoryStore, StoredRecord, StoredRecordKind,
-    };
-    use std::sync::Arc;
-    use crate::config::{GovernanceConfig, UnitBuilderConfig};
+    use super::{pollution_findings_for_records, MemoryStore, StoredRecord, StoredRecordKind};
     use crate::classification::builder::UnitBuilder;
     use crate::classification::hierarchy::HierarchicalUnitOrganizer;
     use crate::classification::input;
+    use crate::config::{GovernanceConfig, UnitBuilderConfig};
     use crate::types::{
         ActivatedUnit, DatabaseMaturityStage, FeedbackEvent, MemoryChannel, MemoryType, SourceKind,
         Unit, UnitHierarchy, UnitLevel,
     };
     use chrono::Utc;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
@@ -3710,9 +3807,11 @@ mod tests {
 
     #[test]
     fn should_prune_unit_protects_process_anchors() {
-        let db_path = std::env::temp_dir().join(format!("spse_process_anchor_{}.db", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("spse_process_anchor_{}.db", Uuid::new_v4()));
         let governance = GovernanceConfig::default();
-        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+        let mut store =
+            MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
 
         // Create a process unit
         let unit_id = Uuid::new_v4();
@@ -3748,7 +3847,8 @@ mod tests {
     fn should_prune_unit_allows_normal_pruning() {
         let db_path = std::env::temp_dir().join(format!("spse_normal_prune_{}.db", Uuid::new_v4()));
         let governance = GovernanceConfig::default();
-        let store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+        let store =
+            MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
 
         // Create a normal unit that should be pruned
         let unit = Unit {
@@ -3776,9 +3876,11 @@ mod tests {
 
     #[test]
     fn reasoning_patterns_for_query_returns_matching_patterns() {
-        let db_path = std::env::temp_dir().join(format!("spse_reasoning_pattern_{}.db", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("spse_reasoning_pattern_{}.db", Uuid::new_v4()));
         let governance = GovernanceConfig::default();
-        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+        let mut store =
+            MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
 
         // Create and register a reasoning pattern
         let pattern_id = Uuid::new_v4();
@@ -3802,16 +3904,21 @@ mod tests {
 
         // Query for patterns
         let matches = store.reasoning_patterns_for_query("analyze the problem", None, 5);
-        assert!(!matches.is_empty(), "Should find matching reasoning pattern");
+        assert!(
+            !matches.is_empty(),
+            "Should find matching reasoning pattern"
+        );
         assert_eq!(matches[0].unit_id, pattern_id);
         assert!(matches[0].similarity > 0.0);
     }
 
     #[test]
     fn register_reasoning_pattern_indexes_by_type() {
-        let db_path = std::env::temp_dir().join(format!("spse_reasoning_index_{}.db", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("spse_reasoning_index_{}.db", Uuid::new_v4()));
         let governance = GovernanceConfig::default();
-        let mut store = MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
+        let mut store =
+            MemoryStore::new_with_governance(db_path.to_str().expect("db path"), &governance);
 
         let pattern_id = Uuid::new_v4();
         store.register_reasoning_pattern(crate::types::ReasoningType::Mathematical, pattern_id);

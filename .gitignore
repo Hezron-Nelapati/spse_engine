@@ -90,3 +90,6 @@ zero_shot_report.json
 datasets/*
 .spse_cache/*
 training_jobs/*
+
+# Claude workspace
+.claude/

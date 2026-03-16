@@ -3,10 +3,7 @@
 //! Handles GPU device discovery, capability detection, and resource management.
 
 use std::sync::Arc;
-use wgpu::{
-    Device, Instance,
-    PowerPreference, Queue, RequestAdapterOptions, Backends,
-};
+use wgpu::{Backends, Device, Instance, PowerPreference, Queue, RequestAdapterOptions};
 
 /// GPU device wrapper with capabilities info
 pub struct GpuDevice {
@@ -111,7 +108,7 @@ impl GpuDevice {
 
         // Get adapter info
         let info = adapter.get_info();
-        
+
         // Request device with appropriate limits (wgpu v24 API)
         let (device, queue) = adapter
             .request_device(
@@ -127,7 +124,7 @@ impl GpuDevice {
             .map_err(|e| format!("Failed to create GPU device: {}", e))?;
 
         let limits = device.limits();
-        
+
         let capabilities = GpuCapabilities {
             name: info.name.clone(),
             backend: format!("{:?}", info.backend),
@@ -220,8 +217,12 @@ fn optimal_workgroup_size(info: &wgpu::AdapterInfo) -> u32 {
     // Most GPUs work well with 256 threads per workgroup
     // Apple Silicon prefers 32 or 64
     // NVIDIA/AMD typically prefer 256 or 512
-    
-    if info.name.contains("Apple") || info.name.contains("M1") || info.name.contains("M2") || info.name.contains("M3") {
+
+    if info.name.contains("Apple")
+        || info.name.contains("M1")
+        || info.name.contains("M2")
+        || info.name.contains("M3")
+    {
         64
     } else if info.backend == wgpu::Backend::Metal {
         64
