@@ -77,7 +77,7 @@ The engine's 21 internal processing layers are organized into three functional s
 
 | System | Function | Core Mechanism | Layer Mapping |
 |--------|----------|----------------|---------------|
-| **Classification** | Identify *what* the input means and *whether* external help is needed | Hybrid heuristic classification reinforced by memory-backed intent channels | L1, L2, L3, L9, L10, L19 |
+| **Classification** | Identify *what* the input means and *whether* external help is needed | Memory-backed calculation-based classification reinforced by intent channels | L1, L2, L3, L9, L10, L19 |
 | **Reasoning** | Determine the response strategy by managing memory, evidence, and truth | Dual-memory governance (Core vs. Episodic), trust-aware evidence merging, adaptive candidate scoring | L4, L7, L8, L11, L12, L13, L14, L18, L21 |
 | **Predictive** | Navigate a Word Graph to select the next word via 3-tier spatial graph walk | Directed weighted word graph in 3D space; edges (roads) + highways; near → far → pathfinding through function-word hubs | L5, L6, L15, L16, L17 |
 
@@ -110,7 +110,7 @@ pub mod proto            // Protobuf definitions (api.proto)
 pub mod region_index     // Predictive System: regional spatial index
 pub mod scheduler        // Priority-based work scheduling (4 priorities)
 pub mod seed             // Dataset generators (dialogue, entity, dryrun)
-pub mod spatial_index    // Predictive System: SpatialGrid for O(log N) queries
+pub mod spatial_index    // Predictive System: SpatialGrid for O(1) cell queries
 pub mod stress_drill_lib // Stress testing drills
 pub mod crash_drill_lib  // Crash resilience drills
 pub mod telemetry        // Cross-cutting: worker, hot store, latency, trace
@@ -292,7 +292,7 @@ Total:
 2. L2 discovers dynamic units via rolling hash → BuildOutput
 3. L3 organizes hierarchy (Char..Pattern levels) → UnitHierarchy
 4. Units matched against Intent Memory Channel
-5. Hybrid score (Heuristic + Memory) assigns:
+5. Hybrid score (Structural + Memory) assigns:
    - Intent Label (e.g., plan, critique, fact-check)
    - Tone/Urgency Score
    - Retrieval Need flag
@@ -483,7 +483,7 @@ The Classification System specifically utilizes the **Intent memory channel** to
 |---------|---------|-----------------|
 | `Intent` | Classification patterns | Blocked from Core promotion (`intent_channel_core_promotion_blocked: true`) |
 
-Classification patterns stored here are queried via spatial grid for O(log N) retrieval. Feedback from the Reasoning System (L18) reinforces or weakens patterns by adjusting `success_count` / `failure_count`.
+Classification patterns stored here are queried via spatial grid for O(1) cell retrieval. Feedback from the Reasoning System (L18) reinforces or weakens patterns by adjusting `success_count` / `failure_count`.
 
 ### 3.8 Efficiency Optimizations
 
@@ -3371,9 +3371,8 @@ spse_engine/
 │   ├── open_sources.rs            # Internal dataset catalog (no external open sources)
 │   ├── persistence.rs             # SQLite persistence layer
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
-│   ├── spatial_index.rs           # SpatialGrid for O(log N) queries
+│   ├── spatial_index.rs           # SpatialGrid for O(1) cell queries
 │   ├── region_index.rs            # Regional spatial index
-│   ├── training/                  # Training pipeline (see training/ above)
 │   ├── drill_lib.rs               # Drill framework
 │   ├── stress_drill_lib.rs        # Stress testing drills
 │   └── crash_drill_lib.rs         # Crash resilience drills

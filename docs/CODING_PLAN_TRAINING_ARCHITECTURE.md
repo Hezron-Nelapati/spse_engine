@@ -71,8 +71,8 @@ Phase 11 (Hardening + Robustness + Edge Cases) → depends on Phases 2, 4, 5, 10
 | 8. Sweep Harness | 1 | 1 | ~400 | P1 |
 | 9. Integration Tests | 1 | 1 | ~600 | P1 |
 | 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
-| 11. Hardening + Edge Cases | 5 | 12 | ~1900 | P0–P2 |
-| **Total** | **17** | **~32** | **~9520** | |
+| 11. Hardening + Edge Cases | 6 | 12 | ~1900 | P0–P2 |
+| **Total** | **16** | **~22** | **~9520** | |
 
 ---
 
@@ -114,11 +114,11 @@ pub struct ReasoningLoss {
 /// Loss function result for Predictive System training
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PredictiveLoss {
-    pub l_next_unit: f32,       // -mean(log(P(correct | candidates)))
+    pub l_next_word: f32,       // -mean(log(P(correct_word | walked_edges)))
     pub l_spatial_energy: f32,  // layout_energy / num_edges
-    pub l_alignment: f32,       // mean(max(0, anchor_trust - selected_trust))
-    pub l_pred: f32,            // l_next_unit + 0.1 * l_spatial_energy + 0.2 * l_alignment
-    pub next_unit_accuracy: f32,
+    pub l_edge_quality: f32,    // mean(edge_weight_variance_per_node)
+    pub l_pred: f32,            // l_next_word + 0.1 * l_spatial_energy + 0.2 * l_edge_quality
+    pub next_word_accuracy: f32,
     pub sequences_trained: usize,
     pub steps_trained: usize,
 }
@@ -1905,7 +1905,7 @@ self.feedback_controller.track_walked_edges(walked_edges);
 
 ## 12. Phase 11: Hardening Improvements
 
-Five targeted improvements to harden Classification accuracy, Reasoning consistency, Predictive stability, on-the-fly learning quality, and cross-system evolution. See Architecture §3.9, §4.3.1, §5.9, §5.10, §4.9 Ext 2b, §6.1.
+Eleven targeted improvements to harden Classification accuracy, Reasoning consistency, Predictive stability, on-the-fly learning quality, and cross-system evolution. See Architecture §3.9, §4.3.1, §5.9, §5.10, §4.9 Ext 2b, §6.1.
 
 ### Task 11A: Semantic Anchor Probes (`src/classification/signature.rs` + new file)
 
@@ -3044,7 +3044,7 @@ All new config fields with their defaults:
 
 ## 14. File Manifest
 
-### New Files (17)
+### New Files (16)
 
 | File | Phase | Purpose |
 |------|-------|---------|
@@ -3065,7 +3065,7 @@ All new config fields with their defaults:
 | `config/pos_clusters.yaml` | 11F | POS cluster centroids for domain-anchor blending |
 | `config/function_words/en.yaml` | 11J | English function words reference list |
 
-### Modified Files (~32)
+### Modified Files (~22)
 
 | File | Phase | Changes |
 |------|-------|---------|
