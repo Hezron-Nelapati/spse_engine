@@ -439,7 +439,15 @@ Feature weights (configurable via `ClassificationConfig`):
 4. For each **tone centroid** (built similarly):
    - `score = w_tone_hash × cosine(query_tone, centroid_tone) + (1 - w_tone_hash) × cosine(query_structural, centroid_structural)`
 5. Winner = argmax per dimension
-6. Confidence = `(best_sim - runner_up_sim) / best_sim + best_sim`, clamped to [0, 1]
+6. Confidence = `best_sim × (margin_blend + (1 - margin_blend) × (best_sim - runner_up_sim) / best_sim)`
+   where `margin_blend` is configurable (default: 0.5). Config: `classification.margin_blend_weight`.
+   This blends absolute centroid similarity with margin discrimination:
+   - best=0.95, runner_up=0.90 → 0.95 × (0.5 + 0.5 × 0.053) = **0.50** (ambiguous — close runners)
+   - best=0.95, runner_up=0.50 → 0.95 × (0.5 + 0.5 × 0.474) = **0.70** (moderate — clear but not dominant)
+   - best=0.95, runner_up=0.10 → 0.95 × (0.5 + 0.5 × 0.895) = **0.90** (high — clear winner)
+   - best=0.30, runner_up=0.05 → 0.30 × (0.5 + 0.5 × 0.833) = **0.27** (low — weak absolute match)
+   Naturally bounded in [0, 1] without clamping. Produces meaningful discrimination
+   across all operating ranges, ensuring downstream thresholds (0.40, 0.72, 0.85) are effective.
 7. Confidence → resolver mode: `< 0.40 → Exploratory`, `> 0.85 → Deterministic`, else `Balanced`
 
 **Alternative path: Spatial Vote Aggregation** (used by `calculate_intent()` / `calculate_tone()`):
@@ -722,18 +730,20 @@ Anchors are protected from pruning for `anchor_protection_grace_days` (14 days).
 
 **L8 (`engine.rs`)** resolves adaptive runtime settings based on the intent profile received from the Classification System. Ten named profiles with tuned scoring weights:
 
-| Profile | Resolver Mode | Temperature | Stochastic Jump | Beam Width |
-|---------|--------------|-------------|-----------------|------------|
-| `casual` | Exploratory | 0.70 | 0.20 | 7 |
-| `explanatory` | Balanced | 0.30 | 0.10 | 5 |
-| `factual` | Deterministic | 0.10 | 0.05 | 3 |
-| `procedural` | Balanced | 0.22 | 0.08 | 4 |
-| `creative` | Exploratory | 0.75 | 0.22 | 6 |
-| `brainstorm` | Exploratory | 0.90 | 0.35 | 10 |
-| `plan` | Balanced | 0.35 | 0.12 | 5 |
-| `act` | Balanced | 0.25 | 0.08 | 4 |
-| `critique` | Balanced | 0.30 | 0.10 | 5 |
-| `advisory` | Balanced | 0.26 | 0.09 | 4 |
+| Profile | Resolver Mode | Temperature | Stochastic Jump | Beam Width | Max Steps |
+|---------|--------------|-------------|-----------------|------------|-----------|
+| `casual` | Exploratory | 0.70 | 0.20 | 7 | 100 |
+| `explanatory` | Balanced | 0.30 | 0.10 | 5 | 200 |
+| `factual` | Deterministic | 0.10 | 0.05 | 3 | 50 |
+| `procedural` | Balanced | 0.22 | 0.08 | 4 | 150 |
+| `creative` | Exploratory | 0.75 | 0.22 | 6 | 200 |
+| `brainstorm` | Exploratory | 0.90 | 0.35 | 10 | 300 |
+| `plan` | Balanced | 0.35 | 0.12 | 5 | 200 |
+| `act` | Balanced | 0.25 | 0.08 | 4 | 100 |
+| `critique` | Balanced | 0.30 | 0.10 | 5 | 150 |
+| `advisory` | Balanced | 0.26 | 0.09 | 4 | 150 |
+
+**Beam Width** controls the number of parallel candidate sequences maintained during the L15 Graph Walk (see §5.4). **Max Steps** is the per-profile maximum walk length — profiles requiring longer responses (explanatory, brainstorm, plan) get higher limits. Config: `adaptive_behavior.profiles.<name>.max_steps`.
 
 Two trust profiles: `default` (trust=0.50, corroboration=2, no HTTPS) and `high_stakes` (trust=0.30, corroboration=4, HTTPS required).
 
@@ -1702,40 +1712,67 @@ The core prediction loop. 3D spatial distance **prioritizes** which edges to try
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Full prediction step:**
+**Full prediction loop (beam search):**
+
+The walk maintains `beam_width` (from profile, §4.2) parallel candidate sequences, pruning to the top candidates at each step. This prevents greedy local optima — a slightly lower-scoring first word can lead to a much better overall sequence.
+
 ```
-1. current_node = last emitted word
-2. context = (intent, last_K_words, reasoning_output)
+0. Initialize:
+   beams = [Beam { words: [start_node], score: 1.0 }]  // single seed
+   max_steps = profile.max_steps  // per-profile (§4.2)
 
-3. // Highway check (runs in parallel with edge lookup)
-   if recent_sequence matches highway prefix:
-       highway_candidate = next word from highway path
-       highway_score = highway.aggregate_weight × highway_boost
+1. For step in 0..max_steps:
+   next_beams = []
+   for beam in beams:
+     current_node = beam.words.last()
+     context = (intent, beam.words[-K..], reasoning_output)
 
-4. // Tier 1: Near edges
-   near_edges = outgoing_edges(current_node)
-       .filter(|e| spatial_distance(e.to) < radius_near)
-       .filter(|e| context_match(e.context_tags, context) > min_context)
-       .score(|e| e.weight × proximity_bonus × context_relevance)
+     // Highway check (runs in parallel with edge lookup)
+     if beam.words matches highway prefix:
+         highway_candidate = next word from highway path
+         highway_score = highway.aggregate_weight × highway_boost
 
-5. // Tier 2: Far edges (only if Tier 1 insufficient)
-   if best(near_edges).score < tier1_confidence_threshold:
-       far_edges = outgoing_edges(current_node)
-           .filter(|e| spatial_distance(e.to) >= radius_near)
-           .score(|e| e.weight × distance_decay × context_relevance)
+     // Tier 1: Near edges
+     near_edges = outgoing_edges(current_node)
+         .filter(|e| spatial_distance(e.to) < radius_near)
+         .filter(|e| context_match(e.context_tags, context) > min_context)
+         .score(|e| e.weight × proximity_bonus × context_relevance)
 
-6. // Tier 3: Pathfinding (only if Tier 1+2 insufficient)
-   if best(all_edges).score < tier2_confidence_threshold:
-       paths = a_star_search(current_node, target_region,
-                             max_hops=pathfind_max_hops,
-                             prefer_hubs=true)
-       path_scores = paths.map(|p| path_weight(p) × subgraph_density(p))
+     // Tier 2: Far edges (only if Tier 1 insufficient)
+     if best(near_edges).score < tier1_confidence_threshold:
+         far_edges = outgoing_edges(current_node)
+             .filter(|e| spatial_distance(e.to) >= radius_near)
+             .score(|e| e.weight × distance_decay × context_relevance)
 
-7. // Merge all candidates, pass to L16 Step Resolver
-   all_candidates = merge(highway_candidate, near_edges, far_edges, paths)
-   next_word = L16_step_resolve(all_candidates, context)
-   emit(next_word)
+     // Tier 3: Pathfinding (only if Tier 1+2 insufficient)
+     if best(all_edges).score < tier2_confidence_threshold:
+         paths = a_star_search(current_node, target_region,
+                               max_hops=pathfind_max_hops,
+                               max_explored=pathfind_max_explored_nodes,
+                               prefer_hubs=true)
+         path_scores = paths.map(|p| path_weight(p) × subgraph_density(p))
+
+     // Merge candidates for this beam
+     candidates = merge(highway_candidate, near_edges, far_edges, paths)
+     top_K = L16_step_resolve(candidates, context, K=beam_width)
+     for (word, score) in top_K:
+       next_beams.push(Beam {
+         words: beam.words + [word],
+         score: beam.score × score,
+       })
+
+   // Prune to top beam_width beams by cumulative score
+   beams = top(next_beams, beam_width)
+
+   // Early exit: all beams reached EOS or high-confidence plateau
+   if all beams terminated: break
+
+2. Return best beam (highest cumulative score) → L17 Sequence Assembler
 ```
+
+**Beam width scaling:** For `beam_width=1` (not a default, but valid), this degenerates to greedy search. For `beam_width=3` (factual), it explores 3 parallel sequences — enough to recover from a single wrong step. For `beam_width=10` (brainstorm), it explores widely, producing more diverse and creative outputs.
+
+**A* exploration limit:** Tier 3 pathfinding uses `pathfind_max_explored_nodes` (default: 500) to cap the number of nodes the A* search evaluates. This prevents pathological cases where dense hub regions (Function words with 2000+ edges after domain gating) cause unbounded exploration. If the limit is reached without finding a path, the search returns the best partial path found so far. Config: `word_graph.pathfind_max_explored_nodes`.
 
 **On-the-fly pathfinding** (Tier 3) preferentially routes through **Function nodes** because they have the highest connectivity — they are the highway interchanges of the word graph. This is what enables the system to generate novel word combinations it was never explicitly trained on.
 
@@ -2428,7 +2465,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `intent` | `intent` | `IntentConfig` |
 | `query` | `layer_10_query_builder` | `QueryBuilderConfig` |
 | `trust` | `layer_19_trust_heuristics` | `TrustConfig` |
-| `classification` | `classification` | `ClassificationConfig` |
+| `classification` | `classification` | `ClassificationConfig` (includes `margin_blend_weight` for confidence formula, see §3.5) |
 | `semantic_probes` | `classification.semantic_probes` | `SemanticProbeConfig` (weight, fuzzy_threshold, anchor_count) |
 
 **Reasoning System:**
@@ -2451,7 +2488,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 |-------|-----------|------|
 | `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
-| `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
+| `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding incl. `pathfind_max_explored_nodes`, hub limits) |
 | `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, ttg_lease_duration_secs, probationary_graduation_count, feedback_queue_ttl_secs, feedback_queue_max_size) |
 | `context_bloom` | `layer_5_semantic_map.context_bloom` | `ContextBloomConfig` (bloom_size_bytes, dominant_cluster_threshold, migration_threshold) |
 | `pos_clusters` | `layer_5_semantic_map.pos_clusters` | `PosClusterConfig` (pos_offset_strength, context_seed_strength, centroids path) |
@@ -2494,6 +2531,12 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | Stochastic floor | `auto_inference.creative_spark.global_stochastic_floor` | 0.15 | Predictive | 15% non-greedy sampling |
 | Classification low confidence | `classification.low_confidence_threshold` | 0.40 | Classification | Below → ambiguous |
 | Classification high confidence | `classification.high_confidence_threshold` | 0.85 | Classification | Above → Deterministic upgrade |
+| Margin blend weight | `classification.margin_blend_weight` | 0.50 | Classification | Blends absolute similarity vs. margin discrimination in confidence formula (§3.5) |
+| A* exploration limit | `word_graph.pathfind_max_explored_nodes` | 500 | Predictive | Caps A* search nodes to prevent pathological explosion through dense hubs |
+| Cold-start confidence penalty | `consistency.cold_start_confidence_penalty` | 0.10 | Cross-cutting | R5: confidence reduction when Tier 3 used for confident classification |
+| Contradiction feedback penalty | `consistency.contradiction_feedback_penalty` | 0.15 | Cross-cutting | R6: pattern success_count penalty on evidence contradiction |
+| Sparsity intent threshold | `consistency.sparsity_intent_threshold` | 3 | Cross-cutting | R7: distinct intents with high Tier 3 before broad sparsity triggers |
+| Sparsity Tier 3 rate | `consistency.sparsity_tier3_rate` | 0.30 | Cross-cutting | R7: per-intent Tier 3 rate counting toward sparsity detection |
 
 ### Source Policies
 
@@ -2772,7 +2815,7 @@ Phase 3: REASONING LOOP THRESHOLD OPTIMIZATION
 | Edge weights | E | `f32` per edge | Initialized from training frequency, refined by attract/repel |
 | Highway paths | H | `Vec<WordId>` per highway | Formed when sequence walked ≥ `highway_formation_threshold` times |
 | Force layout config | 6 | `f32` | attractive_coeff=1.0, repulsive_coeff=1.0, preferred_spacing=1.0, boundary=128.0, temperature=1.75, convergence=0.001 |
-| Walk parameters | 5 | `f32` | max_steps=50, tier1_confidence_threshold=0.60, tier2_confidence_threshold=0.30, pathfind_max_hops=4, temperature_anneal_rate=0.95 |
+| Walk parameters | 7 | `f32`/`u32` | tier1_confidence_threshold=0.60, tier2_confidence_threshold=0.30, pathfind_max_hops=4, pathfind_max_explored_nodes=500, temperature_anneal_rate=0.95. Per-profile: max_steps (50–300, see §4.2), beam_width (3–10, see §4.2) |
 
 #### Loss Function: L_pred
 
@@ -2862,6 +2905,9 @@ After individual system training, a **consistency check** validates inter-system
 | **R2: Social Intent → Short-circuit** | intent ∈ {Greeting, Farewell, Gratitude} | Skip reasoning loop | Direct response from spatial neighbors |
 | **R3: Factual Intent → Anchor Protection** | intent ∈ {Verify, Question, Explain} | Evidence merge must preserve anchors | Resolver must not contradict anchors |
 | **R4: Creative Intent → Drift Allowed** | intent ∈ {Brainstorm, Creative} | Wider candidate pool | semantic_drift enabled, lower confidence_floor |
+| **R5: Cold-Start → Confidence Penalty** | (any intent) | — | If Tier 3 used for a query, Classification must reduce confidence for that intent on subsequent similar queries (prevents confident-but-ungrounded classification for topics the graph cannot serve) |
+| **R6: Evidence Contradiction → Pattern Penalty** | confidence > 0.72 (high) | If evidence contradicts the high-confidence Classification pattern's expected answer | Pattern's `success_count` penalized by `contradiction_feedback_penalty` (prevents confident-but-wrong feedback loops where Classification gates downstream systems incorrectly) |
+| **R7: Broad Sparsity → Proactive Learning** | Multiple intents trigger Tier 3 in same window | — | If ≥ `sparsity_intent_threshold` (default: 3) distinct intents exceed Tier 3 rate > 0.30 in the same rolling window, this signals general graph sparsity (not intent-specific) → trigger proactive edge building via retrieval for high-frequency query patterns, rather than intent splitting (§6.1) |
 
 #### Consistency Loss
 
@@ -2872,8 +2918,12 @@ L_consistency = sum over validation set:
     mismatch_R2 = (classification.intent ∈ social) AND reasoning.steps_taken > 0
     mismatch_R3 = (classification.intent ∈ factual) AND predictive.contradicts_anchor
     mismatch_R4 = (classification.intent ∈ creative) AND NOT predictive.drift_allowed
+    mismatch_R5 = predictive.used_tier3 AND classification.confidence > 0.72
+    mismatch_R6 = reasoning.evidence_contradicts_pattern AND classification.confidence > 0.72
+    mismatch_R7 = (distinct_intents_with_high_tier3 >= sparsity_intent_threshold)
     
     L_consistency += mismatch_R1 + mismatch_R2 + mismatch_R3 + mismatch_R4
+                   + mismatch_R5 + mismatch_R6 + mismatch_R7
 ```
 
 #### Asymmetric Feedback Correction (L18)
@@ -2883,8 +2933,17 @@ When consistency mismatches are detected:
 - **R2 violation** → Add intent to Classification's social short-circuit list
 - **R3 violation** → Increase Predictive's `anchor_trust_threshold` by 0.05
 - **R4 violation** → Lower Predictive's `min_confidence_floor` for creative intents
+- **R5 violation** → Reduce Classification confidence for the offending intent by `cold_start_confidence_penalty` (default: 0.10) on future queries until graph edges are established
+- **R6 violation** → Penalize the Classification pattern's `success_count` by `contradiction_feedback_penalty` (default: 0.15); if pattern confidence drops below `low_confidence_threshold`, mark for re-training
+- **R7 violation** → Suppress intent splitting proposals (§6.1) for the current window; instead enqueue top-K high-frequency query patterns from the affected intents for proactive edge injection via L13
 
 These corrections are applied as config overrides, not weight changes — preserving each system's independent optimization.
+
+**Config (R5-R7):**
+- `cold_start_confidence_penalty: f32` (default: 0.10) — confidence reduction when Tier 3 used for a confident classification
+- `contradiction_feedback_penalty: f32` (default: 0.15) — pattern success_count penalty on evidence contradiction
+- `sparsity_intent_threshold: u32` (default: 3) — number of distinct intents with high Tier 3 rate before R7 triggers
+- `sparsity_tier3_rate: f32` (default: 0.30) — per-intent Tier 3 rate above which the intent counts toward R7
 
 ### 11.6 Hardware Requirements & Performance Budget
 

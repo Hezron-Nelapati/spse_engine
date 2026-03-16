@@ -130,6 +130,9 @@ pub struct ConsistencyLoss {
     pub r2_violations: usize,   // Social intent but reasoning ran
     pub r3_violations: usize,   // Factual intent but anchor contradicted
     pub r4_violations: usize,   // Creative intent but drift blocked
+    pub r5_violations: usize,   // Tier 3 used for confident classification (cold-start feedback)
+    pub r6_violations: usize,   // Evidence contradicts high-confidence pattern
+    pub r7_violations: usize,   // Broad graph sparsity across multiple intents
     pub l_consistency: f32,     // sum of violations / sample_count
     pub sample_count: usize,
 }
@@ -211,10 +214,11 @@ Add training-specific config sections.
 pub struct ClassificationTrainingConfig {
     pub centroid_batch_size: usize,           // default: 500
     pub weight_sweep_iterations: usize,       // default: 10
-    pub weight_sweep_dimensions: Vec<String>, // ["w_intent_hash", "w_tone_hash", ...]
+    pub weight_sweep_dimensions: Vec<String>, // ["w_intent_hash", "w_tone_hash", ..., "margin_blend_weight"]
     pub calibration_bins: usize,              // default: 10
     pub validation_split: f32,               // default: 0.1
     pub min_examples_per_intent: usize,      // default: 100
+    pub margin_blend_weight: f32,            // default: 0.50 — blends absolute similarity vs. margin discrimination in confidence formula (§3.5)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,11 +235,13 @@ pub struct PredictiveTrainingConfig {
     pub repel_strength: f32,                 // default: 0.01
     pub correct_attract_bonus: f32,          // default: 0.01 (extra for correct)
     pub mini_batch_size: usize,              // default: 32
-    pub max_walk_steps: usize,               // default: 50
+    pub max_walk_steps: usize,               // default: 50 (per-profile override via adaptive_behavior, see §4.2: 50–300)
+    pub pathfind_max_explored_nodes: u32,    // default: 500 — caps A* search to prevent pathological explosion
     pub convergence_tolerance: f32,          // default: 0.001
     pub temperature_anneal_rate: f32,        // default: 0.95
     pub momentum: f32,                       // default: 0.9
     pub walk_sweep_iterations: usize,        // default: 10
+    // beam_width is per-profile (3–10), defined in adaptive_behavior profiles (§4.2)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +249,10 @@ pub struct ConsistencyCheckConfig {
     pub r1_threshold_adjustment: f32,        // default: 0.05
     pub r3_anchor_adjustment: f32,           // default: 0.05
     pub r4_confidence_adjustment: f32,       // default: 0.05
+    pub r5_cold_start_confidence_penalty: f32, // default: 0.10 — confidence reduction on Tier 3 + confident classification
+    pub r6_contradiction_feedback_penalty: f32, // default: 0.15 — pattern success_count penalty on evidence contradiction
+    pub r7_sparsity_intent_threshold: u32,   // default: 3 — distinct intents with high Tier 3 before R7 triggers
+    pub r7_sparsity_tier3_rate: f32,         // default: 0.30 — per-intent Tier 3 rate counting toward R7
     pub max_correction_rounds: usize,        // default: 3
 }
 
@@ -272,9 +282,11 @@ system_training:
       - low_confidence_threshold
       - high_confidence_threshold
       - retrieval_gate_threshold
+      - margin_blend_weight
     calibration_bins: 10
     validation_split: 0.1
     min_examples_per_intent: 100
+    margin_blend_weight: 0.50
   reasoning:
     scoring_sweep_iterations: 20
     decomposition_min_examples: 50
@@ -285,7 +297,8 @@ system_training:
     repel_strength: 0.01
     correct_attract_bonus: 0.01
     mini_batch_size: 32
-    max_walk_steps: 50
+    max_walk_steps: 50              # default; per-profile override via adaptive_behavior (50–300)
+    pathfind_max_explored_nodes: 500  # caps A* search to prevent pathological explosion
     convergence_tolerance: 0.001
     temperature_anneal_rate: 0.95
     momentum: 0.9
@@ -294,6 +307,10 @@ system_training:
     r1_threshold_adjustment: 0.05
     r3_anchor_adjustment: 0.05
     r4_confidence_adjustment: 0.05
+    r5_cold_start_confidence_penalty: 0.10
+    r6_contradiction_feedback_penalty: 0.15
+    r7_sparsity_intent_threshold: 3
+    r7_sparsity_tier3_rate: 0.30
     max_correction_rounds: 3
 ```
 
@@ -826,6 +843,11 @@ pub fn train_reasoning(
 
 Implements Word Graph edge formation training with attract/repel layout.
 
+**Beam search integration:** During training, sequences use teacher forcing (single-step, not beam).
+During *evaluation* (`evaluate_loss`), the walker uses beam search with `beam_width` from the
+active profile (§4.2) to match inference behavior. A* pathfinding in Tier 3 is capped by
+`pathfind_max_explored_nodes` (default: 500) to prevent runaway expansion through dense hubs.
+
 ```rust
 // src/predictive/walk_trainer.rs — NEW FILE
 
@@ -836,6 +858,8 @@ use crate::predictive::resolver::FineResolver;
 use crate::types::*;
 
 /// Trains unit positions via autoregressive spatial walk.
+/// Training: teacher-forced single-step (attract/repel).
+/// Evaluation: beam search with profile beam_width and per-profile max_steps (§4.2).
 pub struct SpatialWalkTrainer {
     config: PredictiveTrainingConfig,
     /// Accumulated position deltas (batched before applying)
@@ -911,12 +935,16 @@ impl SpatialWalkTrainer {
     }
 
     /// Evaluate predictive loss on a held-out sequence set.
+    /// Uses beam search with profile's beam_width and max_steps (§4.2).
+    /// A* pathfinding in Tier 3 is capped by config.pathfind_max_explored_nodes.
     pub fn evaluate_loss(
         &self,
         sequences: &[Vec<UnitSequenceEntry>],
         grid: &SpatialGrid,
         memory_snapshot: &MemorySnapshot,
         weights: &ScoringWeights,
+        beam_width: usize,
+        max_steps: usize,
     ) -> PredictiveLoss { todo!() }
 
     fn accumulate_attract(&mut self, unit_id: Uuid, toward: [f32; 3], strength: f32) {
@@ -1060,6 +1088,9 @@ impl ConsistencyChecker {
         let mut loss = ConsistencyLoss::default();
         loss.sample_count = results.len();
 
+        // Track per-intent Tier 3 rates for R7 (broad sparsity detection)
+        let mut intent_tier3_counts: std::collections::HashMap<IntentKind, (usize, usize)> = Default::default();
+
         for result in results {
             // R1: High uncertainty must trigger retrieval
             if result.classification_confidence < 0.40 && !result.reasoning_used_retrieval {
@@ -1077,10 +1108,32 @@ impl ConsistencyChecker {
             if is_creative_intent(result.classification_intent) && !result.prediction_drift_allowed {
                 loss.r4_violations += 1;
             }
+            // R5: Cold-start feedback — Tier 3 used but classification was confident
+            if result.prediction_used_tier3 && result.classification_confidence > 0.72 {
+                loss.r5_violations += 1;
+            }
+            // R6: Evidence contradiction — evidence contradicts high-confidence pattern
+            if result.evidence_contradicts_pattern && result.classification_confidence > 0.72 {
+                loss.r6_violations += 1;
+            }
+            // Track for R7
+            let entry = intent_tier3_counts.entry(result.classification_intent).or_default();
+            entry.1 += 1; // total
+            if result.prediction_used_tier3 { entry.0 += 1; } // tier3
+        }
+
+        // R7: Broad sparsity — multiple intents have high Tier 3 rates
+        let high_tier3_intents = intent_tier3_counts.values()
+            .filter(|(t3, total)| *total > 0 && (*t3 as f32 / *total as f32) > self.config.r7_sparsity_tier3_rate)
+            .count();
+        if high_tier3_intents >= self.config.r7_sparsity_intent_threshold as usize {
+            loss.r7_violations += 1;
         }
 
         let total_violations = loss.r1_violations + loss.r2_violations 
-                             + loss.r3_violations + loss.r4_violations;
+                             + loss.r3_violations + loss.r4_violations
+                             + loss.r5_violations + loss.r6_violations
+                             + loss.r7_violations;
         loss.l_consistency = total_violations as f32 / loss.sample_count.max(1) as f32;
 
         let corrections = self.generate_corrections(&loss);
@@ -1113,6 +1166,30 @@ impl ConsistencyChecker {
                 reason: format!("{} R4 violations: lower confidence floor for creative", loss.r4_violations),
             });
         }
+        if loss.r5_violations > 0 {
+            corrections.push(ConfigCorrection {
+                section: "classification".into(),
+                field: "confidence_penalty_per_intent".into(),
+                adjustment: -self.config.r5_cold_start_confidence_penalty,
+                reason: format!("{} R5 violations: reduce confidence for intents where graph lacks edges", loss.r5_violations),
+            });
+        }
+        if loss.r6_violations > 0 {
+            corrections.push(ConfigCorrection {
+                section: "classification".into(),
+                field: "pattern_success_count".into(),
+                adjustment: -self.config.r6_contradiction_feedback_penalty,
+                reason: format!("{} R6 violations: penalize patterns contradicted by evidence", loss.r6_violations),
+            });
+        }
+        if loss.r7_violations > 0 {
+            corrections.push(ConfigCorrection {
+                section: "structural_feedback".into(),
+                field: "suppress_intent_splitting".into(),
+                adjustment: 1.0, // flag: suppress splits, trigger proactive edge building instead
+                reason: format!("R7: broad sparsity detected across {} intents — proactive edge building needed, not intent splitting", loss.r7_violations),
+            });
+        }
         corrections
     }
 }
@@ -1125,6 +1202,8 @@ pub struct ConsistencyCheckResult {
     pub reasoning_steps: usize,
     pub prediction_contradicts_anchor: bool,
     pub prediction_drift_allowed: bool,
+    pub prediction_used_tier3: bool,               // R5: whether Tier 3 pathfinding was used
+    pub evidence_contradicts_pattern: bool,         // R6: evidence contradicts classification pattern
 }
 
 #[derive(Debug, Clone)]
@@ -1141,6 +1220,9 @@ pub struct ConfigCorrection {
 **Tests:**
 - `check_detects_r1_violations`
 - `check_generates_corrections_for_r3`
+- `check_detects_r5_cold_start_violations`
+- `check_detects_r6_evidence_contradiction`
+- `check_detects_r7_broad_sparsity`
 - `check_zero_violations_gives_zero_loss`
 
 ### Task 5.2: Wire Consistency into Engine (`src/engine.rs`)
@@ -1164,6 +1246,8 @@ pub fn run_consistency_check(
             reasoning_steps: process_result.trace.reasoning_steps,
             prediction_contradicts_anchor: /* check via trace */,
             prediction_drift_allowed: /* check via trace */,
+            prediction_used_tier3: /* check via trace: tier3_pathfinding_used */,
+            evidence_contradicts_pattern: /* check via trace: evidence vs pattern */,
         });
     }
     
@@ -1321,7 +1405,7 @@ impl PredictiveSequenceGenerator {
 
 ### Task 6.4: Consistency Dataset Generator (`src/seed/consistency_generator.rs`) — NEW FILE
 
-Generates 5K+ cross-system validation examples with expected behavior per system.
+Generates 6.5K+ cross-system validation examples with expected behavior per system (including R5-R7 scenarios).
 
 ```rust
 // src/seed/consistency_generator.rs
@@ -1344,6 +1428,9 @@ impl ConsistencyDatasetGenerator {
 | Creative drift | 500 | Brainstorm/Creative | Wide candidate pool | Drift allowed, low floor |
 | High uncertainty | 1000 | Unknown/low confidence | Must retrieve | External evidence mode |
 | Adversarial (conflict) | 500 | Various | Conflict detection | No anchor contradiction |
+| Cold-start topics (R5) | 500 | High confidence but sparse graph | — | Tier 3 pathfinding used → confidence penalty expected |
+| Evidence contradiction (R6) | 500 | High confidence pattern | Evidence contradicts pattern | Pattern success_count penalized |
+| Broad sparsity (R7) | 500 | Multiple intents, all sparse | — | ≥3 intents with high Tier 3 rate → proactive edge building, not splitting |
 
 **Files created:** `src/seed/consistency_generator.rs`  
 **Files modified:** `src/seed/mod.rs`  
@@ -2970,7 +3057,8 @@ All new config fields with their defaults:
 | | `repel_strength` | `f32` | 0.01 | Repel force for incorrect predictions |
 | | `correct_attract_bonus` | `f32` | 0.01 | Extra attract for correct |
 | | `mini_batch_size` | `usize` | 32 | Sequences per position update batch |
-| | `max_walk_steps` | `usize` | 50 | Max steps per training walk |
+| | `max_walk_steps` | `usize` | 50 | Max steps per training walk (per-profile override: 50–300, see §4.2) |
+| | `pathfind_max_explored_nodes` | `u32` | 500 | Caps A* search to prevent pathological explosion through dense hubs |
 | | `convergence_tolerance` | `f32` | 0.001 | Stop when delta below this |
 | | `temperature_anneal_rate` | `f32` | 0.95 | Temperature decay per step |
 | | `momentum` | `f32` | 0.9 | EMA momentum for position updates |
@@ -2978,8 +3066,13 @@ All new config fields with their defaults:
 | `system_training.consistency` | `r1_threshold_adjustment` | `f32` | 0.05 | R1 correction magnitude |
 | | `r3_anchor_adjustment` | `f32` | 0.05 | R3 correction magnitude |
 | | `r4_confidence_adjustment` | `f32` | 0.05 | R4 correction magnitude |
+| | `r5_cold_start_confidence_penalty` | `f32` | 0.10 | R5: confidence reduction on Tier 3 + confident classification |
+| | `r6_contradiction_feedback_penalty` | `f32` | 0.15 | R6: pattern success_count penalty on evidence contradiction |
+| | `r7_sparsity_intent_threshold` | `u32` | 3 | R7: distinct intents with high Tier 3 before broad sparsity triggers |
+| | `r7_sparsity_tier3_rate` | `f32` | 0.30 | R7: per-intent Tier 3 rate counting toward sparsity detection |
 | | `max_correction_rounds` | `usize` | 3 | Max iterative correction rounds |
-| `classification` | `two_phase_structural_margin` | `f32` | 0.3 | Margin for fast-path structural-only classification |
+| `classification` | `margin_blend_weight` | `f32` | 0.50 | Blends absolute similarity vs. margin discrimination in confidence formula (§3.5) |
+| | `two_phase_structural_margin` | `f32` | 0.3 | Margin for fast-path structural-only classification |
 | | `social_shortcircuit_confidence` | `f32` | 0.95 | Min confidence for social intent short-circuit |
 | | `platt_a` | `f32` | 1.0 | Platt scaling parameter A |
 | | `platt_b` | `f32` | 0.0 | Platt scaling parameter B |
@@ -3054,7 +3147,7 @@ All new config fields with their defaults:
 | `src/seed/classification_generator.rs` | 6 | Classification dataset generator (50K+) |
 | `src/seed/reasoning_generator.rs` | 6 | Reasoning QA dataset generator (20K+) |
 | `src/seed/predictive_generator.rs` | 6 | Predictive sequence generator (100K+) |
-| `src/seed/consistency_generator.rs` | 6 | Consistency validation generator (5K+) |
+| `src/seed/consistency_generator.rs` | 6 | Consistency validation generator (6.5K+, includes R5-R7 scenarios) |
 | `src/bin/training_sweep.rs` | 8 | Per-system training sweep binary |
 | `tests/training_integration.rs` | 9 | End-to-end training integration tests |
 | `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` | — | This document |
