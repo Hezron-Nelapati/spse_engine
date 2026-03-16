@@ -23,7 +23,7 @@
 **Implementation Details:**
 - `IntentShapingConfig` struct added to `src/config/mod.rs` (lines 565-571)
 - `AdaptiveBehaviorConfig.intent_profiles` includes `creative`, `brainstorm`, `plan`, `act`, `critique` profiles
-- `FineResolver::select_with_shaping()` implements intent shaping in `src/layers/resolver.rs` (lines 81-165)
+- `FineResolver::select_with_shaping()` implements intent shaping in `src/predictive/resolver.rs` (lines 81-165)
 - `config/config.yaml` contains full profile definitions (lines 131-334)
 
 **What to Implement:**
@@ -64,7 +64,7 @@
            preserve_factual_anchor: true
    ```
 
-3. **Modify Resolver** (`src/layers/resolver.rs`):
+3. **Modify Resolver** (`src/predictive/resolver.rs`):
    - Add `apply_intent_shaping()` method that adjusts candidate selection based on intent profile
    - Implement temperature-based stochastic selection for creative mode
    - Add factual anchor preservation check (units with `trust_score > 0.8` are protected)
@@ -76,7 +76,7 @@
 **Files to Modify:**
 - `src/config/mod.rs` (lines ~1100-1200 for adaptive behavior)
 - `config/config.yaml` (lines 131-245)
-- `src/layers/resolver.rs` (full file)
+- `src/predictive/resolver.rs` (full file)
 - `src/engine.rs` (resolver integration section)
 
 **Verification:**
@@ -92,9 +92,9 @@ cargo run --bin test_harness -- --profile creative --intent brainstorm
 **Status:** IMPLEMENTED
 
 **Implementation Details:**
-- `IntentDetector::hybrid_blend()` method added to `src/layers/intent.rs` (lines 1292-1358)
+- `IntentDetector::hybrid_blend()` method added to `src/classification/intent.rs` (lines 1292-1358)
 - `IntentBlendReport` struct defined in `src/types.rs` (lines 332-358)
-- `OutputDecoder::detect_drift()` and `detect_corruption()` methods in `src/layers/output.rs` (lines 39-135)
+- `OutputDecoder::detect_drift()` and `detect_corruption()` methods in `src/predictive/output.rs` (lines 39-135)
 - `DriftReport` and `CorruptionReport` structs for validation output
 
 **What to Implement:**
@@ -104,7 +104,7 @@ cargo run --bin test_harness -- --profile creative --intent brainstorm
 
 **How to Implement:**
 
-1. **Create Intent Blend Validator** (`src/layers/intent.rs`):
+1. **Create Intent Blend Validator** (`src/classification/intent.rs`):
    - Add `validate_hybrid_blend()` function that:
      - Computes heuristic score from `IntentDetector::classify()`
      - Retrieves memory-backed score from `intent_scores_from_memory()`
@@ -123,7 +123,7 @@ cargo run --bin test_harness -- --profile creative --intent brainstorm
    ```
    - Add to `TestObservation` struct
 
-3. **Implement Drift Detection** (`src/layers/output.rs`):
+3. **Implement Drift Detection** (`src/predictive/output.rs`):
    - Add `detect_semantic_drift()` comparing output to source candidates
    - Add `detect_factual_corruption()` checking against anchor units
    - Return warnings if drift exceeds tolerance or corruption detected
@@ -133,9 +133,9 @@ cargo run --bin test_harness -- --profile creative --intent brainstorm
    - Apply `plan`, `act`, `brainstorm`, `critique` shaping based on `IntentKind`
 
 **Files to Modify:**
-- `src/layers/intent.rs` (add validation)
+- `src/classification/intent.rs` (add validation)
 - `src/telemetry/test_observer.rs` (add fields)
-- `src/layers/output.rs` (drift detection)
+- `src/predictive/output.rs` (drift detection)
 - `src/engine.rs` (wire shaping)
 
 **Verification:**
@@ -513,9 +513,9 @@ cargo test --lib output::tests::drift_detection
 **Files to Modify:**
 - `src/bin/pollution_dev.rs` → refactor into drill framework
 - `tests/integration.rs` → add drill tests for all modes and categories
-- `src/layers/intent.rs` → add drill test functions
-- `src/layers/output.rs` → add drill test functions
-- `src/layers/resolver.rs` → add drill test functions
+- `src/classification/intent.rs` → add drill test functions
+- `src/predictive/output.rs` → add drill test functions
+- `src/predictive/resolver.rs` → add drill test functions
 
 **Verification:**
 ```bash
@@ -556,14 +556,14 @@ cargo test --lib -- drill_
 **Implementation Details:**
 - `stress_drill.rs` binary created with configurable corpus size, latency thresholds, pollution ceiling (`src/bin/stress_drill.rs`)
 - `stress_drill_lib.rs` library module with `StressDrillConfig`, `StressDrillResult`, `LatencyReport` structs (`src/stress_drill_lib.rs`)
-- Heterogeneous corpus generator supports HTML, QA JSON, Wikidata, OpenAPI, Common Crawl WET formats
-- Distribution: 30% HTML, 20% QA JSON, 15% Wikidata, 15% OpenAPI, 20% Common Crawl WET
+- Heterogeneous corpus generator supports custom_training, runtime_html, plain_text, local_document formats
+- Distribution: 40% custom_training, 30% runtime_html, 20% plain_text, 10% local_document
 - Latency tracking with avg/max/p99 metrics and spike detection
 - Pollution ceiling validation (<1% default)
 
 **What to Implement:**
 - End-to-end 7MB ingestion with interleaved queries and forced maintenance cycles
-- Validate Layer 12 normalization for HTML, QA JSON, Wikidata, OpenAPI, Common Crawl WET
+- Validate Layer 12 normalization for custom_training, runtime_html, plain_text, local_document
 - Monitor latency spikes, pollution ceilings, snapshot consistency
 
 **How to Implement:**
@@ -581,8 +581,8 @@ cargo test --lib -- drill_
    ```
 
 2. **Implement Heterogeneous Source Generator** (`scripts/heterogeneous_corpus.py`):
-   - Generate mixed corpus: 30% HTML, 20% QA JSON, 15% Wikidata truthy, 15% OpenAPI, 20% Common Crawl WET
-   - Apply `source_policies` config for each type
+   - Generate mixed corpus using custom dataset generators (classification, reasoning, predictive, consistency)
+   - Apply `ingestion_policies` config for each format (custom_training, runtime_html, plain_text, local_document)
 
 3. **Add Latency Monitor** (`src/telemetry/latency_tracker.rs`):
    - Track per-layer latency during stress test
@@ -590,9 +590,8 @@ cargo test --lib -- drill_
    - Report to Layer 20 telemetry
 
 4. **Wire Layer 12 Adapter** (`src/document.rs`):
-   - Implement format-aware normalization for Hugging Face row formats
-   - Add Wikipedia XML handler preserving relational structure
-   - Apply `source_policies` extraction rules per format
+   - Implement format-aware normalization for uploaded document formats (PDF, DOCX, plain text)
+   - Apply `ingestion_policies` extraction rules per format
 
 **Files to Create:**
 - `src/bin/stress_drill.rs`
@@ -812,7 +811,7 @@ cargo test --lib -- drill_
 
 **Implementation Details:**
 - `ReasoningLoopConfig` added to `src/config/mod.rs` with `enabled`, `max_internal_steps`, `trigger_confidence_floor`, `exit_confidence_threshold`, `thought_channel`, `step_budget_tokens`
-- `should_trigger_reasoning()` method added to `IntentDetector` in `src/layers/intent.rs`
+- `should_trigger_reasoning()` method added to `IntentDetector` in `src/classification/intent.rs`
 - Confidence gating triggers reasoning when `confidence < 0.40` OR complex intent with moderate confidence
 - `ThoughtUnit` type added to `src/types.rs` with `content`, `step`, `internal_only`, `confidence`, `created_at`
 - `OutputType` enum added with `FinalAnswer(String)` and `SilentThought(String)`
@@ -822,7 +821,7 @@ cargo test --lib -- drill_
 
 **How to Implement:**
 
-1. **Add Confidence Gating in Layer 9** (`src/layers/intent.rs`):
+1. **Add Confidence Gating in Layer 9** (`src/classification/intent.rs`):
    ```rust
    pub fn should_trigger_reasoning(&self, confidence: f32, intent: IntentKind) -> bool {
        confidence < self.config.reasoning_trigger_floor 
@@ -877,7 +876,7 @@ cargo test --lib -- drill_
    ```
 
 **Files to Modify:**
-- `src/layers/intent.rs` (confidence gating)
+- `src/classification/intent.rs` (confidence gating)
 - `src/engine.rs` (dynamic reasoning loop)
 - `src/types.rs` (ThoughtUnit)
 - `config/config.yaml` (reasoning_loop config)
@@ -894,10 +893,10 @@ cargo test --lib -- drill_
 
 **Implementation Details:**
 - `CreativeSparkConfig` added to `src/config/mod.rs` with `global_stochastic_floor`, `selection_temperature`, `anchor_protection_strictness`
-- `select_with_creative_floor()` method added to `SemanticRouter` in `src/layers/router.rs`
+- `select_with_creative_floor()` method added to `SemanticRouter` in `src/predictive/router.rs`
 - 15% stochastic floor enforced using weighted random selection from top-K candidates
 - Softmax-like weighting with configurable temperature for selection randomness
-- `validate_against_anchors()` method added to `FineResolver` in `src/layers/resolver.rs`
+- `validate_against_anchors()` method added to `FineResolver` in `src/predictive/resolver.rs`
 - Anchor validation gate blocks creative drift on high-trust anchors (math, identity, factual)
 - Contradiction detection for negation patterns and semantic overlap
 - Config values in `config/config.yaml` under `auto_inference.creative_spark`
@@ -909,7 +908,7 @@ cargo test --lib -- drill_
 
 **How to Implement:**
 
-1. **Enforce Stochastic Floor in Router** (`src/layers/router.rs`):
+1. **Enforce Stochastic Floor in Router** (`src/predictive/router.rs`):
    ```rust
    impl Router {
        pub fn select_with_creative_floor(
@@ -932,7 +931,7 @@ cargo test --lib -- drill_
    }
    ```
 
-2. **Add Anchor Validation Gate** (`src/layers/resolver.rs`):
+2. **Add Anchor Validation Gate** (`src/predictive/resolver.rs`):
    ```rust
    fn validate_against_anchors(&self, candidate: &Candidate, anchors: &[Anchor]) -> bool {
        for anchor in anchors {
@@ -947,8 +946,8 @@ cargo test --lib -- drill_
    ```
 
 **Files to Modify:**
-- `src/layers/router.rs` (stochastic floor)
-- `src/layers/resolver.rs` (anchor validation)
+- `src/predictive/router.rs` (stochastic floor)
+- `src/predictive/resolver.rs` (anchor validation)
 - `config/config.yaml` (creative_spark config)
 
 ---
@@ -959,7 +958,7 @@ cargo test --lib -- drill_
 
 **Implementation Details:**
 - `ToneInferenceConfig` added to `src/config/mod.rs` with `enabled`, `style_anchor_decay`, `urgency_threshold`, `sadness_threshold`, `technical_threshold`
-- `ToneInferrer` struct added to `src/layers/intent.rs` with style anchors for each tone kind
+- `ToneInferrer` struct added to `src/classification/intent.rs` with style anchors for each tone kind
 - `ToneKind` enum added to `src/types.rs` with `NeutralProfessional`, `Empathetic`, `Direct`, `Technical`, `Casual`, `Formal`
 - `StyleAnchor` struct added with `tone`, `embedding`, `keywords`, `decay_rate`
 - Tone inference from input semantics: urgency detection, sadness detection, technical domain detection
@@ -976,7 +975,7 @@ cargo test --lib -- drill_
 
 **How to Implement:**
 
-1. **Add Tone Inferrer** (`src/layers/intent.rs`):
+1. **Add Tone Inferrer** (`src/classification/intent.rs`):
    ```rust
    pub struct ToneInferrer {
        style_anchors: HashMap<ToneKind, StyleAnchor>,
@@ -998,7 +997,7 @@ cargo test --lib -- drill_
    }
    ```
 
-2. **Add Style Anchor Resonance** (`src/layers/search.rs`):
+2. **Add Style Anchor Resonance** (`src/reasoning/search.rs`):
    ```rust
    fn score_style_resonance(&self, candidate: &Unit, anchor: &StyleAnchor) -> f32 {
        self.semantic_similarity(candidate.embedding, anchor.embedding)
@@ -1006,9 +1005,9 @@ cargo test --lib -- drill_
    ```
 
 **Files to Modify:**
-- `src/layers/intent.rs` (tone inference)
-- `src/layers/search.rs` (style resonance scoring)
-- `src/layers/context.rs` (session style state)
+- `src/classification/intent.rs` (tone inference)
+- `src/reasoning/search.rs` (style resonance scoring)
+- `src/reasoning/context.rs` (session style state)
 - `config/config.yaml` (style_anchors config)
 
 ---
@@ -1328,16 +1327,16 @@ cargo test --lib -- drill_
 **Status:** IMPLEMENTED
 
 **Implementation Details:**
-- `MultiEngineAggregator` struct added to `src/layers/retrieval.rs` (lines 1000-1460)
+- `MultiEngineAggregator` struct added to `src/reasoning/retrieval.rs`
 - `EngineResult` and `ConsensusDocument` structs for multi-engine results
-- `StructuredParser` for HuggingFace, Wikipedia, Wikidata formats (lines 1462-1552)
+- `StructuredParser` for runtime-retrieved HTML content
 - `MultiEngineConfig` added to `src/config/mod.rs` (lines 732-767)
 - Config validation for consensus thresholds (lines 2541-2568)
 
 **Key Features:**
-- Parallel querying of DuckDuckGo, Wikipedia, Wikidata, PubMed, Nominatim
+- Parallel querying via SearxNG (runtime web retrieval)
 - Consensus scoring with trust/agreement/diversity weights
-- Structured parsing for known formats (HuggingFace rows, Wikipedia XML, Wikidata truthy)
+- Structured parsing for runtime-retrieved HTML content
 - Configurable timeout and max engines per query
 
 ---
@@ -1378,7 +1377,7 @@ cargo test --lib -- drill_
    - `MultiEngineConsensus`: Happy path consensus agreement
    - `MultiEngineDisagreement`: Edge case engine disagreement
    - `MultiEngineUnavailable`: Failure mode all engines unavailable
-   - `StructuredParsing`: Parsing validation for HuggingFace/Wikipedia/Wikidata
+   - `StructuredParsing`: Parsing validation for runtime-retrieved content formats
 
 2. **Config Sweep Drills:**
    - `ConfigSweepPareto`: Pareto frontier identification

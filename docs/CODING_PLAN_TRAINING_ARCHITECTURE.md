@@ -1,13 +1,15 @@
-# SPS Training Architecture — Comprehensive Coding Plan
+# SPSE Architecture Implementation — Comprehensive Coding Plan
 
 **Created:** March 2026  
 **Status:** Implementation Plan  
-**Reference:** `docs/SPSE_ARCHITECTURE_V11.1.md` §11
+**Scope:** Full architecture implementation — folder restructuring, logic rewrites, new feature implementation, training pipeline, and cross-system consistency.  
+**Reference:** `docs/SPSE_ARCHITECTURE_V11.1.md` (all sections; training-specific: §11)
 
 ---
 
 ## Table of Contents
 
+0. [Phase 0: Folder Restructuring (Completed)](#0-phase-0-folder-restructuring-completed)
 1. [Overview & Execution Order](#1-overview--execution-order)
 2. [Phase 1: Foundation — Shared Infrastructure](#2-phase-1-foundation--shared-infrastructure)
 3. [Phase 2: Classification System Training](#3-phase-2-classification-system-training)
@@ -19,9 +21,51 @@
 9. [Phase 8: Training Sweep Harness](#9-phase-8-training-sweep-harness)
 10. [Phase 9: Integration Testing](#10-phase-9-integration-testing)
 11. [Phase 10: On-the-fly Learning](#11-phase-10-on-the-fly-learning)
-12. [Phase 11: Hardening Improvements](#12-phase-11-hardening-improvements)
-13. [Config Changes Summary](#13-config-changes-summary)
-14. [File Manifest](#14-file-manifest)
+12. [Phase 11: Architecture Feature Implementation](#12-phase-11-architecture-feature-implementation)
+13. [Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit)](#13-phase-12-architecture-fixes)
+14. [Config Changes Summary](#14-config-changes-summary)
+15. [File Manifest](#15-file-manifest)
+
+---
+
+## 0. Phase 0: Folder Restructuring (Completed)
+
+**Status:** ✅ Completed (commit `53ebf54`)
+
+Reorganized the codebase from a flat `src/layers/` directory into three system-specific directories matching the architecture (§2):
+
+| Before | After | System |
+|--------|-------|--------|
+| `src/layers/input.rs` | `src/classification/input.rs` | Classification (L1) |
+| `src/layers/builder.rs` | `src/classification/builder.rs` | Classification (L2) |
+| `src/layers/hierarchy.rs` | `src/classification/hierarchy.rs` | Classification (L3) |
+| `src/layers/intent.rs` | `src/classification/intent.rs` | Classification (L9) |
+| `src/layers/query.rs` | `src/classification/query.rs` | Classification (L10) |
+| `src/layers/safety.rs` | `src/classification/safety.rs` | Classification (L19) |
+| `src/layers/context.rs` | `src/reasoning/context.rs` | Reasoning (L7) |
+| `src/layers/retrieval.rs` | `src/reasoning/retrieval.rs` | Reasoning (L11) |
+| `src/layers/merge.rs` | `src/reasoning/merge.rs` | Reasoning (L13) |
+| `src/layers/search.rs` | `src/reasoning/search.rs` | Reasoning (L14) |
+| `src/layers/feedback.rs` | `src/reasoning/feedback.rs` | Reasoning (L18) |
+| `src/layers/router.rs` | `src/predictive/router.rs` | Predictive (L5) |
+| `src/layers/resolver.rs` | `src/predictive/resolver.rs` | Predictive (L16) |
+| `src/layers/output.rs` | `src/predictive/output.rs` | Predictive (L17) |
+| `src/training.rs` | `src/training/pipeline.rs` | Training |
+
+**Deleted:** `src/layers/` (entire directory), `src/mod.rs` (orphan).  
+**Import pattern:** `crate::classification::builder`, `crate::reasoning::search`, `crate::predictive::router`, etc.
+
+#### Pending Renames (code not yet updated)
+
+| Current | Target | Reason |
+|---------|--------|--------|
+| `src/open_sources.rs` | `src/dataset_catalog.rs` | Module name implied external open-source data; engine uses only custom-generated datasets |
+| `pub mod open_sources` (in `lib.rs`) | `pub mod dataset_catalog` | Match file rename |
+| `source_policies` (config key in `config.yaml`) | `ingestion_policies` | Clarify these are format ingestion rules, not external source references |
+| `SourcePoliciesConfig` (in `config/mod.rs`) | `IngestionPoliciesConfig` | Match config key rename |
+| Stale entries in `config.yaml` `source_policies` | Remove `wikipedia_xml`, `wikidata_truthy`, `openapi_spec`, `common_crawl_wet` | External open-source formats not used — config.yaml already cleaned |
+
+**Files to modify:** `src/lib.rs`, `src/open_sources.rs` (rename), `src/config/mod.rs`, `src/engine.rs`, `src/training/pipeline.rs`, `config/config.yaml`
 
 ---
 
@@ -30,6 +74,8 @@
 ### Dependency Graph
 
 ```
+Phase 0 (Folder Restructuring) — COMPLETED
+
 Phase 1 (Foundation)
   ├── Phase 2 (Classification Training)
   ├── Phase 3 (Reasoning Training)
@@ -43,7 +89,7 @@ Phase 7 (Efficiency) → can start after Phase 2
 Phase 8 (Sweep Harness) → depends on Phases 2, 3, 4
 Phase 9 (Integration Tests) → depends on all phases
 Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Evidence Merge)
-Phase 11 (Hardening + Robustness + Edge Cases) → depends on Phases 2, 4, 5, 10
+Phase 11 (Architecture Feature Implementation) → depends on Phases 2, 4, 5, 10
   ├── 11A (Semantic Probes) → depends on Phase 2 (Classification)
   ├── 11B (Micro-Validator + Lazy Gating) → depends on Phase 3 (Evidence Merge)
   ├── 11C (Adaptive Dims + Anchor Locking) → depends on Phase 4 (Word Graph)
@@ -55,24 +101,31 @@ Phase 11 (Hardening + Robustness + Edge Cases) → depends on Phases 2, 4, 5, 10
   ├── 11I (Silent Training Quarantine) → depends on Phase 2 (Classification Training)
   ├── 11J (Dynamic Hub Election) → depends on 11G (Hub Management)
   └── 11K (Feedback Queue) → depends on Phase 10 (On-the-fly Learning, feedback)
+
+Phase 12 (Architecture Fixes) → depends on Phases 2, 4
+  ├── 12A (Confidence Formula) → depends on Phase 2 (ClassificationCalculator)
+  ├── 12B (Beam Search + Per-Profile Max Steps) → depends on Phase 4 (Graph Walker)
+  └── 12C (A* Exploration Limit) → depends on Phase 4 (Pathfinding)
 ```
 
 ### Estimated Effort
 
-| Phase | Files New | Files Modified | Estimated LOC | Priority |
-|-------|-----------|---------------|---------------|----------|
-| 1. Foundation | 1 | 4 | ~400 | P0 |
-| 2. Classification Training | 1 | 4 | ~800 | P0 |
-| 3. Reasoning Training | 2 | 3 | ~1200 | P0 |
-| 4. Predictive Training | 1 | 3 | ~1000 | P0 |
-| 5. Consistency | 1 | 2 | ~500 | P1 |
-| 6. Dataset Generators | 4 | 2 | ~2000 | P0 |
-| 7. Efficiency | 0 | 8 | ~600 | P2 |
-| 8. Sweep Harness | 1 | 1 | ~400 | P1 |
-| 9. Integration Tests | 1 | 1 | ~600 | P1 |
-| 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
-| 11. Hardening + Edge Cases | 6 | 12 | ~1900 | P0–P2 |
-| **Total** | **16** | **~22** | **~9520** | |
+| Phase | Files New | Files Modified | Estimated LOC | Priority | Status |
+|-------|-----------|---------------|---------------|----------|--------|
+| 0. Folder Restructuring | 0 | 16 | ~0 (moves) | P0 | ✅ Done |
+| 1. Foundation | 1 | 4 | ~400 | P0 | |
+| 2. Classification Training | 1 | 4 | ~800 | P0 | |
+| 3. Reasoning Training | 2 | 3 | ~1200 | P0 | |
+| 4. Predictive Training | 1 | 3 | ~1000 | P0 | |
+| 5. Consistency | 1 | 2 | ~500 | P1 | |
+| 6. Dataset Generators | 4 | 2 | ~2000 | P0 | |
+| 7. Efficiency | 0 | 8 | ~600 | P2 | |
+| 8. Sweep Harness | 1 | 1 | ~400 | P1 | |
+| 9. Integration Tests | 1 | 1 | ~600 | P1 | |
+| 10. On-the-fly Learning | 0 | 3 | ~120 | P1 | |
+| 11. Architecture Features | 6 | 12 | ~1900 | P0–P2 | |
+| 12. Architecture Fixes | 0 | 3 | ~250 | P0 | |
+| **Total** | **18** | **~46** | **~9770** | | |
 
 ---
 
@@ -1990,9 +2043,9 @@ self.feedback_controller.track_walked_edges(walked_edges);
 
 ---
 
-## 12. Phase 11: Hardening Improvements
+## 12. Phase 11: Architecture Feature Implementation
 
-Eleven targeted improvements to harden Classification accuracy, Reasoning consistency, Predictive stability, on-the-fly learning quality, and cross-system evolution. See Architecture §3.9, §4.3.1, §5.9, §5.10, §4.9 Ext 2b, §6.1.
+Eleven targeted implementations that bring the codebase in line with the architecture spec — covering Classification accuracy (semantic probes), Reasoning consistency (micro-validator, lazy gating), Predictive stability (adaptive dims, anchor locking, hub management, context bloom, POS blending, dynamic hub election), on-the-fly learning quality (TTG lease edges, feedback queue), and cross-system evolution (structural feedback, silent training quarantine). See Architecture §3.9, §4.3.1, §5.9, §5.10, §4.9 Ext 2b, §6.1.
 
 ### Task 11A: Semantic Anchor Probes (`src/classification/signature.rs` + new file)
 
@@ -3038,7 +3091,105 @@ layer_5_semantic_map:
 
 ---
 
-## 13. Config Changes Summary
+## 13. Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit)
+
+Three critical fixes to bring inference-path logic in line with the updated architecture (§3.5, §4.2, §5.4).
+
+### Task 12A: Confidence Formula Fix (`src/classification/calculator.rs`)
+
+**Architecture Reference:** §3.5
+
+**Problem:** The current confidence formula `(best - runner_up) / best + best` saturates at 1.0 for any decent centroid match (e.g., best=0.8, runner_up=0.3 → 1.425, clamped to 1.0), making all downstream thresholds (0.40, 0.72, 0.85) meaningless.
+
+**Fix:** Replace with compound margin-blend formula:
+
+```rust
+// In ClassificationCalculator::classify()
+let margin = (best_sim - runner_up_sim) / best_sim.max(1e-6);
+let w = self.config.classification.margin_blend_weight; // default: 0.50
+let confidence = best_sim * (w + (1.0 - w) * margin);
+// Result naturally bounded in [0, 1], discriminates well across the full range
+```
+
+**Config:** `classification.margin_blend_weight` (default: 0.50, added to `ClassificationConfig` in `src/config/mod.rs`).
+
+**Files modified:** `src/classification/calculator.rs`, `src/config/mod.rs`, `config/config.yaml`  
+**Tests:**
+- `confidence_discriminates_clear_winner_vs_ambiguous`
+- `confidence_never_exceeds_one`
+- `margin_blend_weight_zero_gives_pure_similarity`
+- `margin_blend_weight_one_gives_pure_margin`
+
+### Task 12B: Beam Search + Per-Profile Max Steps (`src/engine.rs`)
+
+**Architecture Reference:** §4.2, §5.4
+
+**Problem:** `beam_width` was configured per profile (3–10) but never wired into the graph walk algorithm. The walk used greedy single-step selection. `max_steps` was a single global default (50), too short for Explain/Plan/Brainstorm intents.
+
+**Fix:** Replace the greedy walk loop in `process_prompt()` (L15 Graph Walker) with a beam search that:
+1. Maintains `beam_width` (from active profile) parallel candidate sequences
+2. At each step, expands all beams by their top candidates, then prunes to top `beam_width` by cumulative score
+3. Uses `max_steps` from the active profile (50–300 depending on intent)
+
+```rust
+// In engine.rs — L15 Graph Walker
+let beam_width = self.active_profile().beam_width;
+let max_steps = self.active_profile().max_steps;
+let mut beams: Vec<Beam> = vec![Beam::new(start_node)];
+
+for _step in 0..max_steps {
+    let mut next_beams = Vec::new();
+    for beam in &beams {
+        let candidates = self.expand_beam(beam, grid, scorer, resolver);
+        next_beams.extend(candidates);
+    }
+    next_beams.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    next_beams.truncate(beam_width);
+    beams = next_beams;
+    if beams.iter().all(|b| b.is_terminal()) { break; }
+}
+```
+
+**Config:** Per-profile `beam_width` and `max_steps` already in `adaptive_behavior.profiles.<name>` (§4.2).
+
+**Files modified:** `src/engine.rs`  
+**Tests:**
+- `beam_search_produces_better_sequences_than_greedy`
+- `max_steps_respected_per_profile`
+- `beam_width_1_equivalent_to_greedy`
+
+### Task 12C: A* Exploration Limit (`src/predictive/router.rs`)
+
+**Architecture Reference:** §5.4
+
+**Problem:** Tier 3 on-the-fly pathfinding via A* has no limit on explored nodes. Through dense Function-word hubs (2000+ edges), a single pathfinding call could explore thousands of nodes before finding a path or giving up.
+
+**Fix:** Add `pathfind_max_explored_nodes` (default: 500) to cap A* search. When the limit is hit, return the best partial path found so far (or `None` if no viable path).
+
+```rust
+// In router.rs — astar_pathfind()
+let max_explored = self.config.word_graph.pathfind_max_explored_nodes; // default: 500
+let mut explored = 0;
+while let Some(current) = open_set.pop() {
+    explored += 1;
+    if explored > max_explored {
+        return best_partial_path; // graceful degradation
+    }
+    // ... normal A* expansion
+}
+```
+
+**Config:** `layer_5_semantic_map.pathfind_max_explored_nodes` (default: 500, added to `WordGraphConfig` in `src/config/mod.rs`).
+
+**Files modified:** `src/predictive/router.rs`, `src/config/mod.rs`, `config/config.yaml`  
+**Tests:**
+- `astar_respects_exploration_limit`
+- `astar_returns_partial_path_on_limit`
+- `dense_hub_does_not_cause_timeout`
+
+---
+
+## 14. Config Changes Summary
 
 All new config fields with their defaults:
 
@@ -3135,7 +3286,7 @@ All new config fields with their defaults:
 
 ---
 
-## 14. File Manifest
+## 15. File Manifest
 
 ### New Files (16)
 
@@ -3168,11 +3319,11 @@ All new config fields with their defaults:
 | `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management, context_bloom, quarantine sections |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
 | `src/classification/trainer.rs` | 2, 11I | Full rewrite: centroid + sweep + calibration; quarantine buffer wiring |
-| `src/classification/calculator.rs` | 2, 7, 11A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring |
+| `src/classification/calculator.rs` | 2, 7, 11A, 12A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring, confidence formula fix (margin-blend) |
 | `src/classification/signature.rs` | 7, 11A | Add POS tag LRU cache, extend to 82-float with semantic flags |
 | `src/classification/mod.rs` | 11A, 11C | Add semantic_anchors, semantic_zones module exports |
 | `src/classification/input.rs` | 11J | Add language/script detection for function word bootstrap |
-| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G, 11H, 11K | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating, context bloom walk gating, trace_id wiring |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G, 11H, 11K, 12B | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating, context bloom walk gating, trace_id wiring, beam search + per-profile max_steps |
 | `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
 | `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
 | `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
@@ -3182,7 +3333,7 @@ All new config fields with their defaults:
 | `src/reasoning/retrieval.rs` | 11B | Add MetadataSummary extraction during L12 normalization |
 | `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator with lazy gating |
 | `src/reasoning/feedback.rs` | 5, 10, 11E, 11K | Wire consistency corrections, implicit feedback, Tier3OveruseTracker with hysteresis, FeedbackQueue with trace-ID matching |
-| `src/predictive/router.rs` | 11D, 11F, 11G, 11H, 11J | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion, ContextBloom + migration, betweenness centrality + dynamic hub election + language bootstrap |
+| `src/predictive/router.rs` | 11D, 11F, 11G, 11H, 11J, 12C | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion, ContextBloom + migration, betweenness centrality + dynamic hub election + language bootstrap, A* exploration limit |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
 
 ### Execution Order (Critical Path)
@@ -3195,11 +3346,13 @@ Week 4: Phase 4 (Predictive Training)
 Week 5: Phase 5 (Consistency) + Phase 7 (Efficiency — can parallelize)
 Week 6: Phase 8 (Sweep Harness) + Phase 9 (Integration Tests)
 Week 7: Phase 10 (On-the-fly Learning) — lightweight, can overlap with Week 6
-Week 8-9: Phase 11 (Hardening + Robustness + Edge Cases) — sub-tasks can parallelize:
+Week 8-9: Phase 11 (Architecture Feature Implementation) — sub-tasks can parallelize:
          11A (Semantic Probes) + 11B (Micro-Validator + Lazy Gating) + 11F (POS Blending)
          11C (Adaptive Dims + Anchor Locking) + 11G (Hub Management) + 11H (Context Bloom)
          11D (TTG Lease Edges) + 11E (Structural Feedback + Hysteresis)
          11I (Silent Training Quarantine) + 11J (Dynamic Hub Election) + 11K (Feedback Queue)
+Week 9: Phase 12 (Architecture Fixes) — can start after Phase 2+4:
+         12A (Confidence Formula) + 12B (Beam Search) + 12C (A* Limit)
 ```
 
 ### Verification Commands

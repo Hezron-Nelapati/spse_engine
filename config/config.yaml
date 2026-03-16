@@ -549,39 +549,9 @@ source_policies:
     memory_type: episodic
     decay_days: 14
     usage_tag: "explanation_patterns"
-  wikipedia_xml:
-    extraction_mode: "article_text"
-    fields_to_extract: ["title", "text"]
-    fields_to_skip: ["revision", "contributor", "timestamp"]
-    merge_to_core: false
-    trust_bonus: 0.10
-    memory_type: core
-    decay_days: 30
-    usage_tag: "core_knowledge"
-  wikidata_truthy:
-    extraction_mode: "entity_extract"
-    fields_to_extract: ["label", "description", "claims"]
-    skip_internal_ids: true
-    merge_to_core: true
-    trust_bonus: 0.20
-    memory_type: core
-    min_corroborations: 1
-  openapi_spec:
-    extraction_mode: "entity_extract"
-    fields_to_extract: ["operationId", "summary", "description", "parameters", "requestBody", "responses"]
-    fields_to_skip: ["id", "timestamp"]
-    merge_to_core: false
-    trust_bonus: 0.20
-    memory_type: core
-    usage_tag: "procedure_knowledge"
-  common_crawl_wet:
-    extraction_mode: "readability"
-    normalize_whitespace: true
-    trim_lines: true
-    merge_to_core: false
-    trust_bonus: 0.0
-    memory_type: episodic
-    decay_days: 7
+  # Removed: wikipedia_xml, wikidata_truthy, openapi_spec, common_crawl_wet
+  # No external open-source datasets are used for training or seeding.
+  # Factual knowledge is acquired at runtime via web retrieval (html policy above).
 
 silent_training:
   max_memory_delta_mb: 0.5

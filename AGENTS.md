@@ -83,7 +83,7 @@ Cross-cutting concerns use descriptive names:
 - `adaptive_behavior`
 - `memory_budgets`
 - `document`
-- `source_policies`
+- `ingestion_policies`
 - `silent_training`
 - `huggingface_streaming`
 - `training_phases`
@@ -142,7 +142,7 @@ spse_engine/
 │   ├── persistence.rs       # SQLite layer
 │   ├── spatial_index.rs     # Spatial grid, force layout
 │   ├── region_index.rs      # Regional spatial index
-│   ├── open_sources.rs      # Source catalog
+│   ├── dataset_catalog.rs   # Internal dataset catalog (custom-generated only)
 │   ├── document.rs          # Document processing
 │   ├── api.rs               # REST API
 │   ├── scheduler.rs         # Priority scheduler

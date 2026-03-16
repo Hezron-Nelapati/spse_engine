@@ -2,7 +2,7 @@
 
 **Document Version:** 14.2  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements + Production Edge-Case Fixes
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Architecture Feature Implementation + Production Edge-Case Fixes
 
 ---
 
@@ -104,7 +104,7 @@ pub mod gpu              // GPU acceleration (feature-gated wgpu)
 pub mod predictive       // Predictive System: Word Graph (L5), Step Resolver (L16), Sequence Assembler (L17)
 pub mod reasoning        // Reasoning System: Context (L7), Retrieval (L11), Merge (L13), Search (L14), Feedback (L18)
 pub mod memory           // Reasoning System: MemoryStore (L4/L21) + DynamicMemoryAllocator
-pub mod open_sources     // Internal dataset catalog
+pub mod dataset_catalog  // Internal dataset catalog (custom-generated only)
 pub mod persistence      // SQLite persistence layer
 pub mod proto            // Protobuf definitions (api.proto)
 pub mod region_index     // Predictive System: regional spatial index
@@ -369,7 +369,7 @@ trust = default_source_trust (0.50)
       + format_trust_adjustments    per detected format
 ```
 
-Format trust adjustments: `html_raw` (-0.30), `qa_json_schema_keys` (-0.40), `structured_entity` (+0.20), `code_syntax` (-0.10).
+Format trust adjustments: `html_raw` (-0.30), `structured_entity` (+0.20), `plain_text` (0.00).
 
 Content quality thresholds:
 
@@ -2503,9 +2503,9 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `telemetry` | `layer_20_telemetry` | `TelemetryConfig` |
 | `document` | `document` | `DocumentIngestionConfig` |
 | `training_phases` | `training_phases` | `TrainingPhaseOverridesConfig` |
-| `source_policies` | `source_policies` | `SourcePoliciesConfig` |
+| `ingestion_policies` | `ingestion_policies` | `IngestionPoliciesConfig` (custom_training, runtime_html, plain_text, local_document) |
 | `silent_training` | `silent_training` | `SilentTrainingConfig` (includes quarantine: enabled, conflict_threshold, min_examples) |
-| `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` |
+| `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` (tokenizer only — no model weights) |
 | `gpu` | `gpu` | `GpuConfig` |
 | `multi_engine` | `multi_engine` | `MultiEngineConfig` |
 | `config_sweep` | `config_sweep` | `ConfigSweepConfig` |
@@ -2538,22 +2538,16 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | Sparsity intent threshold | `consistency.sparsity_intent_threshold` | 3 | Cross-cutting | R7: distinct intents with high Tier 3 before broad sparsity triggers |
 | Sparsity Tier 3 rate | `consistency.sparsity_tier3_rate` | 0.30 | Cross-cutting | R7: per-intent Tier 3 rate counting toward sparsity detection |
 
-### Source Policies
+### Ingestion Policies
 
-Per-format ingestion policies (governs how Reasoning System L4 ingests content):
+Per-format ingestion policies (governs how Reasoning System L4 ingests content). The engine uses only custom-generated datasets for training; factual knowledge is acquired at runtime via web retrieval.
 
-| Policy | Extraction Mode | Memory Type | Trust Bonus | Decay Days |
-|--------|----------------|-------------|-------------|------------|
-| `seed_training` | field_select | Core | +0.30 | 30 |
-| `html` | readability | Episodic | 0.00 | 7 |
-| `qa_json` | field_select | Episodic | +0.10 | 14 |
-| `structured_json` | entity_extract | Core | +0.20 | — |
-| `plain_text` | passthrough | Episodic | +0.10 | 30 |
-| `code` | code_strip | Episodic | 0.00 | 14 |
-| `wikipedia_xml` | article_text | Episodic | +0.10 | 30 |
-| `wikidata_truthy` | entity_extract | Core | +0.20 | — |
-| `openapi_spec` | entity_extract | Core | +0.20 | — |
-| `common_crawl_wet` | readability | Episodic | 0.00 | 7 |
+| Policy | Use Case | Extraction Mode | Memory Type | Trust Bonus | Decay Days |
+|--------|----------|----------------|-------------|-------------|------------|
+| `custom_training` | Seed dataset generator output (§11) | field_select | Core | +0.30 | — |
+| `runtime_html` | Web-retrieved content via L11 (SearxNG) | readability | Episodic | 0.00 | 7 |
+| `plain_text` | User-uploaded plain text documents | passthrough | Episodic | +0.10 | 30 |
+| `local_document` | User-uploaded files (PDF, DOCX via `document.rs`) | entity_extract | Episodic | +0.10 | 14 |
 
 ### Memory Budget Tiers
 
@@ -3197,11 +3191,11 @@ Each example includes:
 - `context` hint (e.g., `retrieval_trigger:population_lookup`)
 - `curriculum_score` for training ordering (higher = earlier)
 
-### 11.9 Internal Dataset Catalog (`src/open_sources.rs`)
+### 11.9 Internal Dataset Catalog (`src/dataset_catalog.rs`)
 
-**No external open-source datasets are used for training or seeding.** The engine acquires factual knowledge at runtime via web retrieval triggered during reasoning.
+**No external open-source datasets are used for training or seeding.** All training data is produced by the custom dataset generators in `src/seed/`. The engine acquires factual knowledge at runtime via web retrieval triggered during reasoning.
 
-Internal-only datasets:
+Internal-only datasets (generated by seed generators):
 
 | Source | Category | License | Default Memory | Integration |
 |--------|----------|---------|----------------|-------------|
@@ -3427,7 +3421,7 @@ spse_engine/
 │   ├── api.rs                     # REST API router (axum)
 │   ├── bloom_filter.rs            # UnitBloomFilter
 │   ├── document.rs                # Document processing (PDF, DOCX, text)
-│   ├── open_sources.rs            # Internal dataset catalog (no external open sources)
+│   ├── dataset_catalog.rs         # Internal dataset catalog (custom-generated only)
 │   ├── persistence.rs             # SQLite persistence layer
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
 │   ├── spatial_index.rs           # SpatialGrid for O(1) cell queries
@@ -3521,7 +3515,7 @@ spse_engine/
 | **L_class** | Classification loss: `L_intent + 0.5 × L_tone + 0.3 × L_gate` | Classification |
 | **L_reason** | Reasoning loss: `L_ranking + 0.3 × L_merge_f1 + 0.5 × L_chain` | Reasoning |
 | **L_pred** | Predictive loss: `L_next_word + 0.1 × L_spatial_energy + 0.2 × L_edge_quality` | Predictive |
-| **L_consistency** | Cross-system mismatch rate across 4 consistency rules | Cross-cutting |
+| **L_consistency** | Cross-system mismatch rate across 7 consistency rules (R1–R7) | Cross-cutting |
 | **Attract/Repel** | Position adjustment forces: connected words attract, unconnected repel during layout | Predictive |
 | **Graph Walk** | Autoregressive sequence generation by walking directed edges in the Word Graph | Predictive |
 | **Decomposition** | Splitting a complex query into sub-questions for multi-hop reasoning | Reasoning |
@@ -3580,7 +3574,7 @@ spse_engine/
 | How do we train intent recognition? | Classification | §11.2: Centroid construction + Bayesian weight sweep |
 | How do we train reasoning quality? | Reasoning | §11.3: 7D weight optimization + decomposition templates |
 | How do we train the Word Graph? | Predictive | §11.4: Edge formation from Q&A + highway detection + layout |
-| How do we ensure systems agree? | Cross-cutting | §11.5: Consistency loop with 4 rules + asymmetric correction |
+| How do we ensure systems agree? | Cross-cutting | §11.5: Consistency loop with 7 rules (R1–R7) + asymmetric correction |
 | How does the system learn on-the-fly? | Reasoning + Predictive | §4.9: Cold-start detection → retrieval → L13 edge injection → L18 implicit feedback |
 | What are the product flow scenarios? | All | §4.10: Flows A–G covering direct answer, reasoning, retrieval, cold start, social, retry, multi-turn |
 | How do we detect sarcasm/irony? | Classification | §3.9: Semantic Anchor Probes — ~500 anchors, FNV hash match, 4 semantic flags |
