@@ -1,9 +1,9 @@
 use crate::config::{
     EngineConfig, GovernanceConfig, RetrievalIoConfig, TrustConfig, UnitBuilderConfig,
 };
-use crate::layers::builder::UnitBuilder;
-use crate::layers::input;
-use crate::layers::safety::TrustSafetyValidator;
+use crate::classification::builder::UnitBuilder;
+use crate::classification::input;
+use crate::classification::safety::TrustSafetyValidator;
 use crate::types::{
     DatabaseHealthMetrics, EvidenceState, RetrievedDocument, SanitizedQuery, TrainingSourceType,
 };

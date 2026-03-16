@@ -692,8 +692,8 @@ fn max_window_size(config: &UnitBuilderConfig) -> usize {
 mod tests {
     use super::UnitBuilder;
     use crate::config::{GovernanceConfig, UnitBuilderConfig};
-    use crate::layers::hierarchy::HierarchicalUnitOrganizer;
-    use crate::layers::input;
+    use crate::classification::hierarchy::HierarchicalUnitOrganizer;
+    use crate::classification::input;
     use crate::memory::store::MemoryStore;
     use crate::types::{DatabaseHealthMetrics, DatabaseMaturityStage, SourceKind};
     use uuid::Uuid;

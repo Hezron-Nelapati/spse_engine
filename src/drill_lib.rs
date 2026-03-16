@@ -7,9 +7,9 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::config::{GovernanceConfig, UnitBuilderConfig};
-use crate::layers::builder::UnitBuilder;
-use crate::layers::output::OutputDecoder;
-use crate::layers::safety::TrustSafetyValidator;
+use crate::classification::builder::UnitBuilder;
+use crate::classification::safety::TrustSafetyValidator;
+use crate::predictive::output::OutputDecoder;
 use crate::memory::store::MemoryStore;
 use crate::types::{
     IntentKind, Unit,
@@ -981,7 +981,7 @@ fn generate_dynamic_reasoning_corpus() -> Vec<String> {
 
 fn run_dynamic_reasoning_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     use crate::config::ReasoningLoopConfig;
-    use crate::layers::intent::IntentDetector;
+    use crate::classification::intent::IntentDetector;
     
     let mut metrics = HashMap::new();
     let config = ReasoningLoopConfig::default();
@@ -1063,7 +1063,7 @@ fn generate_creative_spark_corpus() -> Vec<String> {
 
 fn run_creative_spark_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     use crate::config::CreativeSparkConfig;
-    use crate::layers::router::SemanticRouter;
+    use crate::predictive::router::SemanticRouter;
     use crate::types::ScoredCandidate;
     use uuid::Uuid;
     
@@ -1136,7 +1136,7 @@ fn generate_anchor_validation_corpus() -> Vec<String> {
 
 fn run_anchor_validation_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
     use crate::config::CreativeSparkConfig;
-    use crate::layers::resolver::FineResolver;
+    use crate::predictive::resolver::FineResolver;
     use crate::types::ScoredCandidate;
     use uuid::Uuid;
     
@@ -1715,7 +1715,7 @@ fn generate_config_sweep_no_optimal_corpus() -> Vec<String> {
 }
 
 fn run_multi_engine_consensus_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::layers::retrieval::MultiEngineAggregator;
+    use crate::reasoning::retrieval::MultiEngineAggregator;
     use crate::config::MultiEngineConfig;
     
     let mut metrics = HashMap::new();
@@ -1798,7 +1798,7 @@ fn run_multi_engine_unavailable_drill(category: &DrillCategory) -> (bool, String
 }
 
 fn run_structured_parsing_drill(category: &DrillCategory) -> (bool, String, String, HashMap<String, f64>) {
-    use crate::layers::retrieval::StructuredParser;
+    use crate::reasoning::retrieval::StructuredParser;
     
     let mut metrics = HashMap::new();
     

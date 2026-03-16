@@ -6,19 +6,19 @@ use crate::document::{
     answer_question, load_documents_from_paths_with_config, parse_inline_document_request,
     DocumentAnswer, DocumentQueryState,
 };
-use crate::layers::builder::UnitBuilder;
-use crate::layers::feedback::FeedbackController;
-use crate::layers::hierarchy::HierarchicalUnitOrganizer;
-use crate::layers::input;
-use crate::layers::intent::IntentDetector;
-use crate::layers::merge::EvidenceMerger;
-use crate::layers::output::OutputDecoder;
-use crate::layers::query::{focus_query_text, SafeQueryBuilder};
-use crate::layers::resolver::FineResolver;
-use crate::layers::retrieval::RetrievalPipeline;
-use crate::layers::router::SemanticRouter;
-use crate::layers::safety::TrustSafetyValidator;
-use crate::layers::search::{top_unit_ids, CandidateScorer, score_candidates_gpu_accelerated};
+use crate::classification::builder::UnitBuilder;
+use crate::classification::hierarchy::HierarchicalUnitOrganizer;
+use crate::classification::input;
+use crate::classification::intent::IntentDetector;
+use crate::classification::query::{focus_query_text, SafeQueryBuilder};
+use crate::classification::safety::TrustSafetyValidator;
+use crate::reasoning::feedback::FeedbackController;
+use crate::reasoning::merge::EvidenceMerger;
+use crate::reasoning::retrieval::RetrievalPipeline;
+use crate::reasoning::search::{top_unit_ids, CandidateScorer, score_candidates_gpu_accelerated};
+use crate::predictive::output::OutputDecoder;
+use crate::predictive::resolver::FineResolver;
+use crate::predictive::router::SemanticRouter;
 use crate::memory::store::{MemorySnapshot, MemoryStore};
 use crate::memory::{DynamicMemoryAllocator, DynamicMemoryConfig, MemoryStats};
 use crate::scheduler::{PriorityScheduler, WorkPriority};
@@ -892,7 +892,7 @@ impl Engine {
                                 };
                                 let packet = input::ingest_raw(&combined, true);
                                 let build_output =
-                                    crate::layers::builder::UnitBuilder::build_units_static(
+                                    crate::classification::builder::UnitBuilder::build_units_static(
                                         &packet, config_ref,
                                     );
                                 let hierarchy = HierarchicalUnitOrganizer::organize(

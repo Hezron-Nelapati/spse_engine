@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use spse_engine::config::{GovernanceConfig, UnitBuilderConfig};
-use spse_engine::layers::{builder::UnitBuilder, hierarchy::HierarchicalUnitOrganizer, input};
+use spse_engine::classification::{builder::UnitBuilder, hierarchy::HierarchicalUnitOrganizer, input};
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::types::{SourceKind, UnitLevel};
 

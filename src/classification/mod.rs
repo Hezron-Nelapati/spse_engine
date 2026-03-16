@@ -1,17 +1,18 @@
-//! Classification module for calculation-based intent, tone, and resolver mode inference.
+//! Classification System (L1, L2, L3, L9, L10, L19)
 //!
-//! This module implements a hybrid retrieval-augmented classification system that:
-//! - Computes lightweight feature signatures from input text
-//! - Queries nearby patterns using Layer 6 Spatial Index
-//! - Aggregates votes from retrieved patterns
-//! - Learns from labeled seed data via Layer 18 feedback
+//! Ingests raw text/sentences to identify intent, tone, uncertainty, and semantic
+//! category. Acts as the gatekeeper that determines what the input means and
+//! whether external help is needed.
 //!
-//! Architecture alignment:
-//! - Layer 2: ClassificationSignature as specialized Unit feature
-//! - Layer 4: ClassificationPattern storage in Intent memory channel
-//! - Layer 6: Spatial query for O(log N) pattern retrieval
-//! - Layer 14: Similarity scoring and candidate aggregation
-//! - Layer 18: Feedback-driven learning and spatial adjustment
+//! Core Mechanism: Nearest Centroid Classifier using 78-float POS-based feature
+//! vectors with configurable feature weights.
+
+pub mod builder;
+pub mod hierarchy;
+pub mod input;
+pub mod intent;
+pub mod query;
+pub mod safety;
 
 mod signature;
 mod pattern;
@@ -22,6 +23,12 @@ pub use signature::{ClassificationSignature, SemanticHasher};
 pub use pattern::{ClassificationPattern, parse_intent_kind, parse_tone_kind};
 pub use calculator::ClassificationCalculator;
 pub use trainer::{ClassificationTrainer, TrainingOutcome, IterationReport, FinalReport, LabeledDialogue, LabeledTurn, DialogueMetadata, ExpectedUnitCount, MemoryTarget};
+
+pub use builder::UnitBuilder;
+pub use hierarchy::HierarchicalUnitOrganizer;
+pub use intent::IntentDetector;
+pub use query::SafeQueryBuilder;
+pub use safety::TrustSafetyValidator;
 
 // Re-export types from crate::types for convenience
 pub use crate::types::{ClassificationResult, CalculationMethod};

@@ -11,12 +11,12 @@ use chrono::Utc;
 
 use spse_engine::config::{EngineConfig, UnitBuilderConfig, GovernanceConfig};
 use spse_engine::engine::Engine;
-use spse_engine::layers::builder::UnitBuilder;
-use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
-use spse_engine::layers::intent::IntentDetector;
-use spse_engine::layers::output::OutputDecoder;
-use spse_engine::layers::resolver::FineResolver;
-use spse_engine::layers::search::CandidateScorer;
+use spse_engine::classification::builder::UnitBuilder;
+use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
+use spse_engine::classification::intent::IntentDetector;
+use spse_engine::predictive::output::OutputDecoder;
+use spse_engine::predictive::resolver::FineResolver;
+use spse_engine::reasoning::search::CandidateScorer;
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::spatial_index::SpatialGrid;
 use spse_engine::types::{

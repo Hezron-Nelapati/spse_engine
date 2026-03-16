@@ -10,25 +10,25 @@ The engine implements a 21-layer processing pipeline. Each layer has specific re
 
 | Layer | Name | Module | Config Section | Responsibility |
 |-------|------|--------|----------------|----------------|
-| L1 | Input Ingestion | `layers/input.rs` | - | Normalize raw text, create `InputPacket` |
-| L2 | Unit Builder | `layers/builder.rs` | `layer_2_unit_builder` | Rolling hash discovery, unit activation, scoring |
-| L3 | Hierarchy Organizer | `layers/hierarchy.rs` | - | Level grouping, anchor/entity extraction |
+| L1 | Input Ingestion | `classification/input.rs` | - | Normalize raw text, create `InputPacket` |
+| L2 | Unit Builder | `classification/builder.rs` | `layer_2_unit_builder` | Rolling hash discovery, unit activation, scoring |
+| L3 | Hierarchy Organizer | `classification/hierarchy.rs` | - | Level grouping, anchor/entity extraction |
 | L4 | Memory Ingestion | `memory/store.rs` | `layer_21_memory_governance` | Unit persistence, candidate observation |
-| L5 | Semantic Router | `layers/router.rs` | `layer_5_semantic_map` | Spatial routing, neighbor selection, escape |
-| L6 | Context Manager | `layers/context.rs` | - | Context matrix, sequence state, task entities |
-| L7 | Intent Detector | `layers/intent.rs` | `intent` | Intent classification, entropy calculation |
+| L5 | Semantic Router | `predictive/router.rs` | `layer_5_semantic_map` | Spatial routing, neighbor selection, escape |
+| L6 | Context Manager | `reasoning/context.rs` | - | Context matrix, sequence state, task entities |
+| L7 | Intent Detector | `classification/intent.rs` | `intent` | Intent classification, entropy calculation |
 | L8 | Adaptive Runtime | `config/mod.rs` | `adaptive_behavior` | Profile selection, weight adjustment |
-| L9 | Retrieval Decision | `layers/intent.rs` | `layer_9_retrieval_gating` | Entropy/freshness/cost scoring |
-| L10 | Query Builder | `layers/query.rs` | `layer_10_query_builder` | Safe query construction, PII stripping |
-| L11 | Retrieval Pipeline | `layers/retrieval.rs` | `layer_11_retrieval` | External source fetching, caching |
-| L12 | Safety Validator | `layers/safety.rs` | `layer_19_trust_heuristics` | Trust assessment, document filtering |
-| L13 | Evidence Merger | `layers/merge.rs` | `layer_13_evidence_merge` | Conflict detection, agreement scoring |
-| L14 | Candidate Scorer | `layers/search.rs` | `layer_14_candidate_scoring` | 7-dimensional feature scoring |
+| L9 | Retrieval Decision | `classification/intent.rs` | `layer_9_retrieval_gating` | Entropy/freshness/cost scoring |
+| L10 | Query Builder | `classification/query.rs` | `layer_10_query_builder` | Safe query construction, PII stripping |
+| L11 | Retrieval Pipeline | `reasoning/retrieval.rs` | `layer_11_retrieval` | External source fetching, caching |
+| L12 | Safety Validator | `classification/safety.rs` | `layer_19_trust_heuristics` | Trust assessment, document filtering |
+| L13 | Evidence Merger | `reasoning/merge.rs` | `layer_13_evidence_merge` | Conflict detection, agreement scoring |
+| L14 | Candidate Scorer | `reasoning/search.rs` | `layer_14_candidate_scoring` | 7-dimensional feature scoring |
 | L15 | Resolver Mode Selection | `engine.rs` | `adaptive_behavior` | Deterministic/Balanced/Exploratory |
-| L16 | Fine Resolver | `layers/resolver.rs` | `layer_16_fine_resolver` | Top-k selection, temperature-based |
-| L17 | Output Decoder | `layers/output.rs` | - | Answer finalization, sentence extraction |
-| L18 | Feedback Controller | `layers/feedback.rs` | - | Learning events, impact scoring |
-| L19 | Trust/Safety | `layers/safety.rs` | `layer_19_trust_heuristics` | Source validation, allowlist management |
+| L16 | Fine Resolver | `predictive/resolver.rs` | `layer_16_fine_resolver` | Top-k selection, temperature-based |
+| L17 | Output Decoder | `predictive/output.rs` | - | Answer finalization, sentence extraction |
+| L18 | Feedback Controller | `reasoning/feedback.rs` | - | Learning events, impact scoring |
+| L19 | Trust/Safety | `classification/safety.rs` | `layer_19_trust_heuristics` | Source validation, allowlist management |
 | L20 | Telemetry | `telemetry/` | `layer_20_telemetry` | Trace emission, observation logging |
 | L21 | Governance | `memory/store.rs` | `layer_21_memory_governance` | Pruning, promotion, maintenance |
 
@@ -98,35 +98,55 @@ spse_engine/
 │   ├── engine.rs            # Core engine orchestration
 │   ├── config/
 │   │   └── mod.rs           # Configuration structs and defaults
-│   ├── layers/
+│   ├── classification/      # Classification System (L1, L2, L3, L9, L10, L19)
 │   │   ├── mod.rs
-│   │   ├── input.rs         # L1
-│   │   ├── builder.rs       # L2
-│   │   ├── hierarchy.rs     # L3
-│   │   ├── router.rs        # L5
-│   │   ├── context.rs       # L6
-│   │   ├── intent.rs        # L7, L9
-│   │   ├── query.rs         # L10
-│   │   ├── retrieval.rs     # L11
-│   │   ├── safety.rs        # L12, L19
-│   │   ├── merge.rs         # L13
-│   │   ├── search.rs        # L14
-│   │   ├── resolver.rs      # L16
-│   │   ├── output.rs        # L17
-│   │   └── feedback.rs      # L18
-│   ├── memory/
+│   │   ├── input.rs         # L1: Input ingestion
+│   │   ├── builder.rs       # L2: Unit builder (rolling hash)
+│   │   ├── hierarchy.rs     # L3: Hierarchy organizer
+│   │   ├── intent.rs        # L9: Intent & uncertainty detection
+│   │   ├── query.rs         # L10: Safe query builder
+│   │   ├── safety.rs        # L19: Trust & safety validation
+│   │   ├── calculator.rs    # Nearest centroid classifier
+│   │   ├── signature.rs     # 78-float feature vector
+│   │   ├── pattern.rs       # Classification patterns
+│   │   └── trainer.rs       # Classification training pipeline
+│   ├── reasoning/           # Reasoning System (L7, L11, L13, L14, L18)
 │   │   ├── mod.rs
-│   │   └── store.rs         # L4, L21
-│   ├── telemetry/
+│   │   ├── context.rs       # L7: Context matrix management
+│   │   ├── retrieval.rs     # L11: External retrieval pipeline
+│   │   ├── merge.rs         # L13: Evidence merger
+│   │   ├── search.rs        # L14: 7D candidate scoring
+│   │   └── feedback.rs      # L18: Feedback controller
+│   ├── predictive/          # Predictive System (L5, L15, L16, L17)
 │   │   ├── mod.rs
-│   │   └── trace.rs         # L20
+│   │   ├── router.rs        # L5: Semantic router (3D map)
+│   │   ├── resolver.rs      # L16: Fine resolver
+│   │   └── output.rs        # L17: Output decoder
+│   ├── memory/              # Shared: Memory Store (L4, L21)
+│   │   ├── mod.rs
+│   │   ├── store.rs         # Memory store + governance
+│   │   └── dynamic.rs       # Dynamic memory allocation
+│   ├── training/            # Training infrastructure
+│   │   ├── mod.rs
+│   │   └── pipeline.rs      # Training pipeline, phases, plans
+│   ├── telemetry/           # Telemetry & Observability (L20)
+│   │   ├── mod.rs
+│   │   └── trace.rs
+│   ├── seed/                # Dataset generators
+│   │   └── mod.rs
+│   ├── gpu/                 # Optional GPU acceleration (wgpu)
+│   │   └── mod.rs
+│   ├── common/              # Shared utilities
+│   │   └── mod.rs
 │   ├── types.rs             # Core type definitions
 │   ├── persistence.rs       # SQLite layer
 │   ├── spatial_index.rs     # Spatial grid, force layout
-│   ├── training.rs          # Training pipeline
+│   ├── region_index.rs      # Regional spatial index
 │   ├── open_sources.rs      # Source catalog
 │   ├── document.rs          # Document processing
 │   ├── api.rs               # REST API
+│   ├── scheduler.rs         # Priority scheduler
+│   ├── bloom_filter.rs      # Bloom filter
 │   └── bin/
 │       └── test_harness.rs  # Config sweep harness
 ├── tests/
@@ -179,8 +199,10 @@ spse_engine/
 
 ### Layer File Mapping
 
-Each layer has a dedicated file in `src/layers/`:
-- File name matches primary concern: `intent.rs`, `retrieval.rs`, etc.
+Each layer lives in its parent system directory:
+- **Classification System** (`src/classification/`): L1, L2, L3, L9, L10, L19
+- **Reasoning System** (`src/reasoning/`): L7, L11, L13, L14, L18
+- **Predictive System** (`src/predictive/`): L5, L15, L16, L17
 - Multiple layers can share a file if tightly coupled (L7/L9 in `intent.rs`, L12/L19 in `safety.rs`)
 
 ## Testing Standards
@@ -269,23 +291,24 @@ When modifying the architecture:
 
 ### Adding a New Layer
 
-1. Create file in `src/layers/` with appropriate name
-2. Add layer to `src/layers/mod.rs` exports
-3. Create config struct in `src/config/mod.rs` with `layer_N_name` prefix
-4. Add config section to `config/config.yaml`
-5. Wire layer into `engine.rs` processing pipeline
-6. Update this document's layer mapping table
-7. Update README.md architecture section
-8. Add unit tests in layer file
+1. Identify which system owns the layer (Classification, Reasoning, or Predictive)
+2. Create file in the appropriate system directory (`src/classification/`, `src/reasoning/`, or `src/predictive/`)
+3. Add module to the system's `mod.rs` exports
+4. Create config struct in `src/config/mod.rs` with `layer_N_name` prefix
+5. Add config section to `config/config.yaml`
+6. Wire layer into `engine.rs` processing pipeline
+7. Update this document's layer mapping table
+8. Update README.md architecture section
+9. Add unit tests in layer file
 
 ### Adding a New Intent Kind
 
 1. Add variant to `IntentKind` enum in `types.rs`
-2. Add scoring logic in `layers/intent.rs`
+2. Add scoring logic in `classification/intent.rs`
 3. Add adaptive profile in `config/mod.rs` under `adaptive_behavior.intent_profiles`
 4. Add profile to `config/config.yaml`
 5. Update `docs/intent_handling.md`
-6. Add test case in `layers/intent.rs` tests
+6. Add test case in `classification/intent.rs` tests
 
 ## Code Review Checklist
 

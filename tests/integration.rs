@@ -16,8 +16,8 @@ use spse_engine::api;
 use spse_engine::config::{EngineConfig, GovernanceConfig, QueryBuilderConfig};
 use spse_engine::datasets;
 use spse_engine::engine::Engine;
-use spse_engine::layers::query::SafeQueryBuilder;
-use spse_engine::layers::safety::TrustSafetyValidator;
+use spse_engine::classification::query::SafeQueryBuilder;
+use spse_engine::classification::safety::TrustSafetyValidator;
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::open_sources;
 use spse_engine::persistence::Db;
@@ -1658,8 +1658,8 @@ fn channel_isolation_validation_detects_violations() {
 
 #[test]
 fn channel_isolation_validates_main_contains_all() {
-    use spse_engine::layers::builder::UnitBuilder;
-    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::classification::builder::UnitBuilder;
+    use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
     
@@ -1696,8 +1696,8 @@ fn channel_isolation_validates_main_contains_all() {
 
 #[test]
 fn channel_isolation_detects_excessive_overlap() {
-    use spse_engine::layers::builder::UnitBuilder;
-    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::classification::builder::UnitBuilder;
+    use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
     
@@ -1734,8 +1734,8 @@ fn channel_isolation_detects_excessive_overlap() {
 
 #[test]
 fn isolated_units_for_channel_returns_correct_units() {
-    use spse_engine::layers::builder::UnitBuilder;
-    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::classification::builder::UnitBuilder;
+    use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
     
@@ -1770,8 +1770,8 @@ fn isolated_units_for_channel_returns_correct_units() {
 
 #[test]
 fn intent_channel_isolation_prevents_core_pollution() {
-    use spse_engine::layers::builder::UnitBuilder;
-    use spse_engine::layers::hierarchy::HierarchicalUnitOrganizer;
+    use spse_engine::classification::builder::UnitBuilder;
+    use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
     

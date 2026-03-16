@@ -1,5 +1,5 @@
 use crate::config::DocumentIngestionConfig;
-use crate::layers::input;
+use crate::classification::input;
 use crate::types::{IntentKind, RetrievedDocument};
 use chrono::Utc;
 use lopdf::Document as PdfDocument;

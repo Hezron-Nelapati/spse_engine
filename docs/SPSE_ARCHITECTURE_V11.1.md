@@ -1933,39 +1933,44 @@ spse_engine/
 │   ├── types.rs                   # All core type definitions (~1278 lines)
 │   ├── config/
 │   │   └── mod.rs                 # EngineConfig + all sub-configs (~2758 lines)
-│   ├── layers/
-│   │   ├── mod.rs                 # Layer module exports
-│   │   ├── input.rs               # Classification: L1 input normalization
-│   │   ├── builder.rs             # Classification: L2 rolling hash unit discovery
-│   │   ├── hierarchy.rs           # Classification: L3 level grouping
-│   │   ├── intent.rs              # Classification: L7/L9 intent + retrieval gating
-│   │   ├── query.rs               # Classification: L10 safe query building
-│   │   ├── safety.rs              # Classification: L12/L19 trust validation
-│   │   ├── retrieval.rs           # Reasoning: L11 external retrieval
-│   │   ├── merge.rs               # Reasoning: L13 evidence merging
-│   │   ├── search.rs              # Reasoning: L14 7D candidate scoring
-│   │   ├── feedback.rs            # Reasoning: L18 learning events
-│   │   ├── router.rs              # Predictive: L5 3D spatial routing
-│   │   ├── context.rs             # Predictive: L6 context matrix / region index
-│   │   ├── resolver.rs            # Predictive: L16 fine resolution + shaping
-│   │   └── output.rs              # Predictive: L17 output decoding
-│   ├── memory/
+│   ├── classification/            # Classification System (L1, L2, L3, L9, L10, L19)
 │   │   ├── mod.rs
-│   │   ├── store.rs               # Reasoning: L4/L21 MemoryStore + governance
-│   │   └── dynamic.rs             # Reasoning: DynamicMemoryAllocator + ThoughtBuffer
-│   ├── telemetry/
+│   │   ├── input.rs               # L1: Input ingestion & normalization
+│   │   ├── builder.rs             # L2: Rolling hash unit discovery
+│   │   ├── hierarchy.rs           # L3: Level grouping & entity extraction
+│   │   ├── intent.rs              # L9: Intent detection & retrieval gating
+│   │   ├── query.rs               # L10: Safe query building (PII stripping)
+│   │   ├── safety.rs              # L19: Trust & safety validation
+│   │   ├── calculator.rs          # Nearest centroid classifier (78-float)
+│   │   ├── signature.rs           # ClassificationSignature (78-float feature vector)
+│   │   ├── pattern.rs             # ClassificationPattern (Intent channel)
+│   │   └── trainer.rs             # Classification training pipeline
+│   ├── reasoning/                 # Reasoning System (L7, L11, L13, L14, L18)
+│   │   ├── mod.rs
+│   │   ├── context.rs             # L7: Context matrix management
+│   │   ├── retrieval.rs           # L11: External retrieval pipeline
+│   │   ├── merge.rs               # L13: Evidence merging & conflict detection
+│   │   ├── search.rs              # L14: 7D candidate scoring
+│   │   └── feedback.rs            # L18: Feedback controller & learning events
+│   ├── predictive/                # Predictive System (L5, L15, L16, L17)
+│   │   ├── mod.rs
+│   │   ├── router.rs              # L5: 3D spatial routing & escape profiles
+│   │   ├── resolver.rs            # L16: Fine resolution + intent shaping
+│   │   └── output.rs              # L17: Output decoding & evidence grounding
+│   ├── memory/                    # Shared: Memory Store (L4, L21)
+│   │   ├── mod.rs
+│   │   ├── store.rs               # MemoryStore + governance + snapshots
+│   │   └── dynamic.rs             # DynamicMemoryAllocator + ThoughtBuffer
+│   ├── training/                  # Training infrastructure
+│   │   ├── mod.rs
+│   │   └── pipeline.rs            # Training pipeline, phases, plans
+│   ├── telemetry/                 # Telemetry & Observability (L20)
 │   │   ├── mod.rs
 │   │   ├── worker.rs              # TelemetryWorker + event types
 │   │   ├── hot_store.rs           # HotStore (SQLite WAL)
 │   │   ├── latency.rs             # LatencyMonitor (p50/p95/p99)
 │   │   ├── trace.rs               # TraceContext (SessionId/TraceId)
 │   │   └── test_observer.rs       # TestObserver
-│   ├── classification/
-│   │   ├── mod.rs
-│   │   ├── signature.rs           # Classification: 14-float feature vector
-│   │   ├── pattern.rs             # Classification: pattern (Intent channel)
-│   │   ├── calculator.rs          # Classification: weighted vote aggregation
-│   │   └── trainer.rs             # Classification: iterative training from seed data
 │   ├── gpu/
 │   │   ├── mod.rs                 # Feature-gated GPU module
 │   │   ├── device.rs              # GpuDevice initialization
@@ -2022,7 +2027,7 @@ spse_engine/
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
 │   ├── spatial_index.rs           # SpatialGrid for O(log N) queries
 │   ├── region_index.rs            # Regional spatial index
-│   ├── training.rs                # Training pipeline orchestration
+│   ├── training/                  # Training pipeline (see training/ above)
 │   ├── drill_lib.rs               # Drill framework
 │   ├── stress_drill_lib.rs        # Stress testing drills
 │   └── crash_drill_lib.rs         # Crash resilience drills

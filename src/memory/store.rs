@@ -3508,9 +3508,9 @@ mod tests {
     };
     use std::sync::Arc;
     use crate::config::{GovernanceConfig, UnitBuilderConfig};
-    use crate::layers::builder::UnitBuilder;
-    use crate::layers::hierarchy::HierarchicalUnitOrganizer;
-    use crate::layers::input;
+    use crate::classification::builder::UnitBuilder;
+    use crate::classification::hierarchy::HierarchicalUnitOrganizer;
+    use crate::classification::input;
     use crate::types::{
         ActivatedUnit, DatabaseMaturityStage, FeedbackEvent, MemoryChannel, MemoryType, SourceKind,
         Unit, UnitHierarchy, UnitLevel,
