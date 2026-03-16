@@ -1,8 +1,8 @@
 # Structured Predictive Search (SPS) Architecture
 
-**Document Version:** 14.1  
+**Document Version:** 14.2  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements + Practical Robustness Fixes
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements + Production Edge-Case Fixes
 
 ---
 
@@ -1039,27 +1039,59 @@ Edge lifecycle:
 
 #### Extension 3: Implicit Feedback Reinforcement (L18 — existing FeedbackController)
 
-`FeedbackController::learn()` already generates `FeedbackEvent` instances. The extension adds a new event type:
+`FeedbackController::learn()` already generates `FeedbackEvent` instances. The extension adds a new event type.
+
+**Race condition addressed:** In multi-turn conversations with rapid typing or parallel requests, storing `last_walked_edges` as a single mutable field causes overwrites — if Turn 2's edges overwrite Turn 1's before Turn 1 gets feedback, valid long-range dependencies (Turn 1 → Turn 3) fail to reinforce, slowing stabilization of multi-turn reasoning chains.
+
+**Solution: Trace-ID Tagged Feedback Queue.**
 
 ```
 After generating response:
-  track edges_used = list of (from, to) edges walked during this response
+  Push WalkEvent to feedback queue (NOT a mutable field):
+    feedback_queue.push(WalkEvent {
+      trace_id: current_response_trace_id,
+      edges: list of (from, to) edges walked during this response,
+      created_at: now,
+    })
 
-On next user message (not a correction/complaint):
-  implicit_accept = true
-  for (from, to) in edges_used:
-    word_graph.strengthen_edge(from, to, implicit_reinforce_delta)
-    if edge.frequency >= promotion_threshold:
-      edge.memory_type = Core  // permanent, survives decay
+On next user message:
+  1. Identify parent_trace_id = trace_id of the previous assistant
+     message this user message is replying to
+  2. Find matching WalkEvent in feedback_queue:
+     event = feedback_queue.find(|e| e.trace_id == parent_trace_id)
+  3. Apply reinforcement to THOSE specific edges:
+     if event found:
+       if is_correction:
+         for (from, to) in event.edges:
+           word_graph.weaken_edge(from, to, correction_penalty)
+       else:  // implicit accept
+         for (from, to) in event.edges:
+           word_graph.strengthen_edge(from, to, implicit_reinforce_delta)
+           if edge.frequency >= promotion_threshold:
+             edge.memory_type = Core
+       feedback_queue.remove(event)
 
-On explicit correction ("No, I meant..."):
-  for (from, to) in edges_used:
-    word_graph.weaken_edge(from, to, correction_penalty)
+  4. TTL cleanup: expire WalkEvents older than feedback_queue_ttl_secs
+     (default: 600 = 10 minutes) to prevent reinforcing stale contexts
 ```
 
-Config: `implicit_reinforce_delta` (default: 0.05), `correction_penalty` (default: 0.15), `promotion_threshold` (default: 5).
+**Data structure:**
+```rust
+struct WalkEvent {
+    trace_id: u64,                  // links to the response that generated these edges
+    edges: Vec<(WordId, WordId)>,   // edges walked during that response
+    created_at: u64,                // epoch seconds for TTL expiry
+}
 
-This is ~15 lines added to the existing `learn()` function. No new files.
+struct FeedbackQueue {
+    events: VecDeque<WalkEvent>,    // bounded ring buffer
+    max_size: usize,                // default: 64 events
+}
+```
+
+Config: `implicit_reinforce_delta` (default: 0.05), `correction_penalty` (default: 0.15), `promotion_threshold` (default: 5), `feedback_queue_ttl_secs` (default: 600), `feedback_queue_max_size` (default: 64).
+
+**Benefit:** Correctly attributes implicit feedback to the specific reasoning chain that generated the accepted response, regardless of concurrency or timing gaps. Multi-turn conversations now strengthen edges from all contributing turns, not just the most recent one. The bounded queue with TTL prevents unbounded growth.
 
 #### What This Achieves
 
@@ -1069,7 +1101,7 @@ This is ~15 lines added to the existing `learn()` function. No new files.
 | "What is HIIT?" | L9 detects no edges for "HIIT" → retrieval → L13 injects edges from evidence → response with definition | L15 walks local edges → response from graph (no retrieval) |
 | "Compare X and Y" | Full reasoning + retrieval → edges injected for both X→... and Y→... paths | Partial retrieval (only for changed facts), local edges for structure |
 
-**Total code change:** ~40 lines across 3 existing files. No new layers, no new systems, no new data structures.
+**Total code change:** ~60 lines across 3 existing files. No new layers, no new systems. One new lightweight data structure (`FeedbackQueue`).
 
 ---
 
@@ -1525,6 +1557,46 @@ Context from Classification: {finance}
 
 The Classification System's intent + the Reasoning System's context provide the context fingerprint that gates which edges are active during prediction.
 
+#### Context Tag Scalability: Bloom-Filtered Context Summaries
+
+**Problem:** In a lifelong learning system, high-frequency hub words like "system" or "data" may participate in thousands of distinct contexts. The raw `SmallVec<[u64; 4]>` context tag storage has fixed capacity — once full, old tags are evicted, losing the ability to distinguish older contexts. This causes polysemy resolution to degrade over time (e.g., "finance" queries accidentally activating "river" edges because the specific context tags were evicted). Heap allocation to grow the vec would break the zero-alloc goal for hot paths.
+
+**Solution: Edge-Level Bloom Filter + Dominant Cluster ID.**
+
+```
+Edge context storage (replaces raw SmallVec for mature edges):
+
+1. BLOOM FILTER (fixed 32 bytes per edge):
+   On edge creation/reinforcement:
+     context_bloom.insert(query_context_hash)
+   On edge activation check:
+     if context_bloom.probably_contains(current_context_hash):
+       → Activate edge (with standard weight scoring)
+   False positive rate: ~1-3% at 1000 insertions (acceptable: slightly
+   less precise gating, never misses a valid context)
+
+2. DOMINANT CLUSTER ID (u32):
+   During L21 maintenance, cluster recent context hashes per edge:
+     If >80% of recent activations belong to Cluster A:
+       edge.dominant_context_cluster = Some(A)
+   Fast-path check:
+     if query_cluster_id == edge.dominant_context_cluster:
+       → Force-activate (bypass Bloom check entirely)
+
+3. MIGRATION PATH:
+   New edges start with SmallVec<[u64; 4]> (existing behavior)
+   When SmallVec fills (>4 entries), migrate to Bloom filter:
+     for tag in smallvec.drain(): bloom.insert(tag)
+   This is a one-time migration during reinforcement, not on hot path
+```
+
+**Config:**
+- `context_bloom_size_bytes: u8` (default: 32) — per-edge Bloom filter size
+- `dominant_cluster_threshold: f32` (default: 0.80) — fraction of activations before setting dominant cluster
+- `context_bloom_migration_threshold: u32` (default: 4) — SmallVec entries before migrating to Bloom
+
+**Benefit:** Infinite context history in constant memory (32 bytes vs. unbounded growth). The dominant cluster fast-path avoids even the Bloom check for the common case where an edge serves one primary meaning (~70% of edges). No eviction logic needed — the Bloom filter gracefully degrades with a known, bounded false positive rate.
+
 ### 5.2 Vocabulary Bootstrap & Growth
 
 #### Phase 1: Dictionary Pre-population
@@ -1891,7 +1963,52 @@ During L21 maintenance:
 
 **Examples of natural secondary hubs:** "system", "data", "user", "time", "world", "people" — domain-specific words that appear across many contexts and develop dense connectivity organically.
 
+#### Dynamic Hub Election for Low-Resource Scenarios
+
+**Problem:** The 3-Tier Walk relies on Function words (the, is, of) as universal routing hubs for Tier 3 pathfinding. In low-resource languages, code-switching scenarios, or highly technical domains (legal Latin, medical abbreviations), the standard English function words may not exist or have very low frequency. If the graph lacks strong function-word hubs, Tier 3 pathfinding fails to find paths between content words → triggers unnecessary retrieval (L9) → slows down response time for valid internal knowledge.
+
+**Solution: Connectivity Monitoring + Dynamic Hub Election + Language-Aware Bootstrap.**
+
+```
+1. BETWEENNESS CENTRALITY MONITORING (L21 maintenance):
+   During maintenance, compute approximate betweenness centrality
+   for all nodes with frequency > hub_election_min_frequency:
+     centrality(N) = fraction of shortest paths between sampled
+                     node pairs that pass through N
+   Use sampling (100 random pairs per cycle) for O(V) cost.
+
+2. DYNAMIC HUB ELECTION:
+   If a Content word C has:
+     centrality(C) > dynamic_hub_centrality_threshold AND
+     C.outgoing_edges.count > secondary_hub_threshold AND
+     C.frequency > hub_election_min_frequency:
+   → Promote C to is_secondary_hub = true with hub priority
+   This extends Secondary Hub Promotion (above) with centrality
+   as an additional signal, catching domain-critical words that
+   may have moderate edge count but high routing importance.
+
+3. LANGUAGE-AWARE BOOTSTRAP:
+   When L1 detects a non-English input stream (via character
+   distribution / script detection):
+     Load language-specific function word list from config:
+       config/function_words/{language_code}.yaml
+     Seed initial graph with these words as NodeType::Function
+     instead of relying solely on the English dictionary bootstrap.
+   Fallback: if no language-specific list exists, use the top-50
+   highest-frequency words from the first training batch as
+   provisional function words.
+```
+
 **Config:**
+- `dynamic_hub_centrality_threshold: f32` (default: 0.15) — betweenness centrality above which Content words are eligible for hub election
+- `hub_election_min_frequency: u32` (default: 500) — minimum traversal count before centrality is computed
+- `hub_centrality_sample_pairs: u32` (default: 100) — node pairs sampled per cycle for centrality estimation
+- `language_function_words_dir: String` (default: "config/function_words/") — directory containing per-language function word lists
+
+**Benefit:** The graph self-organizes to find its own "highway interchanges" based on actual usage patterns, supporting multilingual and domain-specific fluency without hardcoded English-centric rules. In a medical corpus, "patient" and "diagnosis" naturally become routing hubs; in legal text, "defendant" and "court" serve the same role.
+
+#### Full §5.11 Config Summary
+
 - `max_edges_per_hub: u32` (default: 2000) — hard cap on Function-word hub edges
 - `min_hub_edges: u32` (default: 500) — floor to maintain routing viability
 - `hub_prune_threshold: f32` (default: 0.05) — composite score below which edges are pruned
@@ -1899,8 +2016,12 @@ During L21 maintenance:
 - `secondary_hub_threshold: u32` (default: 200) — edge count for Content node to become secondary hub
 - `secondary_hub_min_frequency: u32` (default: 1000) — minimum traversal frequency for secondary hub
 - `secondary_hub_priority: f32` (default: 0.7) — A* priority weight for secondary hubs
+- `dynamic_hub_centrality_threshold: f32` (default: 0.15) — betweenness centrality for hub election
+- `hub_election_min_frequency: u32` (default: 500) — minimum frequency before centrality computed
+- `hub_centrality_sample_pairs: u32` (default: 100) — sampling pairs per maintenance cycle
+- `language_function_words_dir: String` (default: "config/function_words/") — per-language function word lists
 
-**Benefit:** Prevents the star-topology bottleneck that degrades both path quality and compute cost. Domain gating ensures paths through hubs are semantically relevant. Secondary hubs distribute routing load to domain-specific high-connectivity nodes, reducing dependence on pure Function words.
+**Benefit:** Prevents the star-topology bottleneck that degrades both path quality and compute cost. Domain gating ensures paths through hubs are semantically relevant. Secondary hubs and dynamic hub election distribute routing load to domain-specific high-connectivity nodes, reducing dependence on pure Function words. Language-aware bootstrap enables multilingual support without hardcoded English assumptions.
 
 ---
 
@@ -2179,7 +2300,9 @@ pub struct WordEdge {
     pub from: WordId,                      // source word
     pub to: WordId,                        // target word
     pub weight: f32,                       // connection strength [0, 1]
-    pub context_tags: SmallVec<[u64; 4]>,  // polysemy disambiguation
+    pub context_tags: SmallVec<[u64; 4]>,  // polysemy disambiguation (initial; migrates to bloom)
+    pub context_bloom: Option<[u8; 32]>,   // Bloom filter for mature edges (§5.1 scalability)
+    pub dominant_context_cluster: Option<u32>, // fast-path cluster ID (§5.1 scalability)
     pub domain_tags: SmallVec<[u64; 2]>,   // domain gating for hub edges (§5.11)
     pub frequency: u32,                    // times traversed
     pub last_reinforced: u32,              // epoch counter for decay
@@ -2329,9 +2452,10 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
 | `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
-| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, ttg_lease_duration_secs, probationary_graduation_count) |
+| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, ttg_lease_duration_secs, probationary_graduation_count, feedback_queue_ttl_secs, feedback_queue_max_size) |
+| `context_bloom` | `layer_5_semantic_map.context_bloom` | `ContextBloomConfig` (bloom_size_bytes, dominant_cluster_threshold, migration_threshold) |
 | `pos_clusters` | `layer_5_semantic_map.pos_clusters` | `PosClusterConfig` (pos_offset_strength, context_seed_strength, centroids path) |
-| `hub_management` | `layer_5_semantic_map.hub_management` | `HubManagementConfig` (max_edges_per_hub, domain_gating, secondary_hub thresholds) |
+| `hub_management` | `layer_5_semantic_map.hub_management` | `HubManagementConfig` (max_edges_per_hub, domain_gating, secondary_hub, dynamic_hub_election, language bootstrap) |
 | `adaptive_dims` | `layer_5_semantic_map.adaptive_dims` | `AdaptiveDimsConfig` (enabled, energy_threshold, max_dims, perturbation) |
 | `anchor_locking` | `layer_5_semantic_map.anchor_locking` | `AnchorLockingConfig` (enabled, zone_definitions_path) |
 
@@ -2343,7 +2467,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `document` | `document` | `DocumentIngestionConfig` |
 | `training_phases` | `training_phases` | `TrainingPhaseOverridesConfig` |
 | `source_policies` | `source_policies` | `SourcePoliciesConfig` |
-| `silent_training` | `silent_training` | `SilentTrainingConfig` |
+| `silent_training` | `silent_training` | `SilentTrainingConfig` (includes quarantine: enabled, conflict_threshold, min_examples) |
 | `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` |
 | `gpu` | `gpu` | `GpuConfig` |
 | `multi_engine` | `multi_engine` | `MultiEngineConfig` |
@@ -2888,6 +3012,42 @@ silent_training:
     local_shard_hard_limit_mb: 128.0
 ```
 
+#### Silent Training Intent Quarantine
+
+**Problem:** Silent Training Mode ingests documents without triggering retrieval or generation. However, the Unit Builder (L2) discovers patterns and the Intent Classifier updates during ingestion. If a user uploads a massive noisy document (e.g., raw log files, scraped websites with boilerplate), spurious patterns like "Error 404 repeated 500 times" may be misclassified as new Intent Patterns due to artificially high repetition confidence. These "garbage intents" pollute the Intent Channel, which gates all future live queries — a single bad silent training job could cause the engine to misclassify live user questions.
+
+**Solution: Session-Scoped Intent Buffer with Post-Job Validation.**
+
+```
+During Silent Training:
+  1. SESSION BUFFER:
+     New ClassificationPatterns discovered during this job are written
+     to a temporary SessionIntentBuffer — NOT to the persistent Intent channel.
+     Units and memory are ingested normally (Main channel).
+
+  2. POST-JOB VALIDATION (runs after job completes):
+     For each pattern P in SessionIntentBuffer:
+       a. CONSISTENCY CHECK:
+          Does P conflict with existing high-confidence centroids?
+          conflict = max_cosine_similarity(P.centroid, existing_centroids) > quarantine_conflict_threshold
+       b. FREQUENCY/UTILITY CHECK:
+          Is P unique to this document, or does it match broader linguistic structures?
+          unique_to_doc = P.source_doc_count == 1 AND P.example_count < quarantine_min_examples
+       c. DECISION:
+          If conflict OR unique_to_doc → PURGE (log to telemetry as "quarantined_intent")
+          Else → MERGE into global Intent channel
+
+  3. TELEMETRY:
+     Log all quarantined patterns with reason codes for audit
+```
+
+**Config:**
+- `quarantine_enabled: bool` (default: true) — enable intent quarantine for silent training
+- `quarantine_conflict_threshold: f32` (default: 0.85) — cosine similarity above which pattern conflicts with existing
+- `quarantine_min_examples: u32` (default: 10) — minimum examples before a pattern is considered valid
+
+**Benefit:** Prevents "one-off" document noise from permanently altering the engine's intent recognition logic. The quarantine is invisible during normal (non-silent) training — only Silent Training jobs route through the buffer.
+
 #### HuggingFace Streaming
 
 Adaptive batch sizing for streaming from HuggingFace datasets:
@@ -3335,6 +3495,14 @@ spse_engine/
 | **Secondary Hub** | High-frequency Content word promoted to hub status when connectivity exceeds threshold, distributing Tier 3 routing load | Predictive |
 | **Hub Domain Gating** | Masking irrelevant hub edges during Tier 3 A* based on current context domain tags, reducing per-hub scoring cost ~85% | Predictive |
 | **Hub Saturation** | Star-topology bottleneck when Function words accumulate too many edges, degrading pathfinding quality and compute cost | Predictive |
+| **Context Bloom Filter** | Fixed 32-byte per-edge Bloom filter replacing SmallVec for mature edges — infinite context history in constant memory (§5.1) | Predictive |
+| **Dominant Cluster ID** | Fast-path u32 on each edge; if >80% of recent activations belong to one cluster, bypass Bloom check and force-activate | Predictive |
+| **Intent Quarantine** | Session-scoped buffer isolating ClassificationPatterns from Silent Training jobs until post-job validation passes (§11.7) | Training / Classification |
+| **FeedbackQueue** | Bounded VecDeque of WalkEvents keyed by trace_id, replacing mutable `last_walked_edges` to fix concurrent feedback loss (§4.9 Ext 3) | Reasoning |
+| **WalkEvent** | Record of edges walked during a single response, tagged with trace_id for deferred implicit reinforcement | Reasoning |
+| **Dynamic Hub Election** | Promoting Content words to secondary hub status based on betweenness centrality, not just edge count (§5.11) | Predictive |
+| **Betweenness Centrality** | Fraction of sampled shortest paths passing through a node — used to identify domain-critical routing hubs | Predictive |
+| **Language-Aware Bootstrap** | Loading per-language function word lists from config to seed the Word Graph for non-English corpora (§5.11) | Predictive |
 
 ### Appendix B: Three-System Quick Reference
 
@@ -3364,8 +3532,12 @@ spse_engine/
 | How does noisy edge injection get filtered? | Predictive | §4.9 Ext 2b: TTG lease (5 min immunity) + 2 traversals to graduate; purged at expiry |
 | How does the taxonomy evolve? | Cross-cutting | §6.1: Structural Feedback with hysteresis (40% split / 20% merge) + min-viability freeze |
 | How are polysemous words placed initially? | Predictive | §5.2: Domain-Anchor Blending — POS offset + context-seeded perturbation on SemanticHasher |
-| How do we avoid hub saturation? | Predictive | §5.11: Edge caps (2K), domain gating on hubs, secondary hub promotion for Content words |
+| How do we avoid hub saturation? | Predictive | §5.11: Edge caps (2K), domain gating on hubs, secondary hub promotion, dynamic hub election |
 | How do we avoid validation latency? | Reasoning | §4.3.1: Lazy gating (ambiguity/trust trigger) + L12 MetadataSummary pre-extraction |
+| How do we scale context tags? | Predictive | §5.1: Bloom filter (32B) + dominant cluster fast-path replaces SmallVec for mature edges |
+| How do we prevent silent training pollution? | Training | §11.7: Intent Quarantine buffer → post-job consistency + frequency validation → merge or purge |
+| How do non-English graphs route? | Predictive | §5.11: Dynamic hub election via betweenness centrality + language-aware function word bootstrap |
+| How do we handle concurrent feedback? | Reasoning | §4.9 Ext 3: Trace-ID tagged FeedbackQueue (bounded, TTL-expiring) replaces mutable last_walked_edges |
 
 ### Appendix C: References
 

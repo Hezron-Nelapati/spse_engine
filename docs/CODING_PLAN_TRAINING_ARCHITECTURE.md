@@ -43,14 +43,18 @@ Phase 7 (Efficiency) → can start after Phase 2
 Phase 8 (Sweep Harness) → depends on Phases 2, 3, 4
 Phase 9 (Integration Tests) → depends on all phases
 Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Evidence Merge)
-Phase 11 (Hardening + Robustness) → depends on Phases 2, 4, 5, 10
+Phase 11 (Hardening + Robustness + Edge Cases) → depends on Phases 2, 4, 5, 10
   ├── 11A (Semantic Probes) → depends on Phase 2 (Classification)
   ├── 11B (Micro-Validator + Lazy Gating) → depends on Phase 3 (Evidence Merge)
   ├── 11C (Adaptive Dims + Anchor Locking) → depends on Phase 4 (Word Graph)
   ├── 11D (TTG Lease Edges) → depends on Phase 10 (On-the-fly Learning)
   ├── 11E (Structural Feedback + Hysteresis) → depends on Phase 5 (Consistency)
   ├── 11F (POS Blending) → depends on Phase 4 (Word Graph, SemanticHasher)
-  └── 11G (Hub Management) → depends on Phase 4 (Word Graph) + 11D (EdgeStatus)
+  ├── 11G (Hub Management) → depends on Phase 4 (Word Graph) + 11D (EdgeStatus)
+  ├── 11H (Context Bloom Filter) → depends on Phase 4 (Word Graph, edge context tags)
+  ├── 11I (Silent Training Quarantine) → depends on Phase 2 (Classification Training)
+  ├── 11J (Dynamic Hub Election) → depends on 11G (Hub Management)
+  └── 11K (Feedback Queue) → depends on Phase 10 (On-the-fly Learning, feedback)
 ```
 
 ### Estimated Effort
@@ -67,8 +71,8 @@ Phase 11 (Hardening + Robustness) → depends on Phases 2, 4, 5, 10
 | 8. Sweep Harness | 1 | 1 | ~400 | P1 |
 | 9. Integration Tests | 1 | 1 | ~600 | P1 |
 | 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
-| 11. Hardening + Robustness | 4 | 10 | ~1400 | P0–P2 |
-| **Total** | **16** | **~30** | **~9020** | |
+| 11. Hardening + Edge Cases | 5 | 12 | ~1900 | P0–P2 |
+| **Total** | **17** | **~32** | **~9520** | |
 
 ---
 
@@ -1795,6 +1799,8 @@ if retrieval_request.learning_flag {
 
 Extend `FeedbackController::learn()` to track edges walked during response generation. On next user message (implicit accept), strengthen those edges. On explicit correction, weaken them.
 
+> **Note:** This initial implementation uses a simple `last_walked_edges` field. **Task 11K** upgrades this to a `FeedbackQueue` with trace-ID matching to fix the concurrent feedback loss race condition.
+
 ```rust
 // Add to FeedbackController in src/reasoning/feedback.rs
 
@@ -2574,6 +2580,377 @@ layer_5_semantic_map:
 
 ---
 
+### Task 11H: Bloom-Filtered Context Summaries (`src/predictive/router.rs`)
+
+**Objective:** Replace the fixed-capacity `SmallVec<[u64; 4]>` context tag storage on WordEdge with a **Bloom filter + dominant cluster ID** to support infinite context history in constant memory. See Architecture §5.1 "Context Tag Scalability".
+
+#### Step 1: Add ContextBloom to WordEdge
+
+```rust
+// Add to src/predictive/router.rs (WordEdge extension)
+
+/// Per-edge Bloom filter for context gating (replaces SmallVec for mature edges)
+pub struct ContextBloom {
+    bits: [u8; 32],  // 256-bit Bloom filter, fixed size
+}
+
+impl ContextBloom {
+    pub fn insert(&mut self, hash: u64) { /* set k=3 bit positions */ }
+    pub fn probably_contains(&self, hash: u64) -> bool { /* check k=3 positions */ }
+    pub fn from_smallvec(tags: &SmallVec<[u64; 4]>) -> Self {
+        let mut bloom = Self::default();
+        for tag in tags { bloom.insert(*tag); }
+        bloom
+    }
+}
+```
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 2: Add migration logic during edge reinforcement
+
+When `context_tags.len() >= context_bloom_migration_threshold` (default: 4):
+- Migrate all tags into a new `ContextBloom`
+- Set `edge.context_bloom = Some(bloom)`
+- Clear `edge.context_tags` (SmallVec no longer used for this edge)
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 3: Add dominant cluster tracking in L21 maintenance
+
+During maintenance, for edges with `context_bloom.is_some()`:
+- Cluster recent context hashes (tracked via a small ring buffer or sampling)
+- If >80% of recent activations belong to one cluster: set `edge.dominant_context_cluster = Some(cluster_id)`
+- Fast-path: if `query_cluster == edge.dominant_context_cluster` → force-activate (skip Bloom check)
+
+**Files modified:** `src/predictive/router.rs` (maintenance logic)
+
+#### Step 4: Update context gating in L15 graph walk
+
+```rust
+// In L15 edge activation check:
+fn is_edge_active(edge: &WordEdge, query_hash: u64, query_cluster: Option<u32>) -> bool {
+    // Fast path: dominant cluster match
+    if let (Some(qc), Some(dc)) = (query_cluster, edge.dominant_context_cluster) {
+        if qc == dc { return true; }
+    }
+    // Bloom path (mature edges)
+    if let Some(ref bloom) = edge.context_bloom {
+        return bloom.probably_contains(query_hash);
+    }
+    // SmallVec path (young edges)
+    edge.context_tags.contains(&query_hash) || edge.context_tags.is_empty()
+}
+```
+
+**Files modified:** `src/engine.rs` (L15 walk logic)
+
+#### Step 5: Config additions
+
+```yaml
+layer_5_semantic_map:
+  context_bloom:
+    bloom_size_bytes: 32
+    dominant_cluster_threshold: 0.80
+    migration_threshold: 4
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `bloom_filter_insert_and_contains`
+- `bloom_false_positive_rate_within_bounds`
+- `smallvec_migrates_to_bloom_at_threshold`
+- `dominant_cluster_fast_path_activates_edge`
+- `young_edge_uses_smallvec_gating`
+- `mature_edge_uses_bloom_gating`
+- `empty_context_tags_activates_unconditionally`
+
+---
+
+### Task 11I: Silent Training Intent Quarantine (`src/training/pipeline.rs`)
+
+**Objective:** Prevent noisy Silent Training jobs from polluting the global Intent channel by routing new ClassificationPatterns to a session-scoped quarantine buffer with post-job validation. See Architecture §11.7 "Silent Training Intent Quarantine".
+
+#### Step 1: Add SessionIntentBuffer
+
+```rust
+// Add to src/training/pipeline.rs
+
+pub struct SessionIntentBuffer {
+    patterns: Vec<ClassificationPattern>,
+    source_job_id: String,
+}
+
+impl SessionIntentBuffer {
+    pub fn add_pattern(&mut self, pattern: ClassificationPattern) { ... }
+    pub fn validate_and_merge(
+        self,
+        existing_centroids: &[Centroid],
+        config: &QuarantineConfig,
+    ) -> QuarantineResult { ... }
+}
+
+pub struct QuarantineResult {
+    pub merged: Vec<ClassificationPattern>,
+    pub purged: Vec<(ClassificationPattern, String)>,  // (pattern, reason)
+}
+```
+
+**Files modified:** `src/training/pipeline.rs`
+
+#### Step 2: Wire into Silent Training path
+
+During `train_batch()` when `training_mode == Silent`:
+- Route new `ClassificationPattern` discoveries to `SessionIntentBuffer` instead of the persistent Intent channel
+- Units and memory ingested normally (Main channel)
+
+**Files modified:** `src/training/pipeline.rs`, `src/classification/trainer.rs`
+
+#### Step 3: Post-job validation gate
+
+After Silent Training job completes:
+```rust
+let result = buffer.validate_and_merge(&existing_centroids, &config.quarantine);
+for (pattern, reason) in &result.purged {
+    telemetry.log_quarantined_intent(pattern, reason);
+}
+for pattern in result.merged {
+    intent_channel.insert(pattern);
+}
+```
+
+Validation checks:
+- **Consistency:** `max_cosine_similarity(P.centroid, existing) > conflict_threshold` → purge
+- **Frequency/Utility:** `P.source_doc_count == 1 AND P.example_count < min_examples` → purge
+
+**Files modified:** `src/training/pipeline.rs`, `src/engine.rs`
+
+#### Step 4: Config additions
+
+```yaml
+silent_training:
+  quarantine:
+    enabled: true
+    conflict_threshold: 0.85
+    min_examples: 10
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `quarantine_buffers_patterns_during_silent_training`
+- `quarantine_purges_conflicting_patterns`
+- `quarantine_purges_single_doc_low_count_patterns`
+- `quarantine_merges_valid_patterns`
+- `quarantine_logs_purged_patterns_to_telemetry`
+- `normal_training_bypasses_quarantine`
+
+---
+
+### Task 11J: Dynamic Hub Election + Language-Aware Bootstrap (`src/predictive/router.rs`)
+
+**Objective:** Enable the Word Graph to self-organize routing hubs based on actual usage patterns (betweenness centrality), supporting non-English and domain-specific corpora where standard Function words may be absent. See Architecture §5.11 "Dynamic Hub Election for Low-Resource Scenarios".
+
+#### Step 1: Approximate betweenness centrality in L21 maintenance
+
+```rust
+// Add to src/predictive/router.rs (maintenance logic)
+
+impl WordGraph {
+    pub fn compute_approximate_centrality(
+        &self,
+        sample_pairs: u32,
+        min_frequency: u32,
+    ) -> HashMap<WordId, f32> {
+        let eligible: Vec<_> = self.nodes.values()
+            .filter(|n| n.frequency > min_frequency)
+            .collect();
+        let mut centrality: HashMap<WordId, f32> = HashMap::new();
+
+        for _ in 0..sample_pairs {
+            let (src, dst) = random_pair(&eligible);
+            if let Some(path) = self.shortest_path(src.id, dst.id) {
+                for &node_id in &path[1..path.len()-1] {
+                    *centrality.entry(node_id).or_default() += 1.0;
+                }
+            }
+        }
+        // Normalize by sample count
+        let norm = sample_pairs as f32;
+        for v in centrality.values_mut() { *v /= norm; }
+        centrality
+    }
+}
+```
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 2: Extend secondary hub promotion with centrality signal
+
+During L21 maintenance, after computing centrality:
+- If Content word C has `centrality(C) > dynamic_hub_centrality_threshold` AND meets existing secondary hub criteria → promote to `is_secondary_hub = true`
+- This catches domain-critical words with high routing importance but moderate edge count
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 3: Language-aware function word bootstrap
+
+When L1 detects non-English input (character distribution / script detection):
+- Load `config/function_words/{language_code}.yaml`
+- Seed graph with these words as `NodeType::Function`
+- Fallback: if no language list exists, use top-50 highest-frequency words from first training batch as provisional function words
+
+**Files modified:** `src/predictive/router.rs`, `src/classification/input.rs`
+
+#### Step 4: Config additions
+
+```yaml
+layer_5_semantic_map:
+  hub_management:
+    dynamic_hub_centrality_threshold: 0.15
+    hub_election_min_frequency: 500
+    hub_centrality_sample_pairs: 100
+    language_function_words_dir: "config/function_words/"
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Files created:** `config/function_words/en.yaml` (English function words, used as reference)
+
+**Tests:**
+- `approximate_centrality_identifies_high_routing_nodes`
+- `dynamic_hub_election_promotes_domain_hub`
+- `dynamic_hub_demotion_when_centrality_drops`
+- `language_aware_bootstrap_loads_function_words`
+- `fallback_uses_top_frequency_words`
+- `non_english_corpus_self_organizes_hubs`
+
+---
+
+### Task 11K: Trace-ID Tagged Feedback Queue (`src/reasoning/feedback.rs`)
+
+**Objective:** Replace the mutable `last_walked_edges` field on `FeedbackController` with a **trace-ID tagged feedback queue** to correctly attribute implicit feedback in concurrent and multi-turn scenarios. See Architecture §4.9 Extension 3.
+
+#### Step 1: Add FeedbackQueue data structure
+
+```rust
+// Add to src/reasoning/feedback.rs
+
+pub struct WalkEvent {
+    pub trace_id: u64,
+    pub edges: Vec<(WordId, WordId)>,
+    pub created_at: u64,  // epoch seconds
+}
+
+pub struct FeedbackQueue {
+    events: VecDeque<WalkEvent>,
+    max_size: usize,
+}
+
+impl FeedbackQueue {
+    pub fn push(&mut self, event: WalkEvent) {
+        if self.events.len() >= self.max_size {
+            self.events.pop_front(); // evict oldest
+        }
+        self.events.push_back(event);
+    }
+    pub fn find_by_trace(&mut self, trace_id: u64) -> Option<WalkEvent> {
+        if let Some(pos) = self.events.iter().position(|e| e.trace_id == trace_id) {
+            Some(self.events.remove(pos).unwrap())
+        } else { None }
+    }
+    pub fn expire_before(&mut self, cutoff: u64) {
+        self.events.retain(|e| e.created_at > cutoff);
+    }
+}
+```
+
+**Files modified:** `src/reasoning/feedback.rs`
+
+#### Step 2: Replace `last_walked_edges` with queue
+
+Remove the `last_walked_edges: Vec<(WordId, WordId)>` field from `FeedbackController`. Replace with `feedback_queue: FeedbackQueue`.
+
+Update `track_walked_edges()`:
+```rust
+pub fn track_walked_edges(&mut self, trace_id: u64, edges: Vec<(WordId, WordId)>) {
+    self.feedback_queue.push(WalkEvent {
+        trace_id,
+        edges,
+        created_at: now_epoch_secs(),
+    });
+}
+```
+
+**Files modified:** `src/reasoning/feedback.rs`
+
+#### Step 3: Update `apply_implicit_feedback()` with trace matching
+
+```rust
+pub fn apply_implicit_feedback(
+    &mut self,
+    parent_trace_id: u64,
+    is_correction: bool,
+    word_graph: &mut WordGraph,
+    config: &RuntimeLearningConfig,
+) {
+    // TTL cleanup
+    let cutoff = now_epoch_secs() - config.feedback_queue_ttl_secs;
+    self.feedback_queue.expire_before(cutoff);
+
+    // Find matching event
+    if let Some(event) = self.feedback_queue.find_by_trace(parent_trace_id) {
+        for (from, to) in &event.edges {
+            if is_correction {
+                word_graph.weaken_edge(*from, *to, config.correction_penalty);
+            } else {
+                word_graph.strengthen_edge(*from, *to, config.implicit_reinforce_delta);
+                if let Some(edge) = word_graph.get_edge(*from, *to) {
+                    if edge.frequency >= config.promotion_threshold {
+                        word_graph.set_edge_memory_type(*from, *to, MemoryType::Core);
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+**Files modified:** `src/reasoning/feedback.rs`
+
+#### Step 4: Wire trace_id through engine
+
+In `process_prompt()`:
+- Generate `trace_id` at response start (e.g., `text_fingerprint(&format!("{}{}", session_id, turn_count))`)
+- After L17 output: `feedback_controller.track_walked_edges(trace_id, walked_edges)`
+- At start of next `process_prompt()`: `feedback_controller.apply_implicit_feedback(parent_trace_id, is_correction, word_graph, config)`
+- The `parent_trace_id` comes from the previous assistant message's trace_id (stored in session state)
+
+**Files modified:** `src/engine.rs`
+
+#### Step 5: Config additions
+
+```yaml
+layer_5_semantic_map:
+  runtime_learning:
+    feedback_queue_ttl_secs: 600
+    feedback_queue_max_size: 64
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `feedback_queue_push_and_find_by_trace`
+- `feedback_queue_evicts_oldest_at_max_size`
+- `feedback_queue_expires_old_events`
+- `trace_matched_feedback_strengthens_correct_edges`
+- `concurrent_turns_reinforce_independently`
+- `unmatched_trace_is_no_op`
+- `correction_weakens_trace_matched_edges`
+
+---
+
 ## 13. Config Changes Summary
 
 All new config fields with their defaults:
@@ -2650,12 +3027,24 @@ All new config fields with their defaults:
 | | `max_intent_count` | `u32` | 48 | Max total intent variants |
 | | `consecutive_windows_required` | `u32` | 3 | Windows above/below threshold before action |
 | | `min_viability_sweeps` | `u32` | 3 | Freeze period after split (training sweeps) |
+| `layer_5_semantic_map.context_bloom` | `bloom_size_bytes` | `u8` | 32 | Per-edge Bloom filter size in bytes |
+| | `dominant_cluster_threshold` | `f32` | 0.80 | Activation fraction before setting dominant cluster |
+| | `migration_threshold` | `u32` | 4 | SmallVec entries before migrating to Bloom |
+| `layer_5_semantic_map.runtime_learning` | `feedback_queue_ttl_secs` | `u64` | 600 | TTL for WalkEvents in feedback queue |
+| | `feedback_queue_max_size` | `usize` | 64 | Max WalkEvents in feedback queue |
+| `layer_5_semantic_map.hub_management` | `dynamic_hub_centrality_threshold` | `f32` | 0.15 | Betweenness centrality for dynamic hub election |
+| | `hub_election_min_frequency` | `u32` | 500 | Min frequency before centrality computed |
+| | `hub_centrality_sample_pairs` | `u32` | 100 | Node pairs sampled per maintenance cycle |
+| | `language_function_words_dir` | `String` | "config/function_words/" | Per-language function word lists |
+| `silent_training.quarantine` | `enabled` | `bool` | true | Enable intent quarantine for silent training |
+| | `conflict_threshold` | `f32` | 0.85 | Cosine similarity above which pattern conflicts |
+| | `min_examples` | `u32` | 10 | Min examples before pattern is considered valid |
 
 ---
 
 ## 14. File Manifest
 
-### New Files (16)
+### New Files (17)
 
 | File | Phase | Purpose |
 |------|-------|---------|
@@ -2674,31 +3063,33 @@ All new config fields with their defaults:
 | `src/classification/semantic_zones.rs` | 11C | Semantic Zone definitions + ZoneManager |
 | `config/semantic_zones.yaml` | 11C | Default zone coordinate definitions |
 | `config/pos_clusters.yaml` | 11F | POS cluster centroids for domain-anchor blending |
+| `config/function_words/en.yaml` | 11J | English function words reference list |
 
-### Modified Files (~30)
+### Modified Files (~32)
 
 | File | Phase | Changes |
 |------|-------|---------|
 | `src/types.rs` | 1, 11D | Add loss types, SystemTrainingReport, EdgeStatus enum |
 | `src/seed/mod.rs` | 1 | Extend TrainingExample, add new module exports |
-| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig, PosClusterConfig, HubManagementConfig |
-| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management sections |
+| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig, PosClusterConfig, HubManagementConfig, ContextBloomConfig, QuarantineConfig |
+| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management, context_bloom, quarantine sections |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
-| `src/classification/trainer.rs` | 2 | Full rewrite: centroid + sweep + calibration |
+| `src/classification/trainer.rs` | 2, 11I | Full rewrite: centroid + sweep + calibration; quarantine buffer wiring |
 | `src/classification/calculator.rs` | 2, 7, 11A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring |
 | `src/classification/signature.rs` | 7, 11A | Add POS tag LRU cache, extend to 82-float with semantic flags |
 | `src/classification/mod.rs` | 11A, 11C | Add semantic_anchors, semantic_zones module exports |
-| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating |
+| `src/classification/input.rs` | 11J | Add language/script detection for function word bootstrap |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G, 11H, 11K | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating, context bloom walk gating, trace_id wiring |
 | `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
 | `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
 | `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
 | `src/spatial_index.rs` | 4, 7, 11C | Add update_position(), batch_update_positions(), neighbor cache, adaptive dims, zone enforcement |
-| `src/training/pipeline.rs` | 3, 11E | Wire train_reasoning(), structural feedback split/merge proposals with data inheritance |
+| `src/training/pipeline.rs` | 3, 11E, 11I | Wire train_reasoning(), structural feedback split/merge proposals with data inheritance, SessionIntentBuffer quarantine |
 | `src/classification/intent.rs` | 10 | Add cold-start detection to assess() |
 | `src/reasoning/retrieval.rs` | 11B | Add MetadataSummary extraction during L12 normalization |
 | `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator with lazy gating |
-| `src/reasoning/feedback.rs` | 5, 10, 11E | Wire consistency corrections, implicit feedback, Tier3OveruseTracker with hysteresis |
-| `src/predictive/router.rs` | 11D, 11F, 11G | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion |
+| `src/reasoning/feedback.rs` | 5, 10, 11E, 11K | Wire consistency corrections, implicit feedback, Tier3OveruseTracker with hysteresis, FeedbackQueue with trace-ID matching |
+| `src/predictive/router.rs` | 11D, 11F, 11G, 11H, 11J | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion, ContextBloom + migration, betweenness centrality + dynamic hub election + language bootstrap |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
 
 ### Execution Order (Critical Path)
@@ -2711,10 +3102,11 @@ Week 4: Phase 4 (Predictive Training)
 Week 5: Phase 5 (Consistency) + Phase 7 (Efficiency — can parallelize)
 Week 6: Phase 8 (Sweep Harness) + Phase 9 (Integration Tests)
 Week 7: Phase 10 (On-the-fly Learning) — lightweight, can overlap with Week 6
-Week 8: Phase 11 (Hardening + Robustness) — sub-tasks can parallelize:
+Week 8-9: Phase 11 (Hardening + Robustness + Edge Cases) — sub-tasks can parallelize:
          11A (Semantic Probes) + 11B (Micro-Validator + Lazy Gating) + 11F (POS Blending)
-         11C (Adaptive Dims + Anchor Locking) + 11G (Hub Management)
-         11D (TTG Lease Edges) + 11E (Structural Feedback + Hysteresis) — last
+         11C (Adaptive Dims + Anchor Locking) + 11G (Hub Management) + 11H (Context Bloom)
+         11D (TTG Lease Edges) + 11E (Structural Feedback + Hysteresis)
+         11I (Silent Training Quarantine) + 11J (Dynamic Hub Election) + 11K (Feedback Queue)
 ```
 
 ### Verification Commands
@@ -2733,6 +3125,10 @@ cargo test --lib --no-default-features -- classification::semantic_zones
 cargo test --lib --no-default-features -- reasoning::merge::micro_validator
 cargo test --lib --no-default-features -- predictive::router::semantic_hasher
 cargo test --lib --no-default-features -- predictive::router::hub_management
+cargo test --lib --no-default-features -- predictive::router::context_bloom
+cargo test --lib --no-default-features -- training::pipeline::quarantine
+cargo test --lib --no-default-features -- predictive::router::centrality
+cargo test --lib --no-default-features -- reasoning::feedback::feedback_queue
 
 # Integration tests (after all phases)
 cargo test --test training_integration --no-default-features
