@@ -3,7 +3,7 @@
 **Created:** March 2026  
 **Status:** Implementation Plan  
 **Scope:** Full architecture implementation — folder restructuring, logic rewrites, new feature implementation, training pipeline, and cross-system consistency.  
-**Reference:** `docs/SPSE_ARCHITECTURE_V11.1.md` (all sections; training-specific: §11)
+**Reference:** `docs/SPSE_ARCHITECTURE_V14.2.md` (all sections; training-specific: §11)
 
 ---
 

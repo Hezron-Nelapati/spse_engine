@@ -1,4 +1,4 @@
-# Structured Predictive Search (SPS) Architecture
+# Structured Predictive Search Engine (SPSE) Architecture
 
 **Document Version:** 14.2  
 **Last Updated:** March 2026  
@@ -13,7 +13,7 @@
 3. [Classification System](#3-classification-system)
 4. [Reasoning System](#4-reasoning-system)
 5. [Predictive System](#5-predictive-system)
-6. [System Interaction & Engine Pipeline](#6-system-interaction--engine-pipeline)
+6. [System Interaction & Engine Pipeline](#6-system-interaction--engine-pipeline) (includes Product Flow Scenarios)
 7. [Core Data Structures](#7-core-data-structures)
 8. [Configuration System](#8-configuration-system)
 9. [GPU Acceleration](#9-gpu-acceleration)
@@ -28,7 +28,7 @@
 
 ## 1. Executive Summary
 
-The SPS (Structured Predictive Search) Engine — implemented as the SPSE codebase — is a **privacy-first, config-driven, retrieval-augmented intelligence engine** written in Rust. It replaces the dense softmax-over-vocabulary paradigm of traditional language models with a **tokenizer-free, spatially-grounded prediction architecture** organized into three functional systems:
+The SPSE (Structured Predictive Search Engine) is a **privacy-first, config-driven, retrieval-augmented intelligence engine** written in Rust. It replaces the dense softmax-over-vocabulary paradigm of traditional language models with a **tokenizer-free, spatially-grounded prediction architecture** organized into three functional systems:
 
 1. **Classification System** — Ingests raw text, discovers dynamic semantic units, classifies intent/tone/uncertainty, and gates downstream processing.
 2. **Reasoning System** — Manages dual memory (Core vs. Episodic), retrieves and merges external evidence, scores candidate concepts, and orchestrates learning.
@@ -104,12 +104,12 @@ pub mod gpu              // GPU acceleration (feature-gated wgpu)
 pub mod predictive       // Predictive System: Word Graph (L5), Step Resolver (L16), Sequence Assembler (L17)
 pub mod reasoning        // Reasoning System: Context (L7), Retrieval (L11), Merge (L13), Search (L14), Feedback (L18)
 pub mod memory           // Reasoning System: MemoryStore (L4/L21) + DynamicMemoryAllocator
-pub mod dataset_catalog  // Internal dataset catalog (custom-generated only)
+pub mod open_sources     // Internal dataset catalog (custom-generated only) — pending rename to dataset_catalog
 pub mod persistence      // SQLite persistence layer
 pub mod proto            // Protobuf definitions (api.proto)
 pub mod region_index     // Predictive System: regional spatial index
 pub mod scheduler        // Priority-based work scheduling (4 priorities)
-pub mod seed             // Dataset generators (dialogue, entity, dryrun)
+pub mod seed             // Dataset generators (dialogue, entity, classification, bulk, dryrun, intelligence)
 pub mod spatial_index    // Predictive System: SpatialGrid for O(1) cell queries
 pub mod stress_drill_lib // Stress testing drills
 pub mod crash_drill_lib  // Crash resilience drills
@@ -227,13 +227,13 @@ graph TD
 | L3 | Hierarchy Organizer | Classification | `classification/hierarchy.rs` | (uses builder config) |
 | L4 | Memory Ingestion | Reasoning | `memory/store.rs` | `layer_21_memory_governance` |
 | L5 | Word Graph Manager | Predictive | `predictive/router.rs` | `layer_5_semantic_map` |
-| L6 | Spatial + Path Index | Predictive | `reasoning/context.rs` + `spatial_index.rs` | — |
-| L7 | Intent Detector | Reasoning | `classification/intent.rs` | `intent` |
+| L6 | Spatial + Path Index | Predictive | `spatial_index.rs` + `region_index.rs` (+ `reasoning/context.rs` for sequence state) | — |
+| L7 | Context Matrix | Reasoning | `reasoning/context.rs` (shared file with L6 sequence state) | `intent` |
 | L8 | Adaptive Runtime | Reasoning | `engine.rs` | `adaptive_behavior` |
 | L9 | Retrieval Decision | Classification | `classification/intent.rs` | `layer_9_retrieval_gating` |
 | L10 | Query Builder | Classification | `classification/query.rs` | `layer_10_query_builder` |
 | L11 | Retrieval Pipeline | Reasoning | `reasoning/retrieval.rs` | `layer_11_retrieval` |
-| L12 | Safety Validator | Reasoning | `classification/safety.rs` | `layer_19_trust_heuristics` |
+| L12 | Safety Validator | Reasoning | `classification/safety.rs` (cross-system: file in Classification dir, serves Reasoning L12 trust scoring) | `layer_19_trust_heuristics` |
 | L13 | Evidence Merger | Reasoning | `reasoning/merge.rs` | `layer_13_evidence_merge` |
 | L14 | Candidate Scorer | Reasoning | `reasoning/search.rs` | `layer_14_candidate_scoring` |
 | L15 | Resolver Mode | Predictive | `engine.rs` | `adaptive_behavior` |
@@ -272,7 +272,7 @@ Total:
 
 **Function:** Ingests raw text/sentences to identify **intent**, **tone**, **uncertainty**, and **semantic category**. Acts as the gatekeeper that determines *what* the input means and *whether* external help is needed.
 
-**Core Mechanism:** Nearest Centroid Classifier using 78-float POS-based feature vectors (14 structural + 32 intent hash + 32 tone hash) with configurable feature weights. Training builds per-class mean centroids; inference compares query vector against ~23 centroids via weighted cosine similarity.
+**Core Mechanism:** Nearest Centroid Classifier using 82-float POS-based feature vectors (14 structural + 32 intent hash + 32 tone hash + 4 semantic category flags; see §3.9) with configurable feature weights. Training builds per-class mean centroids; inference compares query vector against ~23 centroids via weighted cosine similarity.
 
 ### Constituent Layers
 
@@ -571,7 +571,7 @@ Config: `semantic_probe_weight` (default: 0.15), `anchor_fuzzy_threshold` (defau
 
 #### Anchor Seeding
 
-Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_anchors.yaml`). Categories:
+Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_anchors.yaml` — *planned; not yet created*). Categories:
 
 | Category | Example Anchors | Count |
 |----------|----------------|-------|
@@ -1117,6 +1117,8 @@ Config: `implicit_reinforce_delta` (default: 0.05), `correction_penalty` (defaul
 
 ## 4.10 Product Flow Scenarios
 
+> **Cross-system section** — these flows trace through all three systems and logically belong with §6 (System Interaction). Placed here for reading continuity after the Reasoning System's on-the-fly learning extensions.
+
 Detailed end-to-end flows for every type of query the engine handles. Each scenario traces through all three systems with exact layer references.
 
 ### Flow A: Direct Answer (Warm Path — ~70% of queries)
@@ -1653,7 +1655,7 @@ Position initialization for word W in sentence S:
 **Config:**
 - `pos_offset_strength: f32` (default: 0.05) — magnitude of POS-based cluster offset
 - `context_seed_strength: f32` (default: 0.10) — magnitude of context-seeded perturbation
-- `pos_cluster_centroids` — pre-defined in `config/pos_clusters.yaml`
+- `pos_cluster_centroids` — pre-defined in `config/pos_clusters.yaml` (*planned; not yet created*)
 
 **Backward compatibility:** Words positioned without context (dictionary pre-pop) use only `base + offset`, which is a small deterministic shift. Existing spatial indices remain valid; positions shift by at most `pos_offset_strength + context_seed_strength ≈ 0.15` from the pure FNV position.
 
@@ -1934,7 +1936,7 @@ For each node position update:
 
 **Config:**
 - `anchor_locking_enabled: bool` (default: true)
-- `zone_definitions_path: String` (default: "config/semantic_zones.yaml")
+- `zone_definitions_path: String` (default: "config/semantic_zones.yaml") (*planned; not yet created*)
 - Default zones loaded from YAML; custom zones can be added at runtime
 
 **Benefit:** Prevents factual drift while still allowing semantic clustering within zone boundaries. Numbers stay near numbers, dates stay near dates, but they can still form edges to content words outside their zone.
@@ -2040,7 +2042,7 @@ During L21 maintenance:
 - `dynamic_hub_centrality_threshold: f32` (default: 0.15) — betweenness centrality above which Content words are eligible for hub election
 - `hub_election_min_frequency: u32` (default: 500) — minimum traversal count before centrality is computed
 - `hub_centrality_sample_pairs: u32` (default: 100) — node pairs sampled per cycle for centrality estimation
-- `language_function_words_dir: String` (default: "config/function_words/") — directory containing per-language function word lists
+- `language_function_words_dir: String` (default: "config/function_words/") — directory containing per-language function word lists (*planned; not yet created*)
 
 **Benefit:** The graph self-organizes to find its own "highway interchanges" based on actual usage patterns, supporting multilingual and domain-specific fluency without hardcoded English-centric rules. In a medical corpus, "patient" and "diagnosis" naturally become routing hubs; in legal text, "defendant" and "court" serve the same role.
 
@@ -2314,6 +2316,10 @@ pub struct Unit {
     pub links: Vec<Link>,
     pub contexts: Vec<String>,
     pub is_process_unit: bool,               // true for reasoning artifacts
+    #[serde(skip)]
+    pub content_lower: String,                // Pre-computed lowercase for hot-path scoring
+    #[serde(skip)]
+    pub content_fingerprint: u64,             // FNV-1a hash for O(1) matching
 }
 ```
 
@@ -2503,7 +2509,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `telemetry` | `layer_20_telemetry` | `TelemetryConfig` |
 | `document` | `document` | `DocumentIngestionConfig` |
 | `training_phases` | `training_phases` | `TrainingPhaseOverridesConfig` |
-| `ingestion_policies` | `ingestion_policies` | `IngestionPoliciesConfig` (custom_training, runtime_html, plain_text, local_document) |
+| `ingestion_policies` | `ingestion_policies` | `IngestionPoliciesConfig` (custom_training, runtime_html, plain_text, local_document) — *currently `source_policies` / `SourcePoliciesConfig` in code; pending rename* |
 | `silent_training` | `silent_training` | `SilentTrainingConfig` (includes quarantine: enabled, conflict_threshold, min_examples) |
 | `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` (tokenizer only — no model weights) |
 | `gpu` | `gpu` | `GpuConfig` |
@@ -2695,8 +2701,8 @@ The SPS engine uses **Decoupled Training, Coupled Inference**: each system is tr
 |-----------|-------|------|---------|
 | Feature weights | 6 | `f32` | w_structure=0.10, w_punctuation=0.10, w_semantic=0.15, w_derived=0.10, w_intent_hash=0.35, w_tone_hash=0.20 |
 | Confidence thresholds | 3 | `f32` | low=0.40, high=0.85, retrieval_gate=0.72 |
-| Per-intent centroids | 24 × 78 | `f32` | Computed from labeled data |
-| Per-tone centroids | 6 × 78 | `f32` | Computed from labeled data |
+| Per-intent centroids | 24 × 82 | `f32` | Computed from labeled data (78 base + 4 semantic flags; see §3.9) |
+| Per-tone centroids | 6 × 82 | `f32` | Computed from labeled data (78 base + 4 semantic flags; see §3.9) |
 
 #### Loss Function: L_class
 
@@ -2981,7 +2987,7 @@ These corrections are applied as config overrides, not weight changes — preser
 | Consistency check (5K validation examples) | ~1 min | ~45 sec |
 | **Full training pipeline** | **~25 min** | **~15 min** |
 
-### 11.7 Training Pipeline Infrastructure (`src/training.rs`)
+### 11.7 Training Pipeline Infrastructure (`src/training/pipeline.rs`)
 
 #### Training Phases
 
@@ -3141,17 +3147,18 @@ pub struct TrainingExample {
 |-----------|------|---------|
 | `EntityGenerator` | `seed/entity_generator.rs` | Entity-based QA datasets |
 | `DialogueGenerator` | `seed/dialogue_generator.rs` | Multi-turn dialogue datasets |
+| `BulkGenerator` | `seed/bulk_generator.rs` | Large-scale bulk dataset generation |
 | `generate_dryrun_datasets()` | `seed/dryrun.rs` | DryRun validation datasets |
 | `generate_intelligence_seeds()` | `seed/intelligence_generator.rs` | Reasoning chains, retrieval triggers, confidence gating |
 
 #### New System-Specific Generators
 
-| Generator | File | Output | Purpose |
-|-----------|------|--------|---------|
-| **`ClassificationDatasetGenerator`** | `seed/classification_generator.rs` | `{text, intent, tone, needs_retrieval}` | 50K+ labeled examples for centroid construction + weight sweep |
-| **`ReasoningDatasetGenerator`** | `seed/reasoning_generator.rs` | `{query, answer, sub_questions, reasoning_trace}` | 20K+ QA pairs for scoring weight optimization + decomposition templates |
-| **`PredictiveQAGenerator`** | `seed/predictive_generator.rs` | `{question, answer, context}` | 100K+ Q&A pairs for Word Graph edge formation + highway detection |
-| **`ConsistencyDatasetGenerator`** | `seed/consistency_generator.rs` | `{query, expected_classification, expected_reasoning, expected_prediction}` | 5K+ cross-system validation examples |
+| Generator | File | Output | Status | Purpose |
+|-----------|------|--------|--------|---------|
+| **`ClassificationDatasetGenerator`** | `seed/classification_generator.rs` | `{text, intent, tone, needs_retrieval}` | **Exists** | 50K+ labeled examples for centroid construction + weight sweep |
+| **`ReasoningDatasetGenerator`** | `seed/reasoning_generator.rs` | `{query, answer, sub_questions, reasoning_trace}` | *Planned* | 20K+ QA pairs for scoring weight optimization + decomposition templates |
+| **`PredictiveQAGenerator`** | `seed/predictive_generator.rs` | `{question, answer, context}` | *Planned* | 100K+ Q&A pairs for Word Graph edge formation + highway detection |
+| **`ConsistencyDatasetGenerator`** | `seed/consistency_generator.rs` | `{query, expected_classification, expected_reasoning, expected_prediction}` | *Planned* | 5K+ cross-system validation examples |
 
 **Classification dataset generation strategy:**
 - Distribute examples across all 24 IntentKinds (min 1,500 per intent, more for common intents)
@@ -3191,7 +3198,7 @@ Each example includes:
 - `context` hint (e.g., `retrieval_trigger:population_lookup`)
 - `curriculum_score` for training ordering (higher = earlier)
 
-### 11.9 Internal Dataset Catalog (`src/dataset_catalog.rs`)
+### 11.9 Internal Dataset Catalog (`src/open_sources.rs` — *pending rename to `dataset_catalog.rs`*)
 
 **No external open-source datasets are used for training or seeding.** All training data is produced by the custom dataset generators in `src/seed/`. The engine acquires factual knowledge at runtime via web retrieval triggered during reasoning.
 
@@ -3225,7 +3232,7 @@ Sweeps pollution-related configuration values, ingests a mix of valid and intent
 
 Output: `benchmarks/pollution_sweep_report.md`
 
-#### New: Per-System Training Sweep (`src/bin/training_sweep.rs`)
+#### Planned: Per-System Training Sweep (`src/bin/training_sweep.rs` — *not yet created*)
 
 Unified sweep harness that runs all three system training pipelines and the consistency check:
 
@@ -3327,11 +3334,11 @@ RAII guard — decrements active count and wakes waiting threads on drop.
 spse_engine/
 ├── src/
 │   ├── main.rs                    # CLI entry point
-│   ├── lib.rs                     # Library exports (24 public modules)
+│   ├── lib.rs                     # Library exports (23 public modules)
 │   ├── engine.rs                  # Core Engine — orchestrates all three systems
-│   ├── types.rs                   # All core type definitions (~1278 lines)
+│   ├── types.rs                   # All core type definitions
 │   ├── config/
-│   │   └── mod.rs                 # EngineConfig + all sub-configs (~2758 lines)
+│   │   └── mod.rs                 # EngineConfig + all sub-configs
 │   ├── classification/            # Classification System (L1, L2, L3, L9, L10, L19)
 │   │   ├── mod.rs
 │   │   ├── input.rs               # L1: Input ingestion & normalization
@@ -3340,8 +3347,8 @@ spse_engine/
 │   │   ├── intent.rs              # L9: Intent detection & retrieval gating
 │   │   ├── query.rs               # L10: Safe query building (PII stripping)
 │   │   ├── safety.rs              # L19: Trust & safety validation
-│   │   ├── calculator.rs          # Nearest centroid classifier (78-float)
-│   │   ├── signature.rs           # ClassificationSignature (78-float feature vector)
+│   │   ├── calculator.rs          # Nearest centroid classifier (82-float)
+│   │   ├── signature.rs           # ClassificationSignature (82-float feature vector)
 │   │   ├── pattern.rs             # ClassificationPattern (Intent channel)
 │   │   └── trainer.rs             # Classification training pipeline
 │   ├── reasoning/                 # Reasoning System (L7, L11, L13, L14, L18)
@@ -3405,6 +3412,8 @@ spse_engine/
 │   │   ├── mod.rs                 # TrainingExample + CurriculumMetadata
 │   │   ├── entity_generator.rs    # Entity-based QA datasets
 │   │   ├── dialogue_generator.rs  # Multi-turn dialogue datasets
+│   │   ├── classification_generator.rs # Classification dataset generator
+│   │   ├── bulk_generator.rs      # Large-scale bulk dataset generation
 │   │   ├── intelligence_generator.rs # Intelligence-focused seeds (reasoning, retrieval triggers)
 │   │   └── dryrun.rs              # DryRun validation datasets
 │   ├── bin/
@@ -3417,11 +3426,12 @@ spse_engine/
 │   │   ├── pollution_sweep.rs     # Pollution config sweep tool
 │   │   ├── stress_drill.rs        # Stress testing drills
 │   │   ├── test_harness.rs        # Config sweep harness
-│   │   └── zero_shot_harness.rs   # Zero-shot scenario testing
+│   │   ├── zero_shot_harness.rs   # Zero-shot scenario testing
+│   │   └── generate_seeds.rs      # Seed dataset generation CLI
 │   ├── api.rs                     # REST API router (axum)
 │   ├── bloom_filter.rs            # UnitBloomFilter
 │   ├── document.rs                # Document processing (PDF, DOCX, text)
-│   ├── dataset_catalog.rs         # Internal dataset catalog (custom-generated only)
+│   ├── open_sources.rs            # Internal dataset catalog (pending rename to dataset_catalog.rs)
 │   ├── persistence.rs             # SQLite persistence layer
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
 │   ├── spatial_index.rs           # SpatialGrid for O(1) cell queries
@@ -3459,7 +3469,7 @@ spse_engine/
 │   ├── test_data_generator.py
 │   └── zero_shot_harness.py
 ├── docs/
-│   ├── SPSE_ARCHITECTURE_V11.1.md # This document (SPS Three-System Architecture)
+│   ├── SPSE_ARCHITECTURE_V14.2.md # This document (SPSE Three-System Architecture)
 │   ├── CONFIG_TUNING_GUIDE.md
 │   ├── DATASET_GENERATION_GUIDE.md
 │   ├── PRE_PRODUCTION_EXECUTION_PLAN.md
@@ -3600,4 +3610,4 @@ spse_engine/
 - `docs/DATASET_GENERATION_GUIDE.md` — Dataset generation specifications
 - `docs/PRE_PRODUCTION_EXECUTION_PLAN.md` — Implementation roadmap
 - `docs/PRE_PRODUCTION_TRAINING_PLAN.md` — Training plan
-- `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` — Comprehensive coding plan for training architecture implementation
+- `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` — Comprehensive coding plan (phases 0–12)
