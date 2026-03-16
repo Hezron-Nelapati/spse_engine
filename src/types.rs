@@ -553,6 +553,8 @@ pub struct RetrievedDocument {
     pub retrieved_at: DateTime<Utc>,
     pub trust_score: f32,
     pub cached: bool,
+    #[serde(default)]
+    pub metadata_summary: MetadataSummary,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -577,6 +579,16 @@ pub struct MergedState {
     pub freshness_boost: f32,
     pub conflict_records: Vec<ConflictRecord>,
     pub evidence: EvidenceState,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct MetadataSummary {
+    #[serde(default)]
+    pub numbers: Vec<(String, f64, String)>,
+    #[serde(default)]
+    pub dates: Vec<(String, String, u16)>,
+    #[serde(default)]
+    pub properties: Vec<(String, String, String)>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

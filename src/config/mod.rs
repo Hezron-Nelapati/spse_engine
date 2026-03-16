@@ -594,6 +594,12 @@ pub struct ReasoningLoopConfig {
     pub max_internal_steps: usize,
     /// Confidence threshold to exit reasoning loop early
     pub exit_confidence_threshold: f32,
+    /// Immediate retrieval threshold checked on loop entry
+    pub entry_retrieval_threshold: f32,
+    /// Trigger reasoning when the top candidate gap is narrower than this threshold
+    pub disagreement_trigger_threshold: f32,
+    /// Suppress entry-time retrieval when local support is already strong enough
+    pub local_knowledge_sufficiency_threshold: f32,
     /// Enable thought buffer allocation on demand
     pub enable_thought_buffer_on_demand: bool,
 }
@@ -605,6 +611,9 @@ impl Default for ReasoningLoopConfig {
             trigger_confidence_floor: 0.40,
             max_internal_steps: 3,
             exit_confidence_threshold: 0.60,
+            entry_retrieval_threshold: 0.42,
+            disagreement_trigger_threshold: 0.15,
+            local_knowledge_sufficiency_threshold: 0.60,
             enable_thought_buffer_on_demand: true,
         }
     }
@@ -1669,11 +1678,38 @@ impl Default for SemanticMapConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct MicroValidatorConfig {
+    pub enabled: bool,
+    pub lazy_validation_enabled: bool,
+    pub ambiguity_margin: f32,
+    pub validation_trust_floor: f32,
+    pub numeric_contradiction_threshold: f32,
+    pub contradiction_penalty: f32,
+    pub contradiction_override_trust: f32,
+}
+
+impl Default for MicroValidatorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lazy_validation_enabled: true,
+            ambiguity_margin: 0.05,
+            validation_trust_floor: 0.50,
+            numeric_contradiction_threshold: 0.15,
+            contradiction_penalty: 0.30,
+            contradiction_override_trust: 0.90,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EvidenceMergeConfig {
     pub trust_weight: f32,
     pub recency_weight: f32,
     pub agreement_weight: f32,
     pub ambiguity_margin: f32,
+    pub micro_validator: MicroValidatorConfig,
 }
 
 impl Default for EvidenceMergeConfig {
@@ -1683,6 +1719,7 @@ impl Default for EvidenceMergeConfig {
             recency_weight: 0.30,
             agreement_weight: 0.20,
             ambiguity_margin: 0.05,
+            micro_validator: MicroValidatorConfig::default(),
         }
     }
 }
@@ -1769,6 +1806,29 @@ pub struct TelemetryConfig {
 /// Replaces heuristic intent/tone detection with memory-backed pattern matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct RecommendationSharpeningConfig {
+    /// Enable low-margin arbitration across recommendation-style family intents
+    pub enabled: bool,
+    /// Margin below which the advisory family arbitration path activates
+    pub advisory_margin_threshold: f32,
+    /// Blend factor between centroid score and pattern-vote arbitration score
+    pub family_blend_weight: f32,
+}
+
+impl Default for RecommendationSharpeningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            advisory_margin_threshold: 0.10,
+            family_blend_weight: 0.30,
+        }
+    }
+}
+
+/// Configuration for calculation-based classification system.
+/// Replaces heuristic intent/tone detection with memory-backed pattern matching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClassificationConfig {
     /// Spatial query radius for pattern retrieval (L6)
     pub spatial_query_radius: f32,
@@ -1792,6 +1852,8 @@ pub struct ClassificationConfig {
     pub w_intent_hash: f32,
     /// Weight for POS-based tone hash (adjectives, adverbs)
     pub w_tone_hash: f32,
+    /// Blend between absolute centroid similarity and top-2 margin discrimination
+    pub margin_blend_weight: f32,
     /// Spatial grid cell size for classification pattern indexing
     pub spatial_cell_size: f32,
     /// Maximum number of top-k candidates to consider for vote aggregation
@@ -1800,6 +1862,8 @@ pub struct ClassificationConfig {
     pub training_target_accuracy: f32,
     /// Maximum training iterations
     pub training_max_iterations: usize,
+    /// Advisory-family arbitration knobs for Recommend/Critique/Rewrite/Plan collisions
+    pub recommendation_sharpening: RecommendationSharpeningConfig,
 }
 
 impl Default for ClassificationConfig {
@@ -1816,10 +1880,12 @@ impl Default for ClassificationConfig {
             w_derived: 0.10,
             w_intent_hash: 0.35,
             w_tone_hash: 0.20,
+            margin_blend_weight: 0.50,
             spatial_cell_size: 0.05,
             top_k_candidates: 32,
             training_target_accuracy: 0.85,
             training_max_iterations: 10,
+            recommendation_sharpening: RecommendationSharpeningConfig::default(),
         }
     }
 }
@@ -2605,6 +2671,28 @@ impl EngineConfig {
             0.0,
             1.0,
         )?;
+        validate_range(
+            "auto_inference.reasoning_loop.entry_retrieval_threshold",
+            self.auto_inference.reasoning_loop.entry_retrieval_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.reasoning_loop.disagreement_trigger_threshold",
+            self.auto_inference
+                .reasoning_loop
+                .disagreement_trigger_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "auto_inference.reasoning_loop.local_knowledge_sufficiency_threshold",
+            self.auto_inference
+                .reasoning_loop
+                .local_knowledge_sufficiency_threshold,
+            0.0,
+            1.0,
+        )?;
         if self.auto_inference.reasoning_loop.max_internal_steps == 0 {
             return Err(
                 "auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string(),
@@ -2627,6 +2715,104 @@ impl EngineConfig {
             self.auto_inference
                 .creative_spark
                 .anchor_protection_strictness,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "classification.spatial_query_radius",
+            self.classification.spatial_query_radius,
+            0.0,
+            10.0,
+        )?;
+        validate_range(
+            "classification.low_confidence_threshold",
+            self.classification.low_confidence_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "classification.high_confidence_threshold",
+            self.classification.high_confidence_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "classification.margin_blend_weight",
+            self.classification.margin_blend_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "classification.recommendation_sharpening.advisory_margin_threshold",
+            self.classification
+                .recommendation_sharpening
+                .advisory_margin_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "classification.recommendation_sharpening.family_blend_weight",
+            self.classification
+                .recommendation_sharpening
+                .family_blend_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.trust_weight",
+            self.evidence_merge.trust_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.recency_weight",
+            self.evidence_merge.recency_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.agreement_weight",
+            self.evidence_merge.agreement_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.ambiguity_margin",
+            self.evidence_merge.ambiguity_margin,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.micro_validator.ambiguity_margin",
+            self.evidence_merge.micro_validator.ambiguity_margin,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.micro_validator.validation_trust_floor",
+            self.evidence_merge.micro_validator.validation_trust_floor,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.micro_validator.numeric_contradiction_threshold",
+            self.evidence_merge
+                .micro_validator
+                .numeric_contradiction_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.micro_validator.contradiction_penalty",
+            self.evidence_merge.micro_validator.contradiction_penalty,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_13_evidence_merge.micro_validator.contradiction_override_trust",
+            self.evidence_merge
+                .micro_validator
+                .contradiction_override_trust,
             0.0,
             1.0,
         )?;

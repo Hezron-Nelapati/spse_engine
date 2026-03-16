@@ -990,9 +990,6 @@ impl Engine {
                                                 new_pattern.unit_id,
                                                 &sig.semantic_centroid,
                                             );
-                                            // Accumulate into per-intent/tone centroids
-                                            let fv = sig.to_feature_vector();
-                                            memory.accumulate_centroid(gt.intent, gt.tone, &fv);
                                             memory.store_classification_pattern(new_pattern);
                                         }
                                     }
@@ -1180,6 +1177,7 @@ impl Engine {
                 retrieved_at: chrono::Utc::now(),
                 trust_score: 0.99,
                 cached: true,
+                metadata_summary: crate::types::MetadataSummary::default(),
             }]
         };
 
@@ -1341,7 +1339,7 @@ impl Engine {
         let mut layer_11_retrieval_time_ms = 0u64;
         let mut layer_13_merge_time_ms = 0u64;
 
-        if let Some(documents) = local_documents {
+        if let Some(ref documents) = local_documents {
             let snapshot = self.load_memory_snapshot();
             let evidence = local_evidence_state(
                 &documents,
@@ -1357,6 +1355,7 @@ impl Engine {
                 &merged_input_units,
                 &context_matrix,
                 evidence,
+                &initial_scored,
                 &self.config.evidence_merge,
             );
             layer_13_merge_time_ms = layer_13_start.elapsed().as_millis() as u64;
@@ -1424,6 +1423,7 @@ impl Engine {
                 &merged_input_units,
                 &context_matrix,
                 evidence,
+                &initial_scored,
                 &self.config.evidence_merge,
             );
             layer_13_merge_time_ms = layer_13_start.elapsed().as_millis() as u64;
@@ -1512,11 +1512,20 @@ impl Engine {
         // Phase 3: Dynamic Reasoning Loop — triggered by confidence gating
         let reasoning_start = Instant::now();
         let initial_confidence = resolved.as_ref().map(|r| r.score).unwrap_or(0.0);
+        let mut reasoning_intent = intent_profile.clone();
+        reasoning_intent.top_score = scored
+            .first()
+            .map(|candidate| candidate.score)
+            .unwrap_or(0.0);
+        reasoning_intent.second_score = scored
+            .get(1)
+            .map(|candidate| candidate.score)
+            .unwrap_or(0.0);
         let reasoning_result = if self.config.auto_inference.reasoning_loop.enabled {
             self.execute_reasoning_loop(
                 &packet.original_text,
                 initial_confidence,
-                &intent_profile,
+                &reasoning_intent,
                 &self.config.auto_inference.reasoning_loop,
             )
         } else {
@@ -1530,6 +1539,66 @@ impl Engine {
             }
         };
         let reasoning_time_ms = reasoning_start.elapsed().as_millis() as u64;
+
+        if reasoning_result.needs_retrieval
+            && !used_retrieval
+            && allow_retrieval
+            && local_documents.is_none()
+        {
+            let query = retrieval_query.clone().unwrap_or_else(|| {
+                SafeQueryBuilder::build(
+                    &packet.original_text,
+                    &context_matrix,
+                    &sequence_state,
+                    &self.config.query,
+                    &adaptive.trust,
+                )
+            });
+            retrieval_query = Some(query.clone());
+
+            let layer_11_start = Instant::now();
+            let evidence = self
+                .retriever
+                .search(
+                    &query,
+                    &self.safety,
+                    &self.config.retrieval_io,
+                    &adaptive.trust,
+                    self.config.retrieval_io.max_retries,
+                    &self.current_database_health(),
+                )
+                .await;
+            let retry_retrieval_time = layer_11_start.elapsed().as_millis() as u64;
+            layer_11_retrieval_time_ms += retry_retrieval_time;
+            self.latency_monitor.record(11, retry_retrieval_time);
+
+            safety_warnings.extend(evidence.warnings.clone());
+            if !evidence.documents.is_empty() {
+                self.ingest_web_evidence_into_memory(
+                    &evidence.documents,
+                    &query.sanitized_query,
+                    &intent_profile,
+                    &adaptive.trust,
+                );
+                preset_sources.extend(evidence.documents.iter().map(|doc| doc.source_url.clone()));
+            }
+
+            let snapshot = self.load_memory_snapshot();
+            let merged_input_units = snapshot.get_units(&candidate_route.candidate_ids);
+            let layer_13_start = Instant::now();
+            merged = self.merger.merge(
+                &merged_input_units,
+                &context_matrix,
+                evidence,
+                &initial_scored,
+                &self.config.evidence_merge,
+            );
+            let retry_merge_time = layer_13_start.elapsed().as_millis() as u64;
+            layer_13_merge_time_ms += retry_merge_time;
+            self.latency_monitor.record(13, retry_merge_time);
+            used_retrieval = !merged.evidence.documents.is_empty();
+        }
+
         // Check if retrieval was triggered but returned no documents
         let retrieval_failed = used_retrieval && merged.evidence.documents.is_empty();
 
@@ -1766,6 +1835,25 @@ impl Engine {
             };
         }
 
+        let local_transform_exempt = matches!(
+            intent.primary,
+            IntentKind::Translate | IntentKind::Rewrite | IntentKind::Summarize
+        );
+        let local_knowledge_sufficiency = initial_confidence.max(intent.confidence);
+        if initial_confidence < config.entry_retrieval_threshold
+            && !local_transform_exempt
+            && local_knowledge_sufficiency < config.local_knowledge_sufficiency_threshold
+        {
+            return ReasoningResult {
+                output: OutputType::FinalAnswer(String::new()),
+                steps_taken: 0,
+                final_confidence: initial_confidence,
+                reasoning_triggered: true,
+                thoughts: Vec::new(),
+                needs_retrieval: true,
+            };
+        }
+
         // Execute reasoning steps
         for step in 0..config.max_internal_steps {
             state.current_step = step;
@@ -1776,7 +1864,11 @@ impl Engine {
 
             // If confidence is still low after first step, flag that retrieval is needed.
             // The main pipeline checks this flag and triggers web retrieval automatically.
-            if step > 0 && thought_confidence < config.exit_confidence_threshold * 0.7 {
+            if step > 0
+                && thought_confidence < config.exit_confidence_threshold * 0.7
+                && !local_transform_exempt
+                && local_knowledge_sufficiency < config.local_knowledge_sufficiency_threshold
+            {
                 state.needs_retrieval = true;
             }
 
@@ -2168,6 +2260,7 @@ impl Engine {
             retrieved_at: chrono::Utc::now(),
             trust_score: 0.99,
             cached: true,
+            metadata_summary: crate::types::MetadataSummary::default(),
         }];
 
         if let Some(answer_text) = grounded_evidence_answer(prompt, &documents) {
@@ -5111,6 +5204,7 @@ mod tests {
             retrieved_at: Utc::now(),
             trust_score: 0.82,
             cached: false,
+            metadata_summary: crate::types::MetadataSummary::default(),
         }];
 
         let answer = grounded_evidence_answer("Who is president of india?", &docs)
@@ -5128,6 +5222,7 @@ mod tests {
             retrieved_at: Utc::now(),
             trust_score: 0.82,
             cached: false,
+            metadata_summary: crate::types::MetadataSummary::default(),
         }];
 
         let answer =

@@ -4,29 +4,127 @@
 //! and verifies state consistency across layer transitions.
 
 use chrono::Utc;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 use uuid::Uuid;
 
 use spse_engine::classification::builder::UnitBuilder;
 use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
-use spse_engine::classification::intent::IntentDetector;
-use spse_engine::config::{EngineConfig, GovernanceConfig, UnitBuilderConfig};
-use spse_engine::engine::Engine;
+use spse_engine::classification::{
+    ClassificationCalculator, ClassificationPattern, ClassificationSignature, SemanticHasher,
+};
+use spse_engine::config::{ClassificationConfig, GovernanceConfig, UnitBuilderConfig};
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::predictive::output::OutputDecoder;
 use spse_engine::predictive::resolver::FineResolver;
-use spse_engine::reasoning::search::CandidateScorer;
 use spse_engine::spatial_index::SpatialGrid;
 use spse_engine::types::{
-    ContextMatrix, InputPacket, IntentKind, IntentProfile, MemoryChannel, MemoryType, MergedState,
-    ResolvedCandidate, SequenceState, SourceKind, Unit, UnitLevel,
+    ContextMatrix, InputPacket, IntentFallbackMode, IntentKind, IntentProfile, MemoryChannel,
+    MemoryType, MergedState, ResolvedCandidate, ResolverMode, SourceKind, ToneKind,
 };
 
 fn temp_db_path(name: &str) -> String {
     let file = format!("layer_boundary_{}_{}.db", name, Uuid::new_v4());
     std::env::temp_dir().join(file).display().to_string()
+}
+
+fn classify_with_seeded_calculator(query: &str) -> IntentProfile {
+    let config = ClassificationConfig::default();
+    let db_path = temp_db_path("seeded_classifier");
+    let governance = GovernanceConfig::default();
+    let mut memory = MemoryStore::new_with_governance(&db_path, &governance);
+    let mut spatial = SpatialGrid::new(config.spatial_cell_size);
+    let calculator = ClassificationCalculator::new();
+    let hasher = SemanticHasher::new();
+
+    for (text, intent, tone, resolver_mode) in [
+        (
+            "What is the capital of France?",
+            IntentKind::Question,
+            ToneKind::NeutralProfessional,
+            ResolverMode::Balanced,
+        ),
+        (
+            "What is the latest news about AI?",
+            IntentKind::Question,
+            ToneKind::Direct,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Hello there",
+            IntentKind::Greeting,
+            ToneKind::Casual,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Translate good morning to Spanish",
+            IntentKind::Translate,
+            ToneKind::Direct,
+            ResolverMode::Deterministic,
+        ),
+        (
+            "Summarize this article in three bullets",
+            IntentKind::Summarize,
+            ToneKind::Direct,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Recommend a beginner camera for travel",
+            IntentKind::Recommend,
+            ToneKind::Direct,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Critique this product strategy",
+            IntentKind::Critique,
+            ToneKind::Direct,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Give me a 30 day launch plan for a Rust CLI tool",
+            IntentKind::Plan,
+            ToneKind::Technical,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Is Paris the capital of France?",
+            IntentKind::Verify,
+            ToneKind::NeutralProfessional,
+            ResolverMode::Balanced,
+        ),
+        (
+            "Write a poem about autumn",
+            IntentKind::Brainstorm,
+            ToneKind::Casual,
+            ResolverMode::Exploratory,
+        ),
+    ] {
+        let signature = ClassificationSignature::compute(text, &hasher);
+        let mut pattern =
+            ClassificationPattern::new(signature.clone(), intent, tone, resolver_mode, None);
+        pattern.record_success();
+        spatial.insert(pattern.unit_id, &signature.semantic_centroid);
+        memory.store_classification_pattern(pattern);
+    }
+
+    let result = calculator.calculate(query, &memory, &spatial, &config);
+    let _ = std::fs::remove_file(&db_path);
+
+    IntentProfile {
+        primary: result.intent,
+        confidence: result.confidence,
+        top_score: result.confidence,
+        second_score: 0.0,
+        ambiguous: result.confidence < config.low_confidence_threshold,
+        wants_brief: false,
+        references_document_context: false,
+        certainty_bias: 0.0,
+        fallback_mode: if matches!(result.intent, IntentKind::Unknown) {
+            IntentFallbackMode::RetrieveUnknown
+        } else {
+            IntentFallbackMode::None
+        },
+        scores: vec![],
+        reasons: vec![format!("classification_method={:?}", result.method)],
+    }
 }
 
 // ============================================================================
@@ -157,8 +255,8 @@ fn l2_to_l3_unit_stream() {
 
     // The contract is that organize() accepts BuildOutput and returns valid UnitHierarchy
     assert!(
-        total_units_in_levels >= 0,
-        "L3 must produce valid UnitHierarchy (may be empty if L2 produced no units)"
+        total_units_in_levels >= hierarchy.levels.len(),
+        "L3 must produce valid UnitHierarchy accounting"
     );
 }
 
@@ -182,8 +280,6 @@ fn l3_to_l4_hierarchy_memory() {
     // L2→L3
     let build_output = UnitBuilder::ingest_with_config(&input, &config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
-    let hierarchy_unit_count: usize = hierarchy.levels.values().map(|v| v.len()).sum();
-
     // L4: Memory ingestion
     let active_ids = store.ingest_hierarchy_with_channels(
         &hierarchy,
@@ -304,17 +400,13 @@ fn l5_to_l6_spatial_context() {
 /// Test L6→L7: Context state to Intent detection
 #[test]
 fn l6_to_l7_context_intent() {
-    use spse_engine::config::IntentConfig;
-
-    let context = ContextMatrix::default();
-    let sequence = SequenceState::default();
-    let config = IntentConfig::default();
+    let config = ClassificationConfig::default();
 
     // L6 provides context state
     let query = "What is the capital of France?";
 
     // L7: Intent detection uses context
-    let profile = IntentDetector::classify(query, &context, &sequence, false, &config);
+    let profile = classify_with_seeded_calculator(query);
 
     // Verify L6→L7 contract: Intent detection produces valid IntentProfile
     assert!(
@@ -325,7 +417,7 @@ fn l6_to_l7_context_intent() {
 
     // Verify intent classification for question query
     // A question starting with "What" should typically be classified as Question or Factual
-    assert!(profile.primary != IntentKind::Unknown || profile.confidence < config.intent_floor_threshold,
+    assert!(profile.primary != IntentKind::Unknown || profile.confidence < config.low_confidence_threshold,
             "L7 must classify question query or return low confidence Unknown (got {:?} with confidence {})",
             profile.primary, profile.confidence);
 
@@ -336,15 +428,11 @@ fn l6_to_l7_context_intent() {
 /// Test L7→L9: Intent to Retrieval decision
 #[test]
 fn l7_to_l9_intent_retrieval() {
-    use spse_engine::config::IntentConfig;
-
-    let context = ContextMatrix::default();
-    let sequence = SequenceState::default();
-    let config = IntentConfig::default();
+    let config = ClassificationConfig::default();
 
     // L7: Intent classification for a query that may need retrieval
     let query = "What is the latest news about AI?";
-    let profile = IntentDetector::classify(query, &context, &sequence, false, &config);
+    let profile = classify_with_seeded_calculator(query);
 
     // L9: Retrieval decision based on intent and entropy
     // The retrieval gating logic considers: entropy, freshness, and intent
@@ -372,7 +460,7 @@ fn l7_to_l9_intent_retrieval() {
     );
     assert!(
         !matches!(profile.primary, IntentKind::Unknown)
-            || profile.confidence < config.intent_floor_threshold,
+            || profile.confidence < config.low_confidence_threshold,
         "L7 Unknown intent must have low confidence for L9 to trigger retrieval"
     );
 }
@@ -591,7 +679,10 @@ fn state_consistency_context_overflow() {
 
     // Memory may contain units from this test or previous runs in same DB
     // The key invariant is that stored_count should be consistent
-    assert!(stored_count >= 0, "Memory unit count must be non-negative");
+    assert!(
+        snapshot.unit_count() == stored_count,
+        "Memory unit count must remain stable"
+    );
 
     // If we ingested units, verify count consistency
     if total_ingested > 0 && stored_count > 0 {

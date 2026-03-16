@@ -1,6 +1,6 @@
 use crate::classification::input;
 use crate::config::DocumentIngestionConfig;
-use crate::types::{IntentKind, RetrievedDocument};
+use crate::types::{IntentKind, MetadataSummary, RetrievedDocument};
 use chrono::Utc;
 use lopdf::Document as PdfDocument;
 use quick_xml::escape::unescape;
@@ -206,6 +206,7 @@ pub fn load_document_from_path_with_config(
         retrieved_at: Utc::now(),
         trust_score: 0.98,
         cached: true,
+        metadata_summary: MetadataSummary::default(),
     })
 }
 
@@ -939,6 +940,7 @@ fn section_to_document(section: &DocumentSection) -> RetrievedDocument {
         retrieved_at: Utc::now(),
         trust_score: 0.98,
         cached: true,
+        metadata_summary: MetadataSummary::default(),
     }
 }
 

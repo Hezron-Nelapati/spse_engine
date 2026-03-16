@@ -5,15 +5,17 @@ use crate::config::{
     EngineConfig, GovernanceConfig, RetrievalIoConfig, TrustConfig, UnitBuilderConfig,
 };
 use crate::types::{
-    DatabaseHealthMetrics, EvidenceState, RetrievedDocument, SanitizedQuery, TrainingSourceType,
+    DatabaseHealthMetrics, EvidenceState, MetadataSummary, RetrievedDocument, SanitizedQuery,
+    TrainingSourceType,
 };
 use chrono::Utc;
 use futures_util::future::join_all;
+use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "gpu")]
@@ -484,19 +486,17 @@ impl RetrievalPipeline {
                 .unwrap_or("https://duckduckgo.com/");
             let normalized = input::normalize_text(abstract_text);
             if !normalized.is_empty() {
-                docs.push(RetrievedDocument {
-                    source_url: source_url.to_string(),
-                    title: value
+                docs.push(build_retrieved_document(
+                    source_url.to_string(),
+                    value
                         .get("Heading")
                         .and_then(Value::as_str)
                         .unwrap_or("DuckDuckGo Abstract")
                         .to_string(),
-                    raw_content: abstract_text.to_string(),
-                    normalized_content: normalized,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.5,
-                    cached: false,
-                });
+                    abstract_text.to_string(),
+                    normalized,
+                    0.5,
+                ));
             }
         }
 
@@ -528,23 +528,20 @@ impl RetrievalPipeline {
 
                     let normalized = input::normalize_text(text);
                     if !normalized.is_empty() {
-                        docs.push(RetrievedDocument {
-                            source_url: if url.is_empty() {
+                        docs.push(build_retrieved_document(
+                            if url.is_empty() {
                                 "https://duckduckgo.com/".to_string()
                             } else {
                                 url.to_string()
                             },
-                            title: text
-                                .split(" - ")
+                            text.split(" - ")
                                 .next()
                                 .unwrap_or("Related Topic")
                                 .to_string(),
-                            raw_content: text.to_string(),
-                            normalized_content: normalized,
-                            retrieved_at: Utc::now(),
-                            trust_score: 0.45,
-                            cached: false,
-                        });
+                            text.to_string(),
+                            normalized,
+                            0.45,
+                        ));
                     }
                 } else if let Some(topics) = item.get("Topics").and_then(Value::as_array) {
                     for nested in topics.iter().take(limit.saturating_sub(docs.len())) {
@@ -565,23 +562,20 @@ impl RetrievalPipeline {
 
                             let normalized = input::normalize_text(text);
                             if !normalized.is_empty() {
-                                docs.push(RetrievedDocument {
-                                    source_url: if url.is_empty() {
+                                docs.push(build_retrieved_document(
+                                    if url.is_empty() {
                                         "https://duckduckgo.com/".to_string()
                                     } else {
                                         url.to_string()
                                     },
-                                    title: text
-                                        .split(" - ")
+                                    text.split(" - ")
                                         .next()
                                         .unwrap_or("Related Topic")
                                         .to_string(),
-                                    raw_content: text.to_string(),
-                                    normalized_content: normalized,
-                                    retrieved_at: Utc::now(),
-                                    trust_score: 0.45,
-                                    cached: false,
-                                });
+                                    text.to_string(),
+                                    normalized,
+                                    0.45,
+                                ));
                             }
                         }
                     }
@@ -649,15 +643,13 @@ impl RetrievalPipeline {
                 if normalized.is_empty() {
                     continue;
                 }
-                docs.push(RetrievedDocument {
-                    source_url: format!("https://www.wikidata.org/wiki/{entity_id}"),
-                    title: label.to_string(),
+                docs.push(build_retrieved_document(
+                    format!("https://www.wikidata.org/wiki/{entity_id}"),
+                    label.to_string(),
                     raw_content,
-                    normalized_content: normalized,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.68,
-                    cached: false,
-                });
+                    normalized,
+                    0.68,
+                ));
             }
         }
 
@@ -762,15 +754,13 @@ impl RetrievalPipeline {
             if raw_content.is_empty() {
                 continue;
             }
-            docs.push(RetrievedDocument {
-                source_url: format!("https://pmc.ncbi.nlm.nih.gov/articles/PMC{id}/"),
-                title: title.to_string(),
-                raw_content: raw_content.clone(),
-                normalized_content: raw_content,
-                retrieved_at: Utc::now(),
-                trust_score: 0.74,
-                cached: false,
-            });
+            docs.push(build_retrieved_document(
+                format!("https://pmc.ncbi.nlm.nih.gov/articles/PMC{id}/"),
+                title.to_string(),
+                raw_content.clone(),
+                raw_content,
+                0.74,
+            ));
         }
 
         Ok(docs)
@@ -835,15 +825,13 @@ impl RetrievalPipeline {
                 if raw_content.is_empty() {
                     continue;
                 }
-                docs.push(RetrievedDocument {
-                    source_url: "https://nominatim.openstreetmap.org/".to_string(),
-                    title: title.to_string(),
-                    raw_content: raw_content.clone(),
-                    normalized_content: raw_content,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.7,
-                    cached: false,
-                });
+                docs.push(build_retrieved_document(
+                    "https://nominatim.openstreetmap.org/".to_string(),
+                    title.to_string(),
+                    raw_content.clone(),
+                    raw_content,
+                    0.7,
+                ));
             }
         }
 
@@ -943,15 +931,13 @@ impl RetrievalPipeline {
                     .and_then(Value::as_str)
                     .unwrap_or(summary_url.as_str());
 
-                docs.push(RetrievedDocument {
-                    source_url: source_url.to_string(),
-                    title: title.to_string(),
-                    raw_content: extract.to_string(),
-                    normalized_content: normalized,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.6,
-                    cached: false,
-                });
+                docs.push(build_retrieved_document(
+                    source_url.to_string(),
+                    title.to_string(),
+                    extract.to_string(),
+                    normalized,
+                    0.6,
+                ));
             }
         }
 
@@ -975,6 +961,8 @@ impl RetrievalPipeline {
                             let hydrated = merge_document_content(&doc.raw_content, &normalized);
                             doc.raw_content = hydrated.clone();
                             doc.normalized_content = input::normalize_text(&hydrated);
+                            doc.metadata_summary =
+                                extract_metadata_summary(&doc.title, &doc.normalized_content);
                         }
                     }
                 }
@@ -984,6 +972,133 @@ impl RetrievalPipeline {
 
         hydrated
     }
+}
+
+fn build_retrieved_document(
+    source_url: String,
+    title: String,
+    raw_content: String,
+    normalized_content: String,
+    trust_score: f32,
+) -> RetrievedDocument {
+    let metadata_summary = extract_metadata_summary(&title, &normalized_content);
+    RetrievedDocument {
+        source_url,
+        title,
+        raw_content,
+        normalized_content,
+        retrieved_at: Utc::now(),
+        trust_score,
+        cached: false,
+        metadata_summary,
+    }
+}
+
+fn extract_metadata_summary(title: &str, normalized_content: &str) -> MetadataSummary {
+    let entity = if title.trim().is_empty() {
+        "document".to_string()
+    } else {
+        input::normalize_text(title).to_ascii_lowercase()
+    };
+    let mut summary = MetadataSummary::default();
+
+    for captures in numeric_claim_regex().captures_iter(normalized_content) {
+        let Some(value) = captures.name("value") else {
+            continue;
+        };
+        let Ok(parsed_value) = value.as_str().parse::<f64>() else {
+            continue;
+        };
+        let unit = captures
+            .name("unit")
+            .map(|unit| unit.as_str().to_ascii_lowercase())
+            .unwrap_or_else(|| "count".to_string());
+        summary.numbers.push((entity.clone(), parsed_value, unit));
+    }
+
+    for captures in date_claim_regex().captures_iter(normalized_content) {
+        let Some(year_match) = captures.name("year") else {
+            continue;
+        };
+        let Ok(year) = year_match.as_str().parse::<u16>() else {
+            continue;
+        };
+        let relation = captures
+            .name("relation")
+            .map(|relation| relation.as_str().to_ascii_lowercase())
+            .unwrap_or_else(|| "date".to_string());
+        summary.dates.push((entity.clone(), relation, year));
+    }
+
+    for captures in property_claim_regex().captures_iter(normalized_content) {
+        let property = captures
+            .name("property")
+            .map(|property| property.as_str().trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        let value = captures
+            .name("value")
+            .map(|value| {
+                value
+                    .as_str()
+                    .trim()
+                    .trim_matches(|character: char| ".!?,".contains(character))
+                    .to_ascii_lowercase()
+            })
+            .unwrap_or_default();
+        if property.is_empty() || value.is_empty() {
+            continue;
+        }
+        summary.properties.push((entity.clone(), property, value));
+    }
+
+    summary
+}
+
+fn numeric_claim_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            \b
+            (?P<value>\d+(?:\.\d+)?)
+            \s*
+            (?P<unit>%|percent|year|years|km|kilometers|kg|usd|million|billion|people|citizens|articles?)?
+            \b",
+        )
+        .expect("numeric claim regex must compile")
+    })
+}
+
+fn date_claim_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            \b
+            (?P<relation>founded|established|created|born|died|published|launched|introduced|dissolved)
+            \s*
+            (?:in|on)?
+            \s*
+            (?P<year>\d{4})
+            \b",
+        )
+        .expect("date claim regex must compile")
+    })
+}
+
+fn property_claim_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            \b
+            (?P<property>capital|population|currency|ceo|founder|headquarters|president|governor)
+            \s+
+            (?:is|was|are|were)\s+
+            (?P<value>[a-z0-9][a-z0-9 ,.-]{1,60})",
+        )
+        .expect("property claim regex must compile")
+    })
 }
 
 fn dedup_documents(docs: &mut Vec<RetrievedDocument>) {
@@ -1460,23 +1575,21 @@ impl MultiEngineAggregator {
         if let Some(abstract_text) = value.get("AbstractText").and_then(Value::as_str) {
             let normalized = input::normalize_text(abstract_text);
             if !normalized.is_empty() {
-                docs.push(RetrievedDocument {
-                    source_url: value
+                docs.push(build_retrieved_document(
+                    value
                         .get("AbstractURL")
                         .and_then(Value::as_str)
                         .unwrap_or("https://duckduckgo.com/")
                         .to_string(),
-                    title: value
+                    value
                         .get("Heading")
                         .and_then(Value::as_str)
                         .unwrap_or("DuckDuckGo Abstract")
                         .to_string(),
-                    raw_content: abstract_text.to_string(),
-                    normalized_content: normalized,
-                    retrieved_at: Utc::now(),
-                    trust_score: 0.5,
-                    cached: false,
-                });
+                    abstract_text.to_string(),
+                    normalized,
+                    0.5,
+                ));
             }
         }
         Ok(docs)
@@ -1521,18 +1634,13 @@ impl MultiEngineAggregator {
                 let snippet = item.get("snippet").and_then(Value::as_str).unwrap_or("");
                 let normalized = input::normalize_text(snippet);
                 if !normalized.is_empty() {
-                    docs.push(RetrievedDocument {
-                        source_url: format!(
-                            "https://en.wikipedia.org/wiki/{}",
-                            title.replace(' ', "_")
-                        ),
-                        title: title.to_string(),
-                        raw_content: snippet.to_string(),
-                        normalized_content: normalized,
-                        retrieved_at: Utc::now(),
-                        trust_score: 0.6,
-                        cached: false,
-                    });
+                    docs.push(build_retrieved_document(
+                        format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
+                        title.to_string(),
+                        snippet.to_string(),
+                        normalized,
+                        0.6,
+                    ));
                 }
             }
         }
@@ -1583,15 +1691,13 @@ impl MultiEngineAggregator {
                 };
                 let normalized = input::normalize_text(&raw);
                 if !normalized.is_empty() {
-                    docs.push(RetrievedDocument {
-                        source_url: format!("https://www.wikidata.org/wiki/{}", entity_id),
-                        title: label.to_string(),
-                        raw_content: raw,
-                        normalized_content: normalized,
-                        retrieved_at: Utc::now(),
-                        trust_score: 0.68,
-                        cached: false,
-                    });
+                    docs.push(build_retrieved_document(
+                        format!("https://www.wikidata.org/wiki/{}", entity_id),
+                        label.to_string(),
+                        raw,
+                        normalized,
+                        0.68,
+                    ));
                 }
             }
         }
@@ -1676,15 +1782,13 @@ impl MultiEngineAggregator {
                     .unwrap_or("");
                 let raw = input::normalize_text(&format!("{}. Journal: {}.", title, journal));
                 if !raw.is_empty() {
-                    docs.push(RetrievedDocument {
-                        source_url: format!("https://pmc.ncbi.nlm.nih.gov/articles/PMC{}/", id),
-                        title: title.to_string(),
-                        raw_content: raw.clone(),
-                        normalized_content: raw,
-                        retrieved_at: Utc::now(),
-                        trust_score: 0.74,
-                        cached: false,
-                    });
+                    docs.push(build_retrieved_document(
+                        format!("https://pmc.ncbi.nlm.nih.gov/articles/PMC{}/", id),
+                        title.to_string(),
+                        raw.clone(),
+                        raw,
+                        0.74,
+                    ));
                 }
             }
         }
@@ -1733,15 +1837,13 @@ impl MultiEngineAggregator {
                     display_name, lat, lon, kind
                 ));
                 if !raw.is_empty() {
-                    docs.push(RetrievedDocument {
-                        source_url: "https://nominatim.openstreetmap.org/".to_string(),
-                        title: display_name.to_string(),
-                        raw_content: raw.clone(),
-                        normalized_content: raw,
-                        retrieved_at: Utc::now(),
-                        trust_score: 0.7,
-                        cached: false,
-                    });
+                    docs.push(build_retrieved_document(
+                        "https://nominatim.openstreetmap.org/".to_string(),
+                        display_name.to_string(),
+                        raw.clone(),
+                        raw,
+                        0.7,
+                    ));
                 }
             }
         }
@@ -1856,5 +1958,51 @@ impl StructuredParser {
         }
 
         parts.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_metadata_summary_captures_numbers_dates_and_properties() {
+        let summary = extract_metadata_summary(
+            "Paris",
+            "population is 2.1 million people founded in 1508 capital is france",
+        );
+
+        assert!(summary
+            .numbers
+            .iter()
+            .any(|(entity, value, unit)| entity == "paris"
+                && (*value - 2.1).abs() < f64::EPSILON
+                && unit == "million"));
+        assert!(summary
+            .dates
+            .iter()
+            .any(|(entity, relation, year)| entity == "paris"
+                && relation == "founded"
+                && *year == 1508));
+        assert!(summary
+            .properties
+            .iter()
+            .any(|(entity, property, value)| entity == "paris"
+                && property == "capital"
+                && value == "france"));
+    }
+
+    #[test]
+    fn build_retrieved_document_populates_metadata_summary() {
+        let doc = build_retrieved_document(
+            "https://example.com/paris".to_string(),
+            "Paris".to_string(),
+            "Population is 2.1 million people.".to_string(),
+            "population is 2.1 million people".to_string(),
+            0.8,
+        );
+
+        assert_eq!(doc.metadata_summary.numbers.len(), 1);
+        assert_eq!(doc.metadata_summary.numbers[0].0, "paris");
     }
 }

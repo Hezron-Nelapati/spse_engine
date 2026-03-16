@@ -67,7 +67,7 @@ impl ClassificationCalculator {
         &self,
         text: &str,
         memory: &MemoryStore,
-        _spatial: &SpatialGrid,
+        spatial: &SpatialGrid,
         config: &ClassificationConfig,
     ) -> ClassificationResult {
         let query_sig = ClassificationSignature::compute(text, &self.semantic_hasher);
@@ -123,6 +123,15 @@ impl ClassificationCalculator {
             .collect();
         tone_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        self.apply_advisory_family_arbitration(
+            &query_sig,
+            &mut intent_scores,
+            memory,
+            spatial,
+            config,
+        );
+        intent_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
         let (best_intent, best_intent_sim) = intent_scores
             .first()
             .copied()
@@ -134,11 +143,8 @@ impl ClassificationCalculator {
 
         // Confidence: how much the winner stands out from the runner-up
         let runner_up_sim = intent_scores.get(1).map(|s| s.1).unwrap_or(0.0);
-        let confidence = if best_intent_sim > 0.0 {
-            ((best_intent_sim - runner_up_sim) / best_intent_sim + best_intent_sim).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let confidence =
+            classification_confidence(best_intent_sim, runner_up_sim, config.margin_blend_weight);
 
         // Determine resolver mode from confidence (Layer 9 alignment)
         let resolver_mode =
@@ -443,6 +449,77 @@ impl ClassificationCalculator {
         self.w_semantic = w_semantic;
         self.w_derived = w_derived;
     }
+
+    fn apply_advisory_family_arbitration(
+        &self,
+        query_sig: &ClassificationSignature,
+        intent_scores: &mut [(IntentKind, f32)],
+        memory: &MemoryStore,
+        spatial: &SpatialGrid,
+        config: &ClassificationConfig,
+    ) {
+        let sharpening = &config.recommendation_sharpening;
+        if !sharpening.enabled || intent_scores.len() < 2 {
+            return;
+        }
+
+        let best = intent_scores[0];
+        let runner_up = intent_scores[1];
+        let margin = (best.1 - runner_up.1).max(0.0);
+        let family_collision =
+            is_advisory_family_intent(best.0) && is_advisory_family_intent(runner_up.0);
+        if !family_collision || margin >= sharpening.advisory_margin_threshold {
+            return;
+        }
+
+        let family_votes = self.advisory_family_pattern_votes(query_sig, memory, spatial, config);
+        let total_vote: f32 = family_votes.values().copied().sum();
+        if total_vote <= f32::EPSILON {
+            return;
+        }
+
+        for (intent, score) in intent_scores.iter_mut() {
+            if is_advisory_family_intent(*intent) {
+                let arbitration_score =
+                    family_votes.get(intent).copied().unwrap_or(0.0) / total_vote;
+                *score = ((1.0 - sharpening.family_blend_weight) * *score
+                    + sharpening.family_blend_weight * arbitration_score)
+                    .clamp(0.0, 1.0);
+            }
+        }
+    }
+
+    fn advisory_family_pattern_votes(
+        &self,
+        query_sig: &ClassificationSignature,
+        memory: &MemoryStore,
+        spatial: &SpatialGrid,
+        config: &ClassificationConfig,
+    ) -> HashMap<IntentKind, f32> {
+        let mut votes = HashMap::new();
+        let mut candidate_ids =
+            spatial.nearby(query_sig.semantic_centroid, config.spatial_query_radius);
+        if candidate_ids.is_empty() {
+            candidate_ids = memory.classification_pattern_ids();
+        }
+
+        for id in candidate_ids {
+            let Some(pattern) = memory.get_classification_pattern(id) else {
+                continue;
+            };
+            if !is_advisory_family_intent(pattern.intent_kind) {
+                continue;
+            }
+
+            let similarity = self.cosine_similarity(query_sig, &pattern.signature);
+            let vote = similarity * pattern.confidence();
+            if vote >= config.min_similarity_threshold {
+                *votes.entry(pattern.intent_kind).or_default() += vote;
+            }
+        }
+
+        votes
+    }
 }
 
 impl Default for ClassificationCalculator {
@@ -462,6 +539,23 @@ fn raw_cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         0.0
     }
+}
+
+fn classification_confidence(best_sim: f32, runner_up_sim: f32, margin_blend: f32) -> f32 {
+    if best_sim <= f32::EPSILON {
+        return 0.0;
+    }
+
+    let margin_ratio = ((best_sim - runner_up_sim).max(0.0) / best_sim).clamp(0.0, 1.0);
+    let blended = margin_blend + (1.0 - margin_blend) * margin_ratio;
+    (best_sim * blended).clamp(0.0, 1.0)
+}
+
+fn is_advisory_family_intent(intent: IntentKind) -> bool {
+    matches!(
+        intent,
+        IntentKind::Recommend | IntentKind::Critique | IntentKind::Rewrite | IntentKind::Plan
+    )
 }
 
 #[cfg(test)]
@@ -540,5 +634,85 @@ mod tests {
         assert_eq!(result.intent, IntentKind::Unknown);
         assert_eq!(result.confidence, 0.0);
         assert_eq!(result.method, CalculationMethod::MemoryLookup);
+    }
+
+    #[test]
+    fn test_classification_confidence_guard_returns_zero_for_orthogonal_scores() {
+        let confidence = classification_confidence(0.0, 0.0, 0.5);
+        assert_eq!(confidence, 0.0);
+    }
+
+    #[test]
+    fn test_classification_confidence_blends_similarity_and_margin() {
+        let confidence = classification_confidence(0.95, 0.50, 0.5);
+        assert!(confidence > 0.6 && confidence < 0.8);
+    }
+
+    #[test]
+    fn test_pattern_backed_advisory_arbitration_favors_recommend() {
+        use std::env;
+
+        let calculator = ClassificationCalculator::new();
+        let config = ClassificationConfig::default();
+        let db_path = env::temp_dir().join(format!("spse_calc_test_{}.db", uuid::Uuid::new_v4()));
+        let mut memory = MemoryStore::new(db_path.to_str().expect("db path"));
+        let mut spatial = SpatialGrid::new(config.spatial_cell_size);
+
+        for (text, intent) in [
+            (
+                "Recommend a beginner camera for travel",
+                IntentKind::Recommend,
+            ),
+            (
+                "Suggest a starter mirrorless camera for trips",
+                IntentKind::Recommend,
+            ),
+            (
+                "Critique this product strategy for launch",
+                IntentKind::Critique,
+            ),
+            (
+                "Rewrite this travel camera recommendation email",
+                IntentKind::Rewrite,
+            ),
+            ("Plan a 30 day camera launch roadmap", IntentKind::Plan),
+        ] {
+            let signature = ClassificationSignature::compute(text, calculator.hasher());
+            let mut pattern = ClassificationPattern::new(
+                signature.clone(),
+                intent,
+                ToneKind::NeutralProfessional,
+                ResolverMode::Balanced,
+                None,
+            );
+            pattern.record_success();
+            spatial.insert(pattern.unit_id, &signature.semantic_centroid);
+            memory.store_classification_pattern(pattern);
+        }
+
+        let query_sig = ClassificationSignature::compute(
+            "Recommend a beginner camera for travel",
+            calculator.hasher(),
+        );
+        let mut scores = vec![
+            (IntentKind::Recommend, 0.62),
+            (IntentKind::Critique, 0.60),
+            (IntentKind::Rewrite, 0.31),
+            (IntentKind::Plan, 0.30),
+        ];
+
+        calculator.apply_advisory_family_arbitration(
+            &query_sig,
+            &mut scores,
+            &memory,
+            &spatial,
+            &config,
+        );
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        assert_eq!(scores[0].0, IntentKind::Recommend);
+        assert!(scores[0].1 > scores[1].1);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

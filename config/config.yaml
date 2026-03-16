@@ -68,6 +68,14 @@ layer_13_evidence_merge:
   recency_weight: 0.30
   agreement_weight: 0.20
   ambiguity_margin: 0.05
+  micro_validator:
+    enabled: true
+    lazy_validation_enabled: true
+    ambiguity_margin: 0.05
+    validation_trust_floor: 0.50
+    numeric_contradiction_threshold: 0.15
+    contradiction_penalty: 0.30
+    contradiction_override_trust: 0.90
 
 layer_14_candidate_scoring:
   w_spatial: 0.10
@@ -152,6 +160,28 @@ intent:
     - "what does"
     - "meaning of"
   implicit_question_score: 0.42
+
+classification:
+  spatial_query_radius: 0.10
+  min_similarity_threshold: 0.30
+  low_confidence_threshold: 0.40
+  high_confidence_threshold: 0.85
+  pattern_merge_threshold: 0.95
+  w_structure: 0.10
+  w_punctuation: 0.10
+  w_semantic: 0.15
+  w_derived: 0.10
+  w_intent_hash: 0.35
+  w_tone_hash: 0.20
+  margin_blend_weight: 0.50
+  spatial_cell_size: 0.05
+  top_k_candidates: 32
+  training_target_accuracy: 0.85
+  training_max_iterations: 10
+  recommendation_sharpening:
+    enabled: true
+    advisory_margin_threshold: 0.10
+    family_blend_weight: 0.30
 
 adaptive_behavior:
   intent_profiles:
@@ -618,6 +648,9 @@ auto_inference:
     trigger_confidence_floor: 0.40      # Below this, system starts "thinking"
     max_internal_steps: 3               # Cap loops to save CPU on low-spec devices
     exit_confidence_threshold: 0.60     # Exit early if confidence reaches this level
+    entry_retrieval_threshold: 0.42     # Entry-time retrieval check closes the [0.28,0.40) dead band
+    disagreement_trigger_threshold: 0.15 # Narrow top-candidate gaps also trigger reasoning
+    local_knowledge_sufficiency_threshold: 0.60 # Suppress entry retrieval for well-supported local transforms
     enable_thought_buffer_on_demand: true
 
   # Controlled Creative Spark (3.2)

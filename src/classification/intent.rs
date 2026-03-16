@@ -78,7 +78,6 @@ impl IntentDetector {
                 | IntentKind::Continue
                 | IntentKind::Rewrite
                 | IntentKind::Translate
-                | IntentKind::Brainstorm
         );
         let open_world_force = should_force_external_retrieval(
             raw_input,
@@ -110,6 +109,10 @@ impl IntentDetector {
 
     pub fn should_trigger_reasoning(intent: &IntentProfile, config: &ReasoningLoopConfig) -> bool {
         if intent.confidence < config.trigger_confidence_floor {
+            return true;
+        }
+        let top_gap = (intent.top_score - intent.second_score).abs();
+        if intent.second_score > 0.0 && top_gap < config.disagreement_trigger_threshold {
             return true;
         }
         matches!(
@@ -188,6 +191,11 @@ fn freshness_signal(
         "news",
         "recent",
         "recently",
+        "new",
+        "update",
+        "upcoming",
+        "ongoing",
+        "breaking",
         "last week",
         "now",
         "currently",
@@ -284,12 +292,11 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
         return 0.0;
     }
 
-    let mut intersection = 0usize;
-    for token in lhs {
-        if rhs.contains(token) {
-            intersection += 1;
-        }
-    }
+    let rhs_set: std::collections::HashSet<&str> = rhs.iter().map(String::as_str).collect();
+    let intersection = lhs
+        .iter()
+        .filter(|token| rhs_set.contains(token.as_str()))
+        .count();
 
     intersection as f32 / lhs.len().max(rhs.len()) as f32
 }
@@ -297,7 +304,11 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::IntentDetector;
-    use crate::types::{MemoryType, ScoreBreakdown, ScoredCandidate};
+    use super::*;
+    use crate::config::ReasoningLoopConfig;
+    use crate::types::{
+        IntentFallbackMode, IntentProfile, MemoryType, ScoreBreakdown, ScoredCandidate,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -320,5 +331,33 @@ mod tests {
         ];
         let entropy = IntentDetector::calculate_entropy(&scored);
         assert!(entropy > 0.5);
+    }
+
+    #[test]
+    fn token_overlap_counts_shared_terms() {
+        let lhs = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let rhs = vec!["beta".to_string(), "delta".to_string(), "gamma".to_string()];
+        let overlap = super::token_overlap(&lhs, &rhs);
+        assert!((overlap - (2.0 / 3.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn should_trigger_reasoning_on_narrow_top_gap() {
+        let intent = IntentProfile {
+            primary: IntentKind::Question,
+            confidence: 0.62,
+            top_score: 0.58,
+            second_score: 0.49,
+            ambiguous: false,
+            wants_brief: false,
+            references_document_context: false,
+            certainty_bias: 0.0,
+            fallback_mode: IntentFallbackMode::None,
+            scores: vec![],
+            reasons: vec![],
+        };
+
+        let config = ReasoningLoopConfig::default();
+        assert!(IntentDetector::should_trigger_reasoning(&intent, &config));
     }
 }

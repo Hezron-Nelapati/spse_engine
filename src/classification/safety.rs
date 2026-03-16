@@ -121,7 +121,7 @@ impl TrustSafetyValidator {
 
         // Address detection (street addresses)
         if Regex::new(r"\b\d+\s+[A-Za-z]+\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct)\b")
-            .unwrap().is_match(text) 
+            .unwrap().is_match(text)
         {
             detected.push("pii:address".to_string());
         }

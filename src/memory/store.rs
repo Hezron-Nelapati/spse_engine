@@ -600,6 +600,9 @@ impl MemoryStore {
     ) {
         let sig_hash = pattern.signature.signature_hash().to_string();
         let unit = pattern.to_unit();
+        let fv = pattern.signature.to_feature_vector();
+
+        self.accumulate_centroid(pattern.intent_kind, pattern.tone_kind, &fv);
 
         // Store pattern
         self.classification_patterns

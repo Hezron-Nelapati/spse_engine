@@ -99,7 +99,9 @@ impl ClassificationSignature {
             urgency_score: compute_urgency(&normalized),
             formality_score: compute_formality(&normalized),
             technical_score: compute_technical(&normalized),
-            domain_hint: compute_domain_hint(&normalized),
+            // Preserve the 78-dim legacy layout while injecting a dedicated
+            // creative-task signal into the derived feature budget.
+            domain_hint: compute_domain_hint(&normalized).max(compute_creative_cue(&normalized)),
             temporal_cue: compute_temporal_cue(&normalized),
             intent_hash: compute_pos_intent_hash(&normalized),
             tone_hash: compute_pos_tone_hash(&normalized),
@@ -478,7 +480,8 @@ fn compute_urgency(text: &str) -> f32 {
 
 /// Compute formality score from markers.
 fn compute_formality(text: &str) -> f32 {
-    let lower = text.to_lowercase();
+    let normalized = normalize_text(text);
+    let tokens = tokenize(&normalized);
 
     // Formal markers
     let formal_markers = [
@@ -508,8 +511,22 @@ fn compute_formality(text: &str) -> f32 {
         "yeah",
     ];
 
-    let formal_count = formal_markers.iter().filter(|m| lower.contains(*m)).count();
-    let casual_count = casual_markers.iter().filter(|m| lower.contains(*m)).count();
+    let token_matches = |marker: &str| {
+        if marker.contains(' ') {
+            normalized.contains(marker)
+        } else {
+            tokens.iter().any(|token| *token == marker)
+        }
+    };
+
+    let formal_count = formal_markers
+        .iter()
+        .filter(|marker| token_matches(marker))
+        .count();
+    let casual_count = casual_markers
+        .iter()
+        .filter(|marker| token_matches(marker))
+        .count();
 
     // Base formality at 0.5, adjust by markers
     let score = 0.5 + (formal_count as f32 * 0.1) - (casual_count as f32 * 0.1);
@@ -567,6 +584,60 @@ fn compute_domain_hint(text: &str) -> f32 {
 
     let matches = domain_markers.iter().filter(|m| lower.contains(*m)).count();
     (matches as f32 / 3.0).min(1.0)
+}
+
+/// Compute creative-task cue used to separate imperative-creative prompts
+/// from imperative-factual prompts without changing the legacy 78-dim layout.
+fn compute_creative_cue(text: &str) -> f32 {
+    let normalized = normalize_text(text);
+    let tokens = tokenize(&normalized);
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    let creative_terms = [
+        "write",
+        "create",
+        "compose",
+        "draw",
+        "design",
+        "invent",
+        "brainstorm",
+        "imagine",
+        "generate",
+        "craft",
+        "draft",
+        "poem",
+        "story",
+        "idea",
+    ];
+    let factual_imperatives = [
+        "explain",
+        "describe",
+        "define",
+        "list",
+        "summarize",
+        "calculate",
+        "find",
+        "show",
+        "prove",
+    ];
+
+    let first = tokens.first().copied().unwrap_or_default();
+    if factual_imperatives.contains(&first) {
+        return 0.0;
+    }
+    if creative_terms.contains(&first) {
+        return 1.0;
+    }
+    if tokens
+        .iter()
+        .take(4)
+        .any(|token| creative_terms.contains(token))
+    {
+        return 0.8;
+    }
+    0.0
 }
 
 /// Compute temporal cue score.
@@ -810,6 +881,7 @@ mod tests {
     fn test_formality_detection() {
         assert!(compute_formality("Please kindly respond") > 0.6);
         assert!(compute_formality("Hey, what's up?") < 0.5);
+        assert!(compute_formality("Thanks!") < 0.6);
     }
 
     #[test]
@@ -835,5 +907,11 @@ mod tests {
             tech_pos,
             neutral_pos
         );
+    }
+
+    #[test]
+    fn test_creative_cue_distinguishes_write_from_explain() {
+        assert!(compute_creative_cue("write a poem about autumn") > 0.5);
+        assert_eq!(compute_creative_cue("explain photosynthesis"), 0.0);
     }
 }

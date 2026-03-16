@@ -199,7 +199,7 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
     let gate_errors = quality_metrics.validate_against_gates(&config.quality_gates);
     warnings.extend(gate_errors);
 
-    let quality_passed = warnings.is_empty() 
+    let quality_passed = warnings.is_empty()
         && intents_covered.len() >= 24  // 24 IntentKind variants
         && entity_count >= 100;
 

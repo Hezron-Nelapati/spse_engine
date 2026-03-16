@@ -476,11 +476,11 @@ POS tagging uses a pre-trained NLTK perceptron model (`postagger` crate) loaded 
 > whenever the top-ranked intents all belong to `{Recommend, Critique, Rewrite, Plan}` and the
 > top-2 margin is below `classification.recommendation_sharpening.advisory_margin_threshold`.
 >
-> This pass is part of `ClassificationCalculator`, not a new layer. It scores family-specific cues:
-> - `Recommend`: `recommend`, `suggest`, `best`, `buy`, `starter`, `beginner`, `for <use_case>`
-> - `Critique`: `critique`, `review`, `weakness`, `flaw`, `evaluate`, `assess`
-> - `Rewrite`: `rewrite`, `rephrase`, `polish`, `sound more`, `tone`, `formal`, `concise`
-> - `Plan`: `plan`, `roadmap`, `steps`, `timeline`, `milestones`, `schedule`
+> This pass is part of `ClassificationCalculator`, not a new layer. It must remain
+> **memory-backed**: the second pass re-scores only the advisory-family intents using nearby
+> `ClassificationPattern` instances from the Intent channel, rather than hand-authored cue rules.
+> Pattern votes are restricted to `{Recommend, Critique, Rewrite, Plan}` and blended back into the
+> centroid scores only when the family collision is genuinely low-margin.
 >
 > A recommendation query with a target object plus use-case constraint must not fall into
 > `Exploratory` mode solely because advisory-family centroids are close together. Regression test:
@@ -546,21 +546,19 @@ Feature weights (configurable via `ClassificationConfig`):
 **Advisory-family arbitration path** (activated only on low-margin family collisions):
 1. Run the base centroid path normally.
 2. If the top-ranked intents all lie in `{Recommend, Critique, Rewrite, Plan}` and
-   `(best_sim - runner_up_sim) < advisory_margin_threshold`, compute four family-specific scores:
-   - `recommend_score = lexical_recommend_cue × 0.35 + target_object_cue × 0.25 + use_case_cue × 0.20 + constraint_cue × 0.20`
-   - `critique_score = lexical_critique_cue × 0.45 + weakness_cue × 0.30 + evaluation_tone_cue × 0.25`
-   - `rewrite_score = lexical_rewrite_cue × 0.45 + tone_edit_cue × 0.35 + source_text_present_cue × 0.20`
-   - `plan_score = lexical_plan_cue × 0.40 + ordered_steps_cue × 0.35 + horizon_cue × 0.25`
-3. Blend the base centroid score and the family arbitration score:
-   - `final_family_score = (1 - family_blend_weight) × centroid_score + family_blend_weight × arbitration_score`
+   `(best_sim - runner_up_sim) < advisory_margin_threshold`, run a **restricted pattern vote**:
+   - query `SpatialGrid` around the query signature's semantic centroid
+   - keep only `ClassificationPattern` instances labeled `{Recommend, Critique, Rewrite, Plan}`
+   - `pattern_vote(intent) = Σ cosine(query_sig, pattern.signature) × pattern.confidence()`
+   - if the local spatial bucket is empty, fall back to all advisory-family patterns in the Intent channel
+3. Normalize the advisory-family vote totals and blend with the base centroid score:
+   - `final_family_score = (1 - family_blend_weight) × centroid_score + family_blend_weight × normalized_pattern_vote`
 4. Re-rank only within the advisory family and recompute confidence from the refined top-2 family margin.
 
 Config:
 - `classification.recommendation_sharpening.enabled` (default: true)
 - `classification.recommendation_sharpening.advisory_margin_threshold` (default: 0.10)
 - `classification.recommendation_sharpening.family_blend_weight` (default: 0.30)
-- `classification.recommendation_sharpening.target_object_boost` (default: 0.25)
-- `classification.recommendation_sharpening.use_case_boost` (default: 0.20)
 
 #### ClassificationTrainer (`classification/trainer.rs`)
 
@@ -2859,7 +2857,7 @@ Throughout this document, paths like `retrieval.entropy_threshold` refer to the 
 | `trust` | `layer_19_trust_heuristics` | `TrustConfig` |
 | `classification` | `classification` | `ClassificationConfig` (includes `margin_blend_weight` for confidence formula, see §3.5) |
 | `semantic_probes` | `classification.semantic_probes` | `SemanticProbeConfig` (weight, fuzzy_threshold, anchor_count) |
-| `recommendation_sharpening` | `classification.recommendation_sharpening` | `RecommendationSharpeningConfig` (enabled, advisory_margin_threshold, family_blend_weight, target_object_boost, use_case_boost) |
+| `recommendation_sharpening` | `classification.recommendation_sharpening` | `RecommendationSharpeningConfig` (enabled, advisory_margin_threshold, family_blend_weight) |
 
 **Reasoning System:**
 

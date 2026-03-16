@@ -98,8 +98,8 @@ impl ClassificationTrainer {
     pub fn new(calculator: ClassificationCalculator, config: ClassificationConfig) -> Self {
         Self {
             calculator,
+            pattern_merge_threshold: config.pattern_merge_threshold,
             config,
-            pattern_merge_threshold: 0.95,
         }
     }
 
