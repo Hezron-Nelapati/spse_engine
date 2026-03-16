@@ -2,7 +2,7 @@
 
 **Document Version:** 14.2  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Architecture Feature Implementation + Production Edge-Case Fixes
+**Status:** Canonical V14.2 architecture reference. Core three-system flow reflects landed behavior; items explicitly marked *planned* or *pending rename* are approved target-state deltas, not claims that every artifact already exists today.
 
 ---
 
@@ -13,7 +13,7 @@
 3. [Classification System](#3-classification-system)
 4. [Reasoning System](#4-reasoning-system)
 5. [Predictive System](#5-predictive-system)
-6. [System Interaction & Engine Pipeline](#6-system-interaction--engine-pipeline) (includes Product Flow Scenarios)
+6. [System Interaction & Engine Pipeline](#6-system-interaction--engine-pipeline)
 7. [Core Data Structures](#7-core-data-structures)
 8. [Configuration System](#8-configuration-system)
 9. [GPU Acceleration](#9-gpu-acceleration)
@@ -35,6 +35,12 @@ The SPSE (Structured Predictive Search Engine) is a **privacy-first, config-driv
 3. **Predictive System** — Maintains a **Word Graph** embedded in 3D space: every word is a node, training creates directed weighted edges ("roads") between words, and prediction is a 3-tier spatial graph walk (near edges → far edges → on-the-fly pathfinding through hub nodes) rather than global softmax.
 
 These three systems consolidate the engine's 21 internal processing layers into coherent functional domains while preserving the core mechanisms: tokenizer-free units, word-level graph navigation in 3D space, dual memory governance, gated retrieval, and 7-dimensional candidate scoring.
+
+### Reading Convention
+
+- Inline defaults in this document are documented config defaults, not hardcoded constants.
+- Field paths such as `retrieval.entropy_threshold` refer to the runtime `EngineConfig` field path; §8 maps those fields back to YAML section names.
+- Terms marked *planned* or *pending rename* use the canonical architecture name even when a legacy identifier is still present in code.
 
 ### Key Architectural Differentiators
 
@@ -319,16 +325,21 @@ The Classification System begins with tokenizer-free ingestion. Rather than a fi
 
 Anchor and entity extraction occurs at this stage — high-salience units are flagged for protection from downstream pruning.
 
-### 3.2 Intent Classification (L9)
+### 3.2 Intent Resolution & Retrieval Gating (L9)
 
-The primary classification engine. `IntentDetector::assess()` computes a weighted score from:
+L9 has two tightly-coupled responsibilities that are easy to blur if described as a single step:
+
+1. `ClassificationCalculator` determines `intent`, `tone`, `resolver_mode`, and base `confidence`.
+2. `IntentDetector::assess()` takes that classification result plus entropy/freshness/disagreement/cost signals and decides `retrieval_flag` plus any fallback mode.
+
+The retrieval-gating part of `IntentDetector::assess()` computes a weighted score from:
 
 - **Entropy** — High entropy (above `retrieval.entropy_threshold`: 0.85) indicates uncertainty, triggering retrieval
 - **Freshness** — Stale context (below `retrieval.freshness_threshold`: 0.65) triggers retrieval
 - **Internal disagreement** — Conflicting candidate signals increase retrieval need
 - **Cost** — Retrieval cost vs. expected information gain
 
-Classification delegates to `ClassificationCalculator` (see §3.5) which produces:
+The classification sub-step is delegated to `ClassificationCalculator` (see §3.5), which produces:
 
 ```rust
 ClassificationResult {
@@ -387,7 +398,7 @@ Located in `src/classification/` with four submodules: `signature`, `pattern`, `
 
 #### ClassificationSignature (`classification/signature.rs`)
 
-A **78-float** CPU-efficient feature vector computed from raw text in microseconds:
+A **base 78-float** CPU-efficient feature vector computed from raw text in microseconds. When semantic probes are enabled (§3.9), runtime comparison extends this base to **82 floats** by appending 4 semantic category flags:
 
 | Category | Features | Count | Purpose |
 |----------|----------|-------|----------|
@@ -581,6 +592,54 @@ Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_ancho
 | Emotional | "I can't believe", "so frustrating", "this is amazing" | ~120 |
 
 New anchors can be learned during training when Classification consistently misclassifies a pattern — L18 feedback signals which phrases caused confusion, and the training sweep can propose new anchors.
+
+### 3.10 Design Principles & Acceptance Criteria
+
+#### Design Principles
+
+1. **Separate label inference from retrieval gating.**
+   `ClassificationCalculator` should decide intent, tone, and resolver mode; `IntentDetector::assess()` should decide whether outside help is needed.
+2. **Confidence must represent ambiguity, not just a winning score.**
+   The margin-blend formula is intended to distinguish clear winners from close competitors so downstream thresholds remain meaningful.
+3. **Retrieval gating must combine triggers with suppressors.**
+   Open-world novelty, cold start, high entropy, and stale context are valid retrieval triggers, but they must be balanced by suppressors for context-carry follow-ups and structured procedural requests.
+
+#### Example Coverage Matrix
+
+| Query | Expected Intent | Expected Tone | Domain / Topic | Expected Classification Outcome |
+|------|-----------------|--------------|----------------|---------------------------------|
+| "Thanks!" | Gratitude | Casual | Social | High-confidence social classification; skip retrieval |
+| "What is the capital of France?" | Question | NeutralProfessional | General factual | High-confidence factual classification; no retrieval |
+| "Is Paris bigger than Berlin?" | Compare | NeutralProfessional | Geography | Compare intent with balanced resolver mode |
+| "What happened at the 2024 Olympics opening ceremony?" | Question | NeutralProfessional | Open-world / current events | Moderate confidence plus retrieval trigger |
+| "How many people live there?" after Paris context | Question | Direct or NeutralProfessional | Follow-up / anaphora | Resolve as context-carry follow-up; avoid default retrieval |
+| "Give me a 30-day launch plan for a Rust CLI tool" | Plan | Technical | Software / procedural | Plan intent, technical tone, strong local reasoning bias |
+| "Brainstorm names for a climate-friendly coffee brand" | Brainstorm | Casual | Creative branding | Exploratory or balanced classification; no factual retrieval by default |
+
+#### Validation Notes
+
+The doc-derived sanity check supports the classification core idea:
+
+- Clear factual and social prompts separate cleanly from open-world or cold-start prompts under the documented confidence formula.
+- The architecture remains vulnerable to **over-retrieval** if `confidence < 0.72` is treated as a standalone rule.
+- The main failure modes in the sample calculations were:
+  - follow-up / anaphoric queries
+  - procedural planning queries with sufficient local structure
+
+That means the canonical L9 behavior should include explicit suppressors for:
+
+- recent-entity / sequence-state carry
+- structured procedural or planning intents with strong local context
+- cases where L14 already shows strong candidate support despite middling classification confidence
+
+#### Acceptance Criteria
+
+- Social intents such as Greeting, Gratitude, and Farewell should classify above the social short-circuit threshold and should not trigger retrieval.
+- Warm factual prompts should classify with deterministic or high balanced confidence and should not trigger retrieval by default.
+- Open-world or cold-start prompts should trigger retrieval even when the top intent label is correct.
+- Context-carry follow-ups should resolve against sequence state before retrieval is considered.
+- Planning and procedural prompts should prefer local reasoning unless open-world novelty or explicit freshness signals are present.
+- Calibration should preserve ordering: higher confidence bands should correspond to higher realized accuracy.
 
 ---
 
@@ -851,8 +910,9 @@ Complexity: O(k·d) where k = candidate count, d = scoring dimensions. GPU-accel
 
 Reasoning is **not a user toggle** — triggered automatically when:
 1. `reasoning_loop.enabled` is true (default: true)
-2. Initial confidence from Predictive System L16 is below `trigger_confidence_floor` (0.40)
+2. Initial **Reasoning L14 candidate confidence** is below `trigger_confidence_floor` (0.40)
 3. `IntentDetector::should_trigger_reasoning(intent, config)` returns true
+4. A downstream low-confidence L16 walk may request a single retry pass, but L16 is not the primary owner of the reasoning-loop trigger
 
 #### Execution
 
@@ -995,7 +1055,7 @@ After standard evidence merge (existing logic unchanged):
           weight_delta: snippet.trust_score × edge_learn_rate,
           context_tag: context_hash,
         )
-      // Mark edges as Episodic (subject to normal decay/promotion)
+      // Inject as Probationary TTG-lease edges (see Extension 2b)
 ```
 
 Config: `edge_learn_rate` (default: 0.1) — scales how much trust translates to edge weight.
@@ -1247,7 +1307,7 @@ User: "What happened at the 2024 Olympics opening ceremony?"
 │ │     Extract word sequences from trusted snippets      │ │
 │ │     Create edges: "opening"→"ceremony"→"Seine"→       │ │
 │ │       "river" [context: 2024_olympics]                │ │
-│ │     Mark edges as Episodic                            │ │
+│ │     Mark edges as Probationary (TTG lease)           │ │
 │ └───────────────────────────────────────────────────────┘ │
 │ L14: Re-score with evidence → confidence 0.75            │
 │ Output: Ranked candidates grounded in evidence            │
@@ -1430,6 +1490,48 @@ Latency: ~60ms (reasoning loop, context carry, no retrieval)
 | **E: Social Short-Circuit** | High-confidence social intent | Class → Predict (skip Reason) | No | No | ~15ms |
 | **F: Retrieval Retry** | First retrieval low-quality | Class → Reason (loop+retry) → Predict | Yes ×2 | Yes | ~8s |
 | **G: Multi-Turn Context** | Follow-up with anaphora | Class → Reason → Predict | Maybe | No | ~60ms |
+
+### 4.11 Design Principles & Acceptance Criteria
+
+#### Design Principles
+
+1. **Truth management happens before generation.**
+   Memory retrieval, external retrieval, contradiction handling, and candidate ranking belong in Reasoning, not in the final text assembly step.
+2. **The reasoning loop is a repair path, not the default path.**
+   It should activate only when L14 candidate confidence is low enough to justify extra work.
+3. **Retrieval should improve candidate quality, not just add text.**
+   L11-L13 are only useful if merged evidence materially improves the scored candidate pool.
+
+#### Example Coverage Matrix
+
+| Query | Reasoning Pattern | Expected Evidence Behavior | Expected Outcome |
+|------|-------------------|----------------------------|------------------|
+| "What is the capital of France?" | Warm-path factual lookup | No retrieval | L14 already ranks anchor-supported answer first |
+| "Is Paris bigger than Berlin?" | Internal compare reasoning | No retrieval | Reasoning loop synthesizes comparison from memory |
+| "What happened at the 2024 Olympics opening ceremony?" | Retrieval-augmented factual reasoning | Retrieve + validate + merge | Evidence-backed candidate list |
+| "What is the Kigali Amendment?" | Retrieval retry | First retrieval weak, second refined retrieval stronger | Confidence rises after retry |
+| "Give me a 30-day launch plan for a Rust CLI tool" | Procedural decomposition | Usually no retrieval | Sub-question decomposition and ordered plan synthesis |
+| "Critique this claim about HFC policy" | Evidence-sensitive critique | Retrieval only if internal support is weak or stale | Contradictions surfaced, not hidden |
+
+#### Validation Notes
+
+The doc-derived sanity check strongly supports the reasoning design:
+
+- In hard cases, synthetic L14-style confidence rose from an average of **0.329** before reasoning/retrieval to **0.716** after the reasoning path completed.
+- Cases designed to fall below the `trigger_confidence_floor` did so consistently, and the resulting post-reasoning scores cleared the documented exit threshold.
+- This suggests the reasoning architecture is internally coherent provided that:
+  - candidate scoring happens before the loop trigger check
+  - retrieval retry is reserved for genuinely unresolved cases
+  - contradiction handling penalizes, rather than silently averaging over, conflicting evidence
+
+#### Acceptance Criteria
+
+- Warm factual queries should complete without entering the reasoning loop.
+- Hard compare, explain, critique, or multi-hop queries should enter the reasoning loop only when L14 confidence is below the configured trigger floor.
+- For retrieval-backed prompts, L13 merge plus validation should raise candidate quality relative to the pre-retrieval state.
+- The reasoning loop should either exit above the configured confidence threshold or explicitly escalate to retrieval / retry rather than fabricate certainty.
+- Micro-validation should run on ambiguous or low-trust evidence cases and should remain skipped on clear-winner, high-trust cases.
+- Follow-up queries should benefit from sequence state and anchor carry before external retrieval is attempted.
 
 ---
 
@@ -1835,7 +1937,7 @@ Well within Mac M4 Air's 8–16 GB. Leaves ample room for MemoryStore, Classific
 
 **Problem:** 3D spatial embedding may be insufficient for dense semantic clusters where many words share similar relationships but distinct meanings. When force-directed layout fails to converge (energy remains above `layout_convergence_threshold` after `max_layout_iterations`), nodes in crowded regions collide, degrading Tier 1 edge selection accuracy.
 
-**Solution:** Allow the spatial map to dynamically expand to **4D or 5D** for high-density clusters during maintenance cycles, while keeping the default 3D for the majority of the graph.
+**Solution:** Allow the spatial map to dynamically expand to **4D or 5D** for high-density clusters during maintenance cycles, while keeping the default 3D contract for the majority of the graph. The canonical representation keeps `position: [f32; 3]` as the global projection and stores extra hot-cell-only axes in `extra_dims`.
 
 #### Mechanism
 
@@ -1849,8 +1951,9 @@ During L21 maintenance → force-directed layout step:
      after max_layout_iterations
 
 4. For each hot cell:
-   a. Expand node positions from [f32; 3] → [f32; N] where N = current_dims + 1
-      New dimension initialized to small random perturbation ∈ [-0.1, 0.1]
+   a. Keep `position: [f32; 3]` unchanged as the global projection and append
+      one local axis to `extra_dims` where `current_dims = 3 + extra_dims.len()`
+      New extra dimension initialized to small random perturbation ∈ [-0.1, 0.1]
    b. Re-run layout for hot cell nodes only (local sub-graph)
    c. If energy drops below threshold → keep expanded dimensions
       Else if N < max_spatial_dims → try again with N+1
@@ -1858,10 +1961,9 @@ During L21 maintenance → force-directed layout step:
 
 5. SPATIAL INDEX ADAPTATION:
    SpatialGrid stores per-cell dimensionality
-   Distance calculations use min(dims_a, dims_b) shared dimensions
-     + small penalty for unshared dimensions
-   Nodes in 4D/5D cells still participate in global 3D queries
-     via projection onto first 3 axes
+   Intra-cell distance calculations use `position + extra_dims`
+   Cross-cell/global queries continue to use `position` (XYZ projection)
+     plus a small penalty for dimensionality mismatch when needed
 ```
 
 **Config:**
@@ -1872,13 +1974,13 @@ During L21 maintenance → force-directed layout step:
 
 **Memory impact:** Most nodes stay 3D (12 bytes). Only hot-cell nodes expand to 4D (16 bytes) or 5D (20 bytes). Expected: <5% of nodes ever expand, adding ~1 MB for a 100K-node graph.
 
-**Backward compatibility:** All existing code that reads `position: [f32; 3]` continues to work by reading the first 3 elements. The extra dimensions are only used in intra-cell distance calculations within expanded cells.
+**Backward compatibility:** All existing code that only understands `position: [f32; 3]` continues to work unchanged. Adaptive-dimensional logic is the only path that reads `extra_dims`, and it does so only for hot-cell-local layout and distance calculations.
 
 ### 5.10 Anchor Locking Zones
 
 **Problem:** During force-directed layout updates, factual anchor nodes (numbers, dates, proper nouns) can drift into unrelated semantic clusters. This causes "1776" to drift near "seventeen" (correct) but then further toward "seven" (incorrect), corrupting factual associations over time.
 
-**Solution:** Define immutable **Semantic Zones** in the spatial grid. Nodes assigned to a zone are confined to that zone's coordinate bounds during all layout updates.
+**Solution:** Define immutable **Semantic Zones** in the spatial grid. Nodes assigned to a zone are confined to that zone's coordinate bounds during all layout updates. Zone locking clamps only the base XYZ projection; any `extra_dims` used by §5.9 remain local to the hot cell.
 
 #### Zone Definitions
 
@@ -2062,6 +2164,55 @@ During L21 maintenance:
 
 **Benefit:** Prevents the star-topology bottleneck that degrades both path quality and compute cost. Domain gating ensures paths through hubs are semantically relevant. Secondary hubs and dynamic hub election distribute routing load to domain-specific high-connectivity nodes, reducing dependence on pure Function words. Language-aware bootstrap enables multilingual support without hardcoded English assumptions.
 
+### 5.12 Design Principles & Acceptance Criteria
+
+#### Design Principles
+
+1. **Prediction should realize an answer, not decide its truth.**
+   The Predictive System should consume ranked candidates and context, not replace Reasoning’s evidence and memory decisions.
+2. **Tier 1 should handle the common path; Tier 3 should stay exceptional and bounded.**
+   Near-edge and highway traversal should dominate warm traffic, with A* reserved for novel combinations.
+3. **Runtime learning must create measurable repeated-query improvement.**
+   Retrieval-injected probationary edges are justified only if they materially reduce future cold-start cost.
+
+#### Example Coverage Matrix
+
+| Query Type | Intent / Tone | Domain / Topic | Expected Predictive Behavior |
+|-----------|----------------|----------------|------------------------------|
+| Direct factual answer | Question / NeutralProfessional | Geography | Tier 1 or highway path dominates |
+| Social reply | Gratitude / Casual | Social | Short deterministic highway response |
+| Cold-start greeting | Greeting / Casual | Social / first encounter | Retrieval-injected probationary edge becomes local path on repeat |
+| Open-world factual answer | Question / NeutralProfessional | Current events | Evidence-grounded local path after injection |
+| Procedural plan | Plan / Technical | Software | Longer balanced walk with profile-specific beam width and max steps |
+| Brainstorm response | Brainstorm / Casual | Creative branding | Wider beam and exploratory selection without forced factual retrieval |
+| Technical multilingual or jargon-heavy query | Explain / Technical | Legal, medical, or non-English | Hub management and language-aware bootstrap reduce unnecessary Tier 3 failure |
+
+#### Validation Notes
+
+The doc-derived sanity check supports the predictive core idea:
+
+- Warm-path cases scored strongest on Tier 1 as intended.
+- Runtime learning showed large synthetic repeated-query gains:
+  - `Hi`: **0.235 → 0.760** (`3.24x`)
+  - `2024 Olympics opening ceremony`: **0.297 → 0.667** (`2.25x`)
+  - context-carry factual follow-up: **0.183 → 0.560** (`3.06x`)
+- These gains support the idea that retrieval-backed edge injection can convert previously sparse paths into locally walkable ones.
+
+The main predictive risks remain:
+
+- graph sparsity in under-trained domains
+- hub saturation without domain gating
+- Tier 3 overuse if Classification and Reasoning hand off weak or overly broad contexts
+
+#### Acceptance Criteria
+
+- Warm factual and social prompts should usually resolve through Tier 1 or highway traversal.
+- Tier 3 pathfinding should remain bounded by explicit hop and explored-node limits.
+- Retrieval-injected edges should begin as probationary TTG-lease edges, not immediate permanent knowledge.
+- Repeated queries on the same cold-start topic should show materially higher local graph scores and lower retrieval dependence.
+- Brainstorm and creative prompts should benefit from wider beam search without corrupting factual modes.
+- Hub-management features should reduce semantically irrelevant expansion through universal function words.
+
 ---
 
 ## 6. System Interaction & Engine Pipeline
@@ -2118,6 +2269,9 @@ Input: text, optional local_documents, preset_sources, allow_retrieval flag
 ║                                                                  ║
 ║  [L14] Final candidate scoring (7D)            ⏱ rec(14)        ║
 ║        Filter out Char-level when higher-level exist            ║
+║  [Reasoning Loop] If L14 confidence < trigger_floor:            ║
+║        execute_reasoning_loop (max 3 steps, may re-trigger      ║
+║        retrieval before handing off to Predictive)              ║
 ║                                                                  ║
 ║  Output: Ranked Candidate Concepts                               ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -2133,10 +2287,8 @@ Input: text, optional local_documents, preset_sources, allow_retrieval flag
 ║  [L15] Graph Walk: walk edges with context gating               ║
 ║        Highway preference when prefix matches                   ║
 ║  [L16] Step resolve: temperature + shaping + context ⏱ rec(16)  ║
-║                                                                  ║
-║  [Reasoning Loop] If confidence < trigger_floor:                 ║
-║        execute_reasoning_loop (max 3 steps, may re-trigger       ║
-║        retrieval → cycles back to Reasoning System)              ║
+║  [Retry Signal] If L16 remains low-confidence after walk:        ║
+║        request one re-entry into Reasoning before final fallback ║
 ║                                                                  ║
 ║  [L17] Assemble walked word sequence → surface text             ║
 ║        Compound expansion, punctuation, evidence grounding      ║
@@ -2180,6 +2332,26 @@ pub struct ExplainTrace {
     pub memory_summary: String,             // From Reasoning L4
 }
 ```
+
+### 6.2 Synthetic Sanity-Check Summary
+
+To validate the core system ideas, the architecture was checked against a small doc-derived scenario set spanning social, factual, compare, open-world, context-carry, planning, and brainstorming prompts. This is a **sanity check of architectural coherence**, not an empirical benchmark from code execution.
+
+#### Summary Findings
+
+- **Classification:** Intent separation looked strong, but naive confidence-only retrieval gating over-retrieved follow-up and planning prompts.
+- **Reasoning:** Hard-case confidence improved substantially after reasoning or retrieval, which supports the L14 → reasoning-loop → retrieval design.
+- **Predictive:** Warm-path traversal and runtime-learning gains were both directionally strong, supporting the tiered graph-walk model.
+
+#### Practical Interpretation
+
+The architecture is mechanically strongest when these boundaries are preserved:
+
+- Classification identifies the task and decides whether help is needed.
+- Reasoning decides what answer strategy is justified.
+- Predictive realizes that answer through bounded graph traversal.
+
+The main correction implied by the sanity check is narrow, not structural: L9 retrieval gating should be calibrated with stronger suppressors for context-carry and structured procedural intents.
 
 ### 6.1 Structural Feedback Loop (Consistency Loop Upgrade)
 
@@ -2331,7 +2503,8 @@ The Predictive System maintains a separate **Word Graph** alongside the Unit-bas
 pub struct WordNode {
     pub id: WordId,                        // compact u32 index
     pub content: String,                   // "the", "quantum", "New_York"
-    pub position: [f32; 3],                // 3D spatial coordinates (expandable to 4D/5D per §5.9)
+    pub position: [f32; 3],                // base 3D projection used by global queries
+    pub extra_dims: SmallVec<[f32; 2]>,    // optional hot-cell-only axes for §5.9
     pub node_type: NodeType,               // Content | Function | Compound | Custom
     pub frequency: u32,                    // global usage count
     pub is_anchor: bool,                   // protected from pruning
@@ -2460,6 +2633,8 @@ pub struct UnifiedTrainingReport {
 ## 8. Configuration System
 
 All configuration is defined in `src/config/mod.rs` and loaded from `config/config.yaml`. The top-level struct is `EngineConfig`.
+
+Throughout this document, paths like `retrieval.entropy_threshold` refer to the `EngineConfig` field path; the tables below show the corresponding YAML section names.
 
 ### EngineConfig Fields (by System)
 
@@ -2677,10 +2852,10 @@ pub enum TelemetryEvent {
 
 ### 11.1 Training Philosophy
 
-The SPS engine uses **Decoupled Training, Coupled Inference**: each system is trained independently with its own loss function, data pipeline, and optimization loop, but all three share a common global state at inference time.
+The SPSE engine uses **Decoupled Training, Coupled Inference**: each system is trained independently with its own loss function, data pipeline, and optimization loop, but all three share a common global state at inference time.
 
 **Key principles:**
-- **No neural backpropagation** — all learnable parameters are positions (3 floats per unit), feature weights (6–7 floats), and thresholds. Training uses sweep-based optimization and attract/repel dynamics.
+- **No neural backpropagation** — all learnable parameters are base positions (3 floats per unit plus optional `extra_dims` for hot cells), feature weights (6–7 floats), and thresholds. Training uses sweep-based optimization and attract/repel dynamics.
 - **CPU-first** — all training runs on CPU. GPU (≤2GB VRAM via `wgpu`) is optional acceleration for force layout and batch scoring.
 - **Rust-native** — no Python runtime, no ONNX, no CUDA dependency. The `wgpu` compute shaders are a pure acceleration layer.
 - **Consistency enforcement** — post-training validation harness detects and corrects inter-system mismatches.
@@ -2811,7 +2986,7 @@ Phase 3: REASONING LOOP THRESHOLD OPTIMIZATION
 
 | Parameter | Count | Type | Default |
 |-----------|-------|------|---------|
-| Word node positions | N × 3 | `[f32; 3]` per word | Initialized by SemanticHasher, refined by force-directed layout |
+| Word node positions | N × (3 + 0..2) | `[f32; 3]` + optional `extra_dims` | Initialized by SemanticHasher, refined by force-directed layout |
 | Edge weights | E | `f32` per edge | Initialized from training frequency, refined by attract/repel |
 | Highway paths | H | `Vec<WordId>` per highway | Formed when sequence walked ≥ `highway_formation_threshold` times |
 | Force layout config | 6 | `f32` | attractive_coeff=1.0, repulsive_coeff=1.0, preferred_spacing=1.0, boundary=128.0, temperature=1.75, convergence=0.001 |

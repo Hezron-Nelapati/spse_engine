@@ -651,6 +651,37 @@ pub fn train_classification(
 
 **Files modified:** `src/engine.rs`
 
+### Phase 2 Acceptance Gate
+
+#### Design Principle
+
+Classification is successful only if it separates **label inference** from **retrieval gating** and preserves calibration across diverse prompt types.
+
+#### Scenario Pack
+
+Validate against at least one scenario each for:
+
+- social: greeting / gratitude / farewell
+- warm factual: stable encyclopedic question
+- compare: two-entity comparison
+- open-world: current event or freshness-sensitive prompt
+- context-carry: anaphoric follow-up such as "there" or "that"
+- procedural: plan / act / explain-how
+- creative: brainstorm / naming
+
+#### Acceptance Criteria
+
+- Social prompts classify above the short-circuit threshold and do not retrieve.
+- Warm factual prompts classify correctly with no retrieval by default.
+- Open-world and cold-start prompts trigger retrieval.
+- Context-carry prompts use sequence state and do not retrieve by default.
+- Procedural or planning prompts do not retrieve solely because confidence is middling.
+- Confidence bands remain monotonic after calibration.
+
+#### Implementation Note
+
+The doc-derived sanity check showed that a naive `confidence < 0.72` interpretation over-retrieves context-carry and planning prompts. Phase 2 is not complete unless L9 includes explicit suppressors for those cases.
+
 ---
 
 ## 4. Phase 3: Reasoning System Training
@@ -888,6 +919,35 @@ pub fn train_reasoning(
 - `train_reasoning_learns_compare_template`
 - `train_reasoning_optimizes_retrieval_gate`
 
+### Phase 3 Acceptance Gate
+
+#### Design Principle
+
+Reasoning is successful only if it improves candidate quality before generation rather than acting as a decorative post-processing step.
+
+#### Scenario Pack
+
+Validate against:
+
+- direct factual lookup
+- internal compare reasoning
+- open-world retrieval-backed answer
+- retrieval retry / low-quality first fetch
+- procedural plan
+- evidence-sensitive critique
+
+#### Acceptance Criteria
+
+- Warm factual prompts should complete without entering the reasoning loop.
+- Hard compare / explain / critique cases should enter the loop only when L14 confidence falls below the trigger floor.
+- Retrieval-backed cases should show measurable improvement in candidate quality after L11-L13.
+- Retrieval retry should occur only when first-pass reasoning remains below the configured exit threshold.
+- Contradictory evidence should be penalized or surfaced, not silently blended into confidence.
+
+#### Implementation Note
+
+The doc-derived sanity check produced an average hard-case reasoning-score rise from roughly `0.33` to `0.72`. Phase 3 should reproduce the same directional effect on validation scenarios even if the exact absolute numbers differ.
+
 ---
 
 ## 5. Phase 4: Predictive System Training
@@ -1111,6 +1171,37 @@ pub fn update_position(&mut self, unit_id: Uuid, delta: [f32; 3]) {
 **Files modified:** `src/spatial_index.rs`  
 **Tests:** `update_position_moves_unit_between_cells`
 
+### Phase 4 Acceptance Gate
+
+#### Design Principle
+
+Predictive training is successful only if the graph realizes already-justified answers efficiently, with Tier 1 dominating warm traffic and Tier 3 staying bounded and exceptional.
+
+#### Scenario Pack
+
+Validate against:
+
+- short social response
+- warm factual answer
+- cold-start greeting or unknown term
+- open-world factual follow-up after retrieval
+- procedural plan output
+- brainstorming / creative generation
+- jargon-heavy or multilingual routing case
+
+#### Acceptance Criteria
+
+- Warm factual and social prompts should usually resolve via Tier 1 or highways.
+- Tier 3 pathfinding should respect hop and explored-node limits in all cases.
+- Runtime learning should materially improve repeated-query local graph scores on cold-start topics.
+- Retrieval-injected edges must enter the graph as probationary TTG-lease edges once Phase 11D lands.
+- Creative profiles should widen exploration without degrading deterministic factual paths.
+- Hub-management features should reduce irrelevant hub expansion on technical or sparse-domain prompts.
+
+#### Implementation Note
+
+The doc-derived sanity check showed repeated-query predictive gains in the `2x-3x` range after runtime learning. Phase 4 plus Phase 10/11 should preserve that directional improvement.
+
 ---
 
 ## 6. Phase 5: Cross-System Consistency
@@ -1310,6 +1401,19 @@ pub fn run_consistency_check(
 ```
 
 **Files modified:** `src/engine.rs`
+
+### Phase 5 Acceptance Gate
+
+#### Design Principle
+
+Cross-system consistency is successful only if it protects the boundaries between the three systems instead of flattening them into one heuristic blob.
+
+#### Acceptance Criteria
+
+- Classification confidence, retrieval choice, reasoning-loop trigger, and predictive tier usage should agree on the same difficulty profile.
+- Tier 3 overuse should feed structural or graph-building corrections rather than being ignored.
+- Over-retrieval on context-carry and procedural prompts should be detectable as a consistency failure, not treated as normal behavior.
+- Cold-start improvement after runtime learning should reduce future consistency violations for the same topic.
 
 ---
 
