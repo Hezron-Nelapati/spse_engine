@@ -151,7 +151,6 @@ pub enum IntentFallbackMode {
     #[default]
     None,
     DocumentScope,
-    ClarifyHelp,
     RetrieveUnknown,
 }
 
@@ -490,33 +489,6 @@ pub struct IntentProfile {
     pub reasons: Vec<String>,
 }
 
-/// Report for hybrid intent blending combining heuristic classification with memory channel lookup.
-/// Used to validate intent detection by cross-referencing Intent-channel memory units.
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct IntentBlendReport {
-    /// The heuristic intent kind from IntentDetector::classify
-    pub heuristic_intent: IntentKind,
-    /// The heuristic confidence score (0.0-1.0)
-    pub heuristic_confidence: f32,
-    /// The intent kind derived from MemoryChannel::Intent lookup, if any
-    pub memory_backed_intent: Option<IntentKind>,
-    /// The confidence from memory channel match (0.0-1.0)
-    pub memory_backed_confidence: f32,
-    /// Final blended intent kind after applying blend formula
-    pub blended_intent: IntentKind,
-    /// Final blended confidence (0.0-1.0)
-    pub blended_confidence: f32,
-    /// Weight applied to heuristic score (default 0.6)
-    pub heuristic_weight: f32,
-    /// Weight applied to memory-backed score (default 0.4)
-    pub memory_weight: f32,
-    /// Whether the heuristic and memory-backed intents agree
-    pub intents_agree: bool,
-    /// Drift detected between heuristic and memory-backed intents
-    pub drift_detected: bool,
-    /// Reason for any drift or disagreement
-    pub drift_reason: Option<String>,
-}
 
 /// Report on channel isolation validation for MemoryStore.
 /// Ensures that memory channels (Main, Intent, Reasoning) maintain proper isolation.

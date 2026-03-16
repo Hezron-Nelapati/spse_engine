@@ -18,6 +18,45 @@ impl SemanticRouter {
         }
     }
 
+    /// Route using a pre-built cached spatial grid (fast path for large datasets)
+    pub fn route_with_cached_grid(
+        &mut self,
+        active_units: &[Unit],
+        cached_grid: &SpatialGrid,
+    ) -> RoutingResult {
+        let positions: Vec<[f32; 3]> = active_units
+            .iter()
+            .filter(|u| !u.is_process_unit)
+            .map(|unit| unit.semantic_position)
+            .collect();
+
+        let center = if positions.is_empty() {
+            [0.5, 0.5, 0.5]
+        } else {
+            centroid(&positions)
+        };
+
+        let mut neighbor_ids = cached_grid.nearby(center, self.neighbor_radius);
+
+        // Use HashSet for O(1) lookup instead of O(n*m) nested iteration
+        let active_ids: HashSet<Uuid> = active_units.iter().map(|u| u.id).collect();
+        neighbor_ids.retain(|id| !active_ids.contains(id));
+
+        let mut active_regions = Vec::new();
+        for position in positions.iter().take(6) {
+            active_regions.push(region_key(*position));
+        }
+        active_regions.sort();
+        active_regions.dedup();
+
+        RoutingResult {
+            active_regions,
+            neighbor_ids,
+            map_adjustments: 0,
+            position_updates: Vec::new(),
+        }
+    }
+
     pub fn route(&mut self, active_units: &[Unit], all_units: &[Unit]) -> RoutingResult {
         // Filter out process units from semantic routing
         let content_units: Vec<Unit> = all_units

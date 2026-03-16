@@ -189,12 +189,29 @@ impl Engine {
         let trace_context = Arc::new(Mutex::new(TraceContext::new()));
         
         // Initialize classification calculator
-        let classification_calculator = crate::classification::ClassificationCalculator::new();
+        let classification_calculator = crate::classification::ClassificationCalculator::with_weights(
+            config.classification.w_structure,
+            config.classification.w_punctuation,
+            config.classification.w_semantic,
+            config.classification.w_derived,
+            config.classification.w_intent_hash,
+            config.classification.w_tone_hash,
+        );
         
         // Initialize spatial grid for classification patterns
         let spatial_grid = Arc::new(Mutex::new(crate::spatial_index::SpatialGrid::new(
-            config.classification.spatial_query_radius,
+            config.classification.spatial_cell_size,
         )));
+
+        // Populate spatial grid and rebuild centroids from classification patterns loaded from DB
+        {
+            let mut mem = memory.lock().expect("memory mutex poisoned");
+            let mut sg = spatial_grid.lock().expect("spatial grid mutex poisoned");
+            for pattern in mem.all_classification_patterns() {
+                sg.insert(pattern.unit_id, &pattern.signature.semantic_centroid);
+            }
+            mem.rebuild_centroids_from_patterns();
+        }
 
         spawn_maintenance(
             memory.clone(),
@@ -307,32 +324,6 @@ impl Engine {
             }
         }
 
-        if let Some(answer) = evaluate_expression_input(text) {
-            self.ingest_interaction_input(text, "direct_expression");
-            let expression_intent = if text.contains('?')
-                || text.to_lowercase().starts_with("what is")
-                || text.to_lowercase().starts_with("what's")
-                || text.to_lowercase().starts_with("calculate")
-            {
-                IntentKind::Question
-            } else {
-                IntentKind::Analyze
-            };
-            return simple_result_with_intent(
-                answer,
-                Vec::new(),
-                "direct_expression",
-                text,
-                IntentProfile {
-                    primary: expression_intent,
-                    confidence: 0.92,
-                    reasons: vec!["symbolic_expression_detected".to_string()],
-                    ..IntentProfile::default()
-                },
-                self.memory_summary(),
-            );
-        }
-
         let session = self.session_snapshot();
         let active_titles = self.active_session_document_titles();
         let pre_intent = self.resolve_intent_profile(
@@ -341,6 +332,19 @@ impl Engine {
             &self.current_sequence_state(),
             !session.documents.is_empty(),
         );
+
+        // Expression evaluator — intent comes from classification above
+        if let Some(answer) = evaluate_expression_input(text) {
+            self.ingest_interaction_input(text, "direct_expression");
+            return simple_result_with_intent(
+                answer,
+                Vec::new(),
+                "direct_expression",
+                text,
+                pre_intent,
+                self.memory_summary(),
+            );
+        }
         if matches!(pre_intent.primary, IntentKind::Forget) {
             self.ingest_interaction_input(text, "direct_interaction");
             let cleared = self.clear_session_documents();
@@ -382,33 +386,6 @@ impl Engine {
                 pre_intent,
                 self.memory_summary(),
             );
-        }
-        if matches!(
-            pre_intent.fallback_mode,
-            crate::types::IntentFallbackMode::ClarifyHelp
-        ) {
-            self.ingest_interaction_input(text, "direct_interaction");
-            return simple_result_with_intent(
-                "Please clarify what you want me to do. You can ask a question, reference the active document, or load a file.".to_string(),
-                Vec::new(),
-                "direct_interaction_clarify",
-                text,
-                pre_intent,
-                self.memory_summary(),
-            );
-        }
-        if self.config.intent.social_intent_shortcircuit {
-            if let Some(reply) = casual_reply(&pre_intent, &active_titles) {
-                self.ingest_interaction_input(text, "direct_interaction");
-                return simple_result_with_intent(
-                    reply,
-                    Vec::new(),
-                    "direct_interaction_social",
-                    text,
-                    pre_intent,
-                    self.memory_summary(),
-                );
-            }
         }
 
         if !session.documents.is_empty() {
@@ -859,6 +836,8 @@ impl Engine {
                 let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
                 let training_batch_size: usize = self.config.builder.training_batch_size.unwrap_or(500) as usize;
 
+                let is_classification_source = source_name == "seed_classification";
+
                 // Enable training mode: skip candidate staging, pattern combos, larger write batches
                 {
                     let mut memory = self.memory.lock().expect("memory mutex poisoned");
@@ -894,6 +873,13 @@ impl Engine {
                         let config_ref = &self.config.builder;
                         let source_name_ref = &source_name;
 
+                        let classification_hasher = if is_classification_source {
+                            Some(crate::classification::SemanticHasher::new())
+                        } else {
+                            None
+                        };
+                        let hasher_ref = &classification_hasher;
+
                         let prepared: Vec<_> = line_batch
                             .par_iter()
                             .filter_map(|raw_line| {
@@ -916,7 +902,15 @@ impl Engine {
                                     .context
                                     .clone()
                                     .unwrap_or_else(|| source_name_ref.clone());
-                                Some((example, hierarchy, context_label))
+                                // Pre-compute classification signature in parallel
+                                let classification_data = hasher_ref.as_ref().and_then(|hasher| {
+                                    let gt = parse_classification_ground_truth(&example)?;
+                                    let sig = crate::classification::ClassificationSignature::compute(
+                                        &example.question, hasher,
+                                    );
+                                    Some((sig, gt))
+                                });
+                                Some((example, hierarchy, context_label, classification_data))
                             })
                             .collect();
 
@@ -927,7 +921,7 @@ impl Engine {
                         {
                             let mut memory =
                                 self.memory.lock().expect("memory mutex poisoned");
-                            for (example, hierarchy, context_label) in &prepared {
+                            for (example, hierarchy, context_label, _classification_data) in &prepared {
                                 let active_ids = memory.ingest_hierarchy_with_channels(
                                     hierarchy,
                                     SourceKind::TrainingDocument,
@@ -946,11 +940,41 @@ impl Engine {
                                     units_created += trace_ids.len() as u64;
                                 }
                             }
+
+                            // Classification pattern storage (signatures pre-computed in parallel)
+                            if is_classification_source {
+                                let mut spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
+                                for (_, _, _, classification_data) in &prepared {
+                                    if let Some((sig, gt)) = classification_data {
+                                        let sig_hash = sig.signature_hash().to_string();
+                                        if let Some(existing_id) = memory.classification_pattern_by_signature(&sig_hash) {
+                                            if let Some(mut existing) = memory.get_classification_pattern(existing_id) {
+                                                existing.record_success();
+                                                memory.update_classification_pattern(existing);
+                                            }
+                                        } else {
+                                            let mut new_pattern = crate::classification::ClassificationPattern::new(
+                                                sig.clone(),
+                                                gt.intent,
+                                                gt.tone,
+                                                gt.resolver_mode,
+                                                gt.domain.clone(),
+                                            );
+                                            new_pattern.record_success();
+                                            spatial.insert(new_pattern.unit_id, &sig.semantic_centroid);
+                                            // Accumulate into per-intent/tone centroids
+                                            let fv = sig.to_feature_vector();
+                                            memory.accumulate_centroid(gt.intent, gt.tone, &fv);
+                                            memory.store_classification_pattern(new_pattern);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         let ingest_elapsed = ingest_start.elapsed();
 
                         // Track intents (outside lock)
-                        for (example, _, _) in &prepared {
+                        for (example, _, _, _) in &prepared {
                             if let Some(ref intent_str) = example.intent {
                                 *status
                                     .intent_distribution
@@ -1092,7 +1116,8 @@ impl Engine {
         let snapshot = self.load_memory_snapshot();
         let sequence = snapshot.sequence_state();
         let context = ContextMatrix::default();
-        let all_units = snapshot.all_units();
+        let max_pool = self.config.governance.max_candidate_pool;
+        let all_units = snapshot.top_units(max_pool);
         (context, sequence, all_units)
     }
 
@@ -1203,21 +1228,20 @@ impl Engine {
 
         let snapshot = self.load_memory_snapshot();
         let active_units = snapshot.get_units(&active_ids);
-        let all_units = snapshot.all_units();
 
         let layer_5_start = Instant::now();
-        let routing = route_units(&active_units, &all_units, &self.config.semantic_map);
+        let routing = route_units_with_cached_grid(&active_units, snapshot.spatial_grid(), &self.config.semantic_map);
         let layer_5_routing_time_ms = layer_5_start.elapsed().as_millis() as u64;
         self.latency_monitor.record(5, layer_5_routing_time_ms);
 
         {
             let mut memory = self.memory.lock().expect("memory mutex poisoned");
             memory.update_positions(&routing.position_updates);
+            let capped_neighbors: Vec<Uuid> = routing.neighbor_ids.iter().copied().take(16).collect();
             for active_id in &active_ids {
-                memory.connect_units(*active_id, &routing.neighbor_ids, 0.35);
+                memory.connect_units(*active_id, &capped_neighbors, 0.35);
             }
         }
-        self.publish_memory_snapshot();
 
         let (context_matrix, sequence_state, all_units) =
             self.prepare_context_and_candidates(&hierarchy, &routing);
@@ -1350,12 +1374,14 @@ impl Engine {
                     &query.sanitized_query,
                 )
             };
-            self.publish_memory_snapshot();
-
+            // Skip publish_memory_snapshot here — get units directly from cache
             let merged_input_units = {
-                let snapshot = self.load_memory_snapshot();
-                let mut units = snapshot.get_units(&candidate_ids);
-                units.extend(snapshot.get_units(&evidence_ids));
+                let memory = self.memory.lock().expect("memory mutex poisoned");
+                let mut units: Vec<Unit> = candidate_ids.iter()
+                    .filter_map(|id| memory.get_unit(id).cloned())
+                    .collect();
+                units.extend(evidence_ids.iter()
+                    .filter_map(|id| memory.get_unit(id).cloned()));
                 units
             };
 
@@ -1473,7 +1499,6 @@ impl Engine {
             }
         };
         let reasoning_time_ms = reasoning_start.elapsed().as_millis() as u64;
-
         // Check if retrieval was triggered but returned no documents
         let retrieval_failed = used_retrieval && merged.evidence.documents.is_empty();
 
@@ -1580,10 +1605,9 @@ impl Engine {
                 sequence_state.task_entities.clone(),
             );
 
-            if memory.estimate_memory_kb() > self.config.governance.train_memory_ceiling_kb
-                || sequence_state.turn_index % 5 == 0
+            if sequence_state.turn_index > 0 && sequence_state.turn_index % 5 == 0
             {
-                Some(memory.run_maintenance(&self.config.governance))
+                Some(memory.run_maintenance_lightweight(&self.config.governance))
             } else {
                 None
             }
@@ -1902,7 +1926,7 @@ impl Engine {
         _sequence: &SequenceState,
         _has_active_document_context: bool,
     ) -> IntentProfile {
-        // Use calculation-based classification instead of heuristics
+        // Use calculation-based classification
         let memory = self.memory.lock().expect("memory mutex poisoned");
         let spatial = self.spatial_grid.lock().expect("spatial grid mutex poisoned");
         
@@ -1917,16 +1941,22 @@ impl Engine {
         drop(spatial);
         
         // Convert ClassificationResult to IntentProfile
+        let low_confidence = result.confidence < self.config.classification.low_confidence_threshold;
+        let fallback_mode = if matches!(result.intent, IntentKind::Unknown) || low_confidence {
+            crate::types::IntentFallbackMode::RetrieveUnknown
+        } else {
+            crate::types::IntentFallbackMode::None
+        };
         IntentProfile {
             primary: result.intent,
             confidence: result.confidence,
             top_score: result.confidence,
             second_score: 0.0,
-            ambiguous: result.confidence < self.config.classification.low_confidence_threshold,
+            ambiguous: low_confidence,
             wants_brief: false,
             references_document_context: false,
             certainty_bias: 0.0,
-            fallback_mode: crate::types::IntentFallbackMode::None,
+            fallback_mode,
             scores: vec![],
             reasons: vec![format!("classification_method={:?}", result.method)],
         }
@@ -2193,23 +2223,12 @@ impl Engine {
             context.to_string()
         };
 
-        let active_ids = {
+        let _active_ids = {
             let mut memory = self.memory.lock().expect("memory mutex poisoned");
             memory.ingest_hierarchy(&hierarchy, source_kind, &context_summary)
         };
-
-        let (active_units, all_units) = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            (memory.get_units(&active_ids), memory.all_units())
-        };
-
-        let routing = route_units(&active_units, &all_units, &self.config.semantic_map);
-
-        {
-            let mut memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.update_positions(&routing.position_updates);
-        }
-        self.publish_memory_snapshot();
+        // Skip routing, position updates, and snapshot rebuild for evidence ingestion.
+        // Units are in cache and accessible — full routing is deferred to maintenance.
     }
 
     fn current_database_health(&self) -> DatabaseHealthMetrics {
@@ -2456,6 +2475,8 @@ impl Engine {
                             self.config.classification.w_punctuation,
                             self.config.classification.w_semantic,
                             self.config.classification.w_derived,
+                            self.config.classification.w_intent_hash,
+                            self.config.classification.w_tone_hash,
                         ),
                         self.config.classification.clone(),
                     );
@@ -3584,44 +3605,6 @@ fn finalize_output_text(text: &str) -> String {
         sentence
     } else {
         format!("{sentence}.")
-    }
-}
-
-fn casual_reply(intent_profile: &IntentProfile, active_titles: &[String]) -> Option<String> {
-    if intent_profile.confidence < 0.4 {
-        return None;
-    }
-
-    let active_note = if active_titles.is_empty() {
-        None
-    } else if active_titles.len() == 1 {
-        Some(format!(
-            "{} is active. Ask a follow-up question or use /clear.",
-            active_titles[0]
-        ))
-    } else {
-        Some(format!(
-            "{} documents are active. Ask a follow-up question or use /clear.",
-            active_titles.len()
-        ))
-    };
-    match intent_profile.primary {
-        IntentKind::Greeting => Some(match active_note {
-            Some(note) => format!("Hi. {note}"),
-            None => {
-                "Hi. Ask me a question, give me a local document path, or use /train <path> to learn a file."
-                    .to_string()
-            }
-        }),
-        IntentKind::Gratitude => Some("You're welcome.".to_string()),
-        IntentKind::Farewell => Some("Goodbye.".to_string()),
-        IntentKind::Help => Some(match active_note {
-            Some(note) => format!(
-                "Give me a question about the active document session. {note} You can also load another local .docx/.pdf path or use /train <path> to persist it."
-            ),
-            None => "Give me a question, paste a local .docx/.pdf path in the prompt, or use /train <path> to persist a document.".to_string(),
-        }),
-        _ => None,
     }
 }
 
@@ -4887,6 +4870,30 @@ impl<'a> ExpressionParser<'a> {
     }
 }
 
+/// Parse GroundTruth from a seed TrainingExample's context field.
+/// Format: "classification:Intent:Tone:ResolverMode"
+fn parse_classification_ground_truth(example: &crate::seed::TrainingExample) -> Option<crate::types::GroundTruth> {
+    let ctx = example.context.as_deref()?;
+    let parts: Vec<&str> = ctx.split(':').collect();
+    if parts.len() < 4 || parts[0] != "classification" {
+        return None;
+    }
+    let intent = crate::classification::parse_intent_kind(parts[1]);
+    let tone = crate::classification::parse_tone_kind(parts[2]);
+    let resolver_mode = match parts[3].to_lowercase().as_str() {
+        "deterministic" => ResolverMode::Deterministic,
+        "balanced" => ResolverMode::Balanced,
+        "exploratory" => ResolverMode::Exploratory,
+        _ => ResolverMode::Balanced,
+    };
+    Some(crate::types::GroundTruth {
+        intent,
+        tone,
+        resolver_mode,
+        domain: None,
+    })
+}
+
 fn unique_strings(values: Vec<String>) -> Vec<String> {
     let mut unique = Vec::new();
     for value in values {
@@ -4904,6 +4911,16 @@ fn route_units(
 ) -> RoutingResult {
     let mut router = SemanticRouter::new(semantic_map);
     router.route(active_units, all_units)
+}
+
+/// Route using cached spatial grid (fast path for large datasets)
+fn route_units_with_cached_grid(
+    active_units: &[Unit],
+    cached_grid: &crate::spatial_index::SpatialGrid,
+    semantic_map: &crate::config::SemanticMapConfig,
+) -> RoutingResult {
+    let mut router = SemanticRouter::new(semantic_map);
+    router.route_with_cached_grid(active_units, cached_grid)
 }
 
 fn route_candidate_units(

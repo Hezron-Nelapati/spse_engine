@@ -19,7 +19,7 @@ mod calculator;
 pub mod trainer;
 
 pub use signature::{ClassificationSignature, SemanticHasher};
-pub use pattern::ClassificationPattern;
+pub use pattern::{ClassificationPattern, parse_intent_kind, parse_tone_kind};
 pub use calculator::ClassificationCalculator;
 pub use trainer::{ClassificationTrainer, TrainingOutcome, IterationReport, FinalReport, LabeledDialogue, LabeledTurn, DialogueMetadata, ExpectedUnitCount, MemoryTarget};
 

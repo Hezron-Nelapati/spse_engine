@@ -1,6 +1,24 @@
 // Classification Vote Aggregation Compute Shader
 // Aggregates similarity scores into final intent/tone/resolver votes
 
+struct GpuSignature {
+    structure_scores: vec4<f32>,
+    punctuation_scores: vec4<f32>,
+    semantic_centroid: vec3<f32>,
+    derived_scores: vec3<f32>,
+}
+
+struct GpuPattern {
+    signature: GpuSignature,
+    intent_index: u32,
+    tone_index: u32,
+    resolver_index: u32,
+    confidence: f32,
+    success_count: u32,
+    failure_count: u32,
+    _padding: vec2<u32>,
+}
+
 struct GpuSimilarityResult {
     pattern_index: u32,
     similarity: f32,
@@ -69,19 +87,19 @@ fn main(
             // Accumulate intent score
             let intent_idx = result.intent_index;
             if (intent_idx < 23u) {
-                atomicAdd(&shared_intent_scores[intent_idx], result.final_score);
+                shared_intent_scores[intent_idx] = shared_intent_scores[intent_idx] + result.final_score;
             }
             
             // Accumulate tone score
             let tone_idx = result.tone_index;
             if (tone_idx < 8u) {
-                atomicAdd(&shared_tone_scores[tone_idx], result.final_score);
+                shared_tone_scores[tone_idx] = shared_tone_scores[tone_idx] + result.final_score;
             }
             
             // Accumulate resolver score
             let resolver_idx = result.resolver_index;
             if (resolver_idx < 3u) {
-                atomicAdd(&shared_resolver_scores[resolver_idx], result.final_score);
+                shared_resolver_scores[resolver_idx] = shared_resolver_scores[resolver_idx] + result.final_score;
             }
         }
     }
@@ -137,9 +155,3 @@ fn main(
     }
 }
 
-// Atomic add helper for f32 (emulated with atomic<u32>)
-fn atomicAdd(ptr: ptr<workgroup, f32, read_write>, value: f32) {
-    // Note: WGSL doesn't have atomic float add, this is a placeholder
-    // In practice, use atomic<u32> and reinterpret bits or use workgroup reduction
-    *ptr = *ptr + value;
-}

@@ -89,3 +89,4 @@ training_jobs.json
 zero_shot_report.json
 datasets/*
 .spse_cache/*
+training_jobs/*

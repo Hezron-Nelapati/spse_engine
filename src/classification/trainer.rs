@@ -169,6 +169,42 @@ impl ClassificationTrainer {
         }
     }
     
+    /// Fast bulk ingest: store pattern without per-example classification prediction.
+    /// Skips online accuracy measurement for ~50x speedup during seed training.
+    pub fn ingest_labeled_turn_bulk(
+        &mut self,
+        text: &str,
+        label: &GroundTruth,
+        memory: &mut MemoryStore,
+        spatial: &mut SpatialGrid,
+    ) {
+        let sig = ClassificationSignature::compute(text, self.calculator.hasher());
+
+        // Check if a similar pattern already exists via signature hash
+        let sig_hash = sig.signature_hash().to_string();
+        if let Some(existing_id) = memory.classification_pattern_by_signature(&sig_hash) {
+            if let Some(mut existing) = memory.get_classification_pattern(existing_id) {
+                existing.record_success();
+                memory.update_classification_pattern(existing);
+                return;
+            }
+        }
+
+        // New pattern — create and store
+        let mut new_pattern = ClassificationPattern::new(
+            sig.clone(),
+            label.intent,
+            label.tone,
+            label.resolver_mode,
+            label.domain.clone(),
+        );
+        new_pattern.record_success();
+
+        // Store in memory (L4) and spatial map (L5)
+        spatial.insert(new_pattern.unit_id, &sig.semantic_centroid);
+        memory.store_classification_pattern(new_pattern);
+    }
+
     /// Train until accuracy threshold is met or max iterations reached.
     pub fn train_until_threshold(
         &mut self,
@@ -506,7 +542,7 @@ mod tests {
         let config = ClassificationConfig::default();
         let trainer = ClassificationTrainer::new(calculator, config);
         
-        assert!((trainer.calculator.w_semantic - 0.35).abs() < 0.01);
+        assert!((trainer.calculator.w_semantic - 0.15).abs() < 0.01);
     }
     
     #[test]
@@ -524,7 +560,7 @@ mod tests {
         trainer.adjust_weights(&report);
         
         // Weights should have been adjusted
-        assert!(trainer.calculator.w_semantic > 0.35);
-        assert!(trainer.calculator.w_derived > 0.20);
+        assert!(trainer.calculator.w_semantic > 0.15);
+        assert!(trainer.calculator.w_derived > 0.10);
     }
 }

@@ -521,7 +521,7 @@ pub fn ingest_reasoning_trace(
         // Ingest into Reasoning channel only (not Core)
         let ingested_ids = memory.ingest_hierarchy_with_channels(
             &hierarchy,
-            SourceKind::UserInput,
+            SourceKind::TrainingDocument,
             &format!("reasoning_trace_{:?}", trace.structure_hash.unwrap_or(0)),
             MemoryType::Episodic,
             &[MemoryChannel::Reasoning],
@@ -547,6 +547,7 @@ pub fn ingest_reasoning_trace(
 
                 memory.register_process_anchor(structure_hash, id);
                 memory.register_reasoning_pattern(trace.reasoning_type, id);
+                memory.mark_as_process_unit(id);
 
                 unit_ids.push(id);
             }

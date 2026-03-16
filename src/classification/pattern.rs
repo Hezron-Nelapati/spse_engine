@@ -90,10 +90,13 @@ impl ClassificationPattern {
             signature_hash
         ).to_lowercase();
         
+        // Serialize full signature to JSON for persistence
+        let sig_json = serde_json::to_string(&self.signature).unwrap_or_default();
+        
         Unit {
             id: self.unit_id,
-            content: marker.clone(),
-            normalized: marker,
+            content: marker,
+            normalized: sig_json,
             level: UnitLevel::Pattern,
             frequency: self.success_count + self.failure_count,
             utility_score: self.confidence(),
@@ -142,19 +145,12 @@ impl ClassificationPattern {
         let intent_kind = parse_intent_kind(parts[1]);
         let tone_kind = parse_tone_kind(parts[2]);
         
-        // Reconstruct signature from unit (partial)
-        let signature = ClassificationSignature {
-            semantic_centroid: unit.semantic_position,
-            byte_length_norm: 0.0,
-            sentence_entropy: 0.0,
-            token_count_norm: 0.0,
-            punct_vector: [0.0; 3],
-            urgency_score: 0.0,
-            formality_score: 0.0,
-            technical_score: 0.0,
-            domain_hint: 0.0,
-            temporal_cue: 0.0,
-        };
+        // Deserialize full signature from normalized field (JSON), fallback to dummy
+        let signature = serde_json::from_str::<ClassificationSignature>(&unit.normalized)
+            .unwrap_or_else(|_| ClassificationSignature {
+                semantic_centroid: unit.semantic_position,
+                ..ClassificationSignature::default()
+            });
         
         Some(Self {
             unit_id: unit.id,
@@ -189,7 +185,7 @@ impl Default for ClassificationPattern {
 }
 
 /// Parse intent kind from string (case-insensitive).
-fn parse_intent_kind(s: &str) -> IntentKind {
+pub fn parse_intent_kind(s: &str) -> IntentKind {
     match s.to_lowercase().as_str() {
         "greeting" => IntentKind::Greeting,
         "gratitude" => IntentKind::Gratitude,
@@ -219,7 +215,7 @@ fn parse_intent_kind(s: &str) -> IntentKind {
 }
 
 /// Parse tone kind from string (case-insensitive).
-fn parse_tone_kind(s: &str) -> ToneKind {
+pub fn parse_tone_kind(s: &str) -> ToneKind {
     match s.to_lowercase().as_str() {
         "neutralprofessional" | "neutral_professional" => ToneKind::NeutralProfessional,
         "empathetic" => ToneKind::Empathetic,

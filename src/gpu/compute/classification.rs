@@ -150,6 +150,18 @@ pub struct GpuVoteAggregation {
     _padding: [u32; 3],
 }
 
+/// GPU config uniform matching shader Config struct
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuConfig {
+    min_similarity_threshold: f32,
+    low_confidence_threshold: f32,
+    high_confidence_threshold: f32,
+    pattern_merge_threshold: f32,
+    pattern_count: u32,
+    _padding: [u32; 3],
+}
+
 /// Minimum pattern count to justify GPU dispatch overhead
 #[allow(dead_code)]
 const GPU_THRESHOLD: usize = 64;
@@ -176,6 +188,7 @@ struct CachedBuffers {
     patterns_buffer: Buffer,
     results_buffer: Buffer,
     staging_buffer: Buffer,
+    config_buffer: Buffer,
 }
 
 impl GpuClassificationCalculator {
@@ -286,7 +299,7 @@ impl GpuClassificationCalculator {
     }
     
     /// Get or create cached buffers for pattern count
-    fn get_buffers(&self, pattern_count: usize) -> (Buffer, Buffer, Buffer, Buffer) {
+    fn get_buffers(&self, pattern_count: usize) -> (Buffer, Buffer, Buffer, Buffer, Buffer) {
         // Round up to next power of 2 for better cache reuse
         let bucket = pattern_count.next_power_of_two().min(MAX_PATTERNS_PER_DISPATCH);
         
@@ -321,12 +334,20 @@ impl GpuClassificationCalculator {
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+
+            let config_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ConfigBuffer"),
+                size: std::mem::size_of::<GpuConfig>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             
             cache.insert(bucket, CachedBuffers {
                 query_buffer,
                 patterns_buffer,
                 results_buffer,
                 staging_buffer,
+                config_buffer,
             });
         }
         
@@ -336,6 +357,7 @@ impl GpuClassificationCalculator {
             cached.patterns_buffer.clone(),
             cached.results_buffer.clone(),
             cached.staging_buffer.clone(),
+            cached.config_buffer.clone(),
         )
     }
     
@@ -381,13 +403,23 @@ impl GpuClassificationCalculator {
         }
         
         // Get cached buffers
-        let (query_buffer, patterns_buffer, results_buffer, staging_buffer) = 
+        let (query_buffer, patterns_buffer, results_buffer, staging_buffer, config_buffer) = 
             self.get_buffers(effective_count);
         
         // Write data
         let gpu_query = GpuSignature::from(query_sig);
         self.queue.write_buffer(&query_buffer, 0, bytemuck::bytes_of(&gpu_query));
         self.queue.write_buffer(&patterns_buffer, 0, bytemuck::cast_slice(&gpu_patterns));
+
+        let gpu_config = GpuConfig {
+            min_similarity_threshold: config.min_similarity_threshold,
+            low_confidence_threshold: config.low_confidence_threshold,
+            high_confidence_threshold: config.high_confidence_threshold,
+            pattern_merge_threshold: config.pattern_merge_threshold,
+            pattern_count,
+            _padding: [0; 3],
+        };
+        self.queue.write_buffer(&config_buffer, 0, bytemuck::bytes_of(&gpu_config));
         
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -405,6 +437,10 @@ impl GpuClassificationCalculator {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: results_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: config_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -510,7 +546,12 @@ impl GpuClassificationCalculator {
             .map(|(i, &s)| (i as u32, s))
             .unwrap_or((1, 0.0));
         
-        let confidence = (intent_score + tone_score) / 2.0;
+        // Normalize confidence as share of winning class in total votes
+        let intent_total: f32 = intent_scores.iter().sum();
+        let tone_total: f32 = tone_scores.iter().sum();
+        let intent_confidence = if intent_total > 0.0 { intent_score / intent_total } else { 0.0 };
+        let tone_confidence = if tone_total > 0.0 { tone_score / tone_total } else { 0.0 };
+        let confidence = ((intent_confidence + tone_confidence) / 2.0).clamp(0.0, 1.0);
         
         // Apply confidence-driven resolver override
         let final_resolver = if confidence < config.low_confidence_threshold {

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 type CellId = (i32, i32, i32);
 
+#[derive(Clone)]
 pub struct SpatialGrid {
     cells: HashMap<CellId, Vec<(Uuid, [f32; 3])>>,
     cell_size: f32,

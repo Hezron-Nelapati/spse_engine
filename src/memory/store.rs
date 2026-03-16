@@ -1,7 +1,7 @@
 use crate::bloom_filter::{BloomStats, UnitBloomFilter};
 use crate::config::{GovernanceConfig, SemanticMapConfig};
 use crate::persistence::Db;
-use crate::spatial_index::force_directed_layout;
+use crate::spatial_index::{force_directed_layout, SpatialGrid};
 use crate::types::{
     ActivatedUnit, CandidateStatus, ChannelIsolationReport, ChannelIsolationViolation,
     DatabaseHealthMetrics, DatabaseMaturityStage, FeedbackEvent, GovernanceReport,
@@ -51,7 +51,7 @@ enum StoredRecordKind {
 }
 
 pub struct MemoryStore {
-    cache: HashMap<Uuid, Unit>,
+    cache: HashMap<Uuid, Arc<Unit>>,
     content_index: HashMap<String, Uuid>,
     channel_index: HashMap<MemoryChannel, HashSet<Uuid>>,
     candidate_cache: HashMap<String, UnitCandidate>,
@@ -108,6 +108,9 @@ pub struct MemoryStore {
     // Classification pattern storage (Intent channel)
     classification_patterns: HashMap<Uuid, crate::classification::ClassificationPattern>,
     classification_by_signature: HashMap<String, Uuid>,
+    // Nearest Centroid Classifier: per-intent and per-tone accumulated feature vectors
+    intent_centroids: HashMap<crate::types::IntentKind, (Vec<f32>, u64)>,  // (sum, count)
+    tone_centroids: HashMap<crate::types::ToneKind, (Vec<f32>, u64)>,      // (sum, count)
 }
 
 #[derive(Default)]
@@ -143,11 +146,13 @@ const CANDIDATE_METADATA_OVERHEAD_BYTES: usize = 112;
 
 #[derive(Clone)]
 pub struct MemorySnapshot {
-    units: Vec<Unit>,
-    unit_index: HashMap<Uuid, Unit>,
+    units: Vec<Arc<Unit>>,
+    unit_index: HashMap<Uuid, Arc<Unit>>,
     normalized_index: HashMap<String, Uuid>,
     channel_index: HashMap<MemoryChannel, Vec<Uuid>>,
     sequence_state: SequenceState,
+    /// Cached spatial grid for O(1) neighbor lookups
+    spatial_grid: SpatialGrid,
 }
 
 impl MemorySnapshot {
@@ -155,13 +160,27 @@ impl MemorySnapshot {
         self.units.len()
     }
 
-    pub fn all_units(&self) -> Vec<Unit> {
-        self.units.clone()
+    /// Returns references to all units (zero-copy)
+    pub fn all_units_ref(&self) -> &[Arc<Unit>] {
+        &self.units
     }
 
-    pub fn get_units(&self, ids: &[Uuid]) -> Vec<Unit> {
+    /// Returns cloned units (use sparingly with large datasets)
+    pub fn all_units(&self) -> Vec<Unit> {
+        self.units.iter().map(|u| (**u).clone()).collect()
+    }
+
+    /// Get units by IDs (returns Arc references, zero-copy)
+    pub fn get_units_arc(&self, ids: &[Uuid]) -> Vec<Arc<Unit>> {
         ids.iter()
             .filter_map(|id| self.unit_index.get(id).cloned())
+            .collect()
+    }
+
+    /// Get units by IDs (clones, use sparingly)
+    pub fn get_units(&self, ids: &[Uuid]) -> Vec<Unit> {
+        ids.iter()
+            .filter_map(|id| self.unit_index.get(id).map(|u| (**u).clone()))
             .collect()
     }
 
@@ -169,20 +188,53 @@ impl MemorySnapshot {
         self.normalized_index
             .get(normalized)
             .and_then(|id| self.unit_index.get(id))
+            .map(|u| u.as_ref())
     }
 
     pub fn top_units(&self, limit: usize) -> Vec<Unit> {
-        let mut units = self.all_units();
-        units.sort_by(|a, b| {
-            b.utility_score
-                .partial_cmp(&a.utility_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        units.truncate(limit);
-        units
+        self.top_units_arc(limit)
+            .into_iter()
+            .map(|u| (*u).clone())
+            .collect()
+    }
+
+    /// Top units returning Arc (zero-copy, preferred for large datasets)
+    pub fn top_units_arc(&self, limit: usize) -> Vec<Arc<Unit>> {
+        if self.units.len() <= limit {
+            return self.units.clone();
+        }
+        use std::collections::BinaryHeap;
+        use std::cmp::Ordering;
+        struct Scored(Arc<Unit>);
+        impl PartialEq for Scored { fn eq(&self, other: &Self) -> bool { self.0.utility_score == other.0.utility_score } }
+        impl Eq for Scored {}
+        // Min-heap: reverse ordering so smallest is at top
+        impl PartialOrd for Scored { fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) } }
+        impl Ord for Scored { fn cmp(&self, other: &Self) -> Ordering { self.0.utility_score.partial_cmp(&other.0.utility_score).unwrap_or(Ordering::Equal) } }
+
+        let mut heap = BinaryHeap::with_capacity(limit + 1);
+        for unit in &self.units {
+            heap.push(Scored(Arc::clone(unit)));
+            if heap.len() > limit {
+                heap.pop(); // remove smallest
+            }
+        }
+        let mut result: Vec<Arc<Unit>> = heap.into_iter().map(|s| s.0).collect();
+        result.sort_by(|a, b| b.utility_score.partial_cmp(&a.utility_score).unwrap_or(Ordering::Equal));
+        result
     }
 
     pub fn units_in_channel(&self, channel: MemoryChannel) -> Vec<Unit> {
+        self.channel_index
+            .get(&channel)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| self.unit_index.get(id).map(|u| (**u).clone()))
+            .collect()
+    }
+
+    /// Units in channel returning Arc (zero-copy)
+    pub fn units_in_channel_arc(&self, channel: MemoryChannel) -> Vec<Arc<Unit>> {
         self.channel_index
             .get(&channel)
             .into_iter()
@@ -228,6 +280,11 @@ impl MemorySnapshot {
 
     pub fn sequence_state(&self) -> SequenceState {
         self.sequence_state.clone()
+    }
+
+    /// Get cached spatial grid for neighbor lookups
+    pub fn spatial_grid(&self) -> &SpatialGrid {
+        &self.spatial_grid
     }
 
     pub fn memory_summary(&self) -> String {
@@ -309,13 +366,24 @@ impl MemoryStore {
         let mut candidate_cache = HashMap::new();
         let mut candidate_id_index = HashMap::new();
 
+        let mut classification_patterns = HashMap::new();
+        let mut classification_by_signature = HashMap::new();
+
         for mut unit in units {
             normalize_channels(&mut unit.memory_channels);
             content_index.insert(unit.normalized.clone(), unit.id);
             for channel in &unit.memory_channels {
                 channel_index.entry(*channel).or_default().insert(unit.id);
             }
-            cache.insert(unit.id, unit);
+            // Reconstruct classification patterns from pattern-type units
+            if unit.content.starts_with("pattern:") {
+                if let Some(pattern) = crate::classification::ClassificationPattern::from_unit(&unit) {
+                    let sig_hash = pattern.signature.signature_hash().to_string();
+                    classification_by_signature.insert(sig_hash, pattern.unit_id);
+                    classification_patterns.insert(pattern.unit_id, pattern);
+                }
+            }
+            cache.insert(unit.id, Arc::new(unit));
         }
 
         for mut candidate in candidates {
@@ -379,11 +447,13 @@ impl MemoryStore {
             pattern_cache_lookups: 0,
             db,
             pending_writes: Vec::new(),
-            pending_writes_threshold: 500,
+            pending_writes_threshold: 50_000,
             write_deferred: true,
             training_mode: false,
-            classification_patterns: HashMap::new(),
-            classification_by_signature: HashMap::new(),
+            classification_patterns,
+            classification_by_signature,
+            intent_centroids: HashMap::new(),
+            tone_centroids: HashMap::new(),
         };
         if seed_bootstrap_units {
             store.ensure_bootstrap_seeds();
@@ -435,15 +505,24 @@ impl MemoryStore {
     }
 
     pub fn snapshot(&self) -> MemorySnapshot {
-        let units = self.all_units();
+        // Wrap units in Arc for zero-copy sharing
+        let units: Vec<Arc<Unit>> = self.cache.values().cloned().collect();
         let mut unit_index = HashMap::new();
         let mut normalized_index = HashMap::new();
         let mut channel_index: HashMap<MemoryChannel, Vec<Uuid>> = HashMap::new();
         for unit in &units {
-            unit_index.insert(unit.id, unit.clone());
+            unit_index.insert(unit.id, Arc::clone(unit));
             normalized_index.insert(unit.normalized.clone(), unit.id);
             for channel in &unit.memory_channels {
                 channel_index.entry(*channel).or_default().push(unit.id);
+            }
+        }
+
+        // Build cached spatial grid (filter out process units)
+        let mut spatial_grid = SpatialGrid::new(self.semantic_map.spatial_cell_size);
+        for unit in &units {
+            if !unit.is_process_unit {
+                spatial_grid.insert(unit.id, &unit.semantic_position);
             }
         }
 
@@ -453,6 +532,7 @@ impl MemoryStore {
             normalized_index,
             channel_index,
             sequence_state: self.sequence_state(),
+            spatial_grid,
         }
     }
 
@@ -462,7 +542,7 @@ impl MemoryStore {
 
     pub fn database_health(&self) -> DatabaseHealthMetrics {
         database_health_from_units(
-            self.cache.values(),
+            self.cache.values().map(|u| u.as_ref()),
             &self.channel_index,
             self.candidate_cache.values(),
             self.cold_start_unit_threshold,
@@ -501,14 +581,14 @@ impl MemoryStore {
         self.classification_by_signature.insert(sig_hash, pattern.unit_id);
         
         // Store unit in cache and channel index
-        self.cache.insert(unit.id, unit.clone());
+        self.cache.insert(unit.id, Arc::new(unit.clone()));
         self.content_index.insert(unit.normalized.clone(), unit.id);
         for channel in &unit.memory_channels {
             self.channel_index.entry(*channel).or_default().insert(unit.id);
         }
         
-        // Persist to database
-        let _ = self.db.upsert_unit(&unit);
+        // Persist to database (deferred in training mode)
+        self.persist(&unit);
     }
 
     /// Get a classification pattern by ID.
@@ -524,11 +604,11 @@ impl MemoryStore {
             // Update unit in cache
             let unit = pattern.to_unit();
             if let Some(cached_unit) = self.cache.get_mut(&pattern.unit_id) {
-                *cached_unit = unit.clone();
+                *cached_unit = Arc::new(unit.clone());
             }
             
-            // Persist to database
-            let _ = self.db.upsert_unit(&unit);
+            // Persist to database (deferred in training mode)
+            self.persist(&unit);
         }
     }
 
@@ -537,13 +617,74 @@ impl MemoryStore {
         self.classification_patterns.values().cloned().collect()
     }
 
+    /// Look up classification pattern ID by signature hash.
+    pub fn classification_pattern_by_signature(&self, sig_hash: &str) -> Option<uuid::Uuid> {
+        self.classification_by_signature.get(sig_hash).copied()
+    }
+
+    /// Get all classification pattern IDs (for direct scoring without spatial pre-filtering).
+    pub fn classification_pattern_ids(&self) -> Vec<uuid::Uuid> {
+        self.classification_patterns.keys().copied().collect()
+    }
+
     /// Count classification patterns.
     pub fn classification_pattern_count(&self) -> usize {
         self.classification_patterns.len()
     }
 
+    /// Accumulate a feature vector into per-intent and per-tone centroids.
+    /// Called during training for each classification pattern.
+    pub fn accumulate_centroid(
+        &mut self,
+        intent: crate::types::IntentKind,
+        tone: crate::types::ToneKind,
+        feature_vector: &[f32],
+    ) {
+        // Intent centroid
+        let (sum, count) = self.intent_centroids.entry(intent).or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
+        for (s, v) in sum.iter_mut().zip(feature_vector.iter()) {
+            *s += v;
+        }
+        *count += 1;
+
+        // Tone centroid
+        let (sum, count) = self.tone_centroids.entry(tone).or_insert_with(|| (vec![0.0; feature_vector.len()], 0));
+        for (s, v) in sum.iter_mut().zip(feature_vector.iter()) {
+            *s += v;
+        }
+        *count += 1;
+    }
+
+    /// Get all intent centroids as (IntentKind, mean_feature_vector) pairs.
+    pub fn intent_centroids(&self) -> Vec<(crate::types::IntentKind, Vec<f32>)> {
+        self.intent_centroids.iter().map(|(intent, (sum, count))| {
+            let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
+            (*intent, mean)
+        }).collect()
+    }
+
+    /// Get all tone centroids as (ToneKind, mean_feature_vector) pairs.
+    pub fn tone_centroids(&self) -> Vec<(crate::types::ToneKind, Vec<f32>)> {
+        self.tone_centroids.iter().map(|(tone, (sum, count))| {
+            let mean: Vec<f32> = sum.iter().map(|s| s / *count as f32).collect();
+            (*tone, mean)
+        }).collect()
+    }
+
+    /// Rebuild centroids from all loaded classification patterns.
+    /// Called on startup after patterns are loaded from DB.
+    pub fn rebuild_centroids_from_patterns(&mut self) {
+        self.intent_centroids.clear();
+        self.tone_centroids.clear();
+        let patterns: Vec<_> = self.classification_patterns.values().cloned().collect();
+        for pattern in &patterns {
+            let fv = pattern.signature.to_feature_vector();
+            self.accumulate_centroid(pattern.intent_kind, pattern.tone_kind, &fv);
+        }
+    }
+
     pub fn all_units(&self) -> Vec<Unit> {
-        self.cache.values().cloned().collect()
+        self.cache.values().map(|u| (**u).clone()).collect()
     }
 
     pub fn all_candidates(&self) -> Vec<UnitCandidate> {
@@ -551,7 +692,7 @@ impl MemoryStore {
     }
 
     pub fn get_unit(&self, id: &Uuid) -> Option<&Unit> {
-        self.cache.get(id)
+        self.cache.get(id).map(|v| v.as_ref())
     }
 
     /// O(1) content_index lookup by normalized text. Used to find unit IDs
@@ -562,13 +703,22 @@ impl MemoryStore {
 
     pub fn get_units(&self, ids: &[Uuid]) -> Vec<Unit> {
         ids.iter()
-            .filter_map(|id| self.cache.get(id).cloned())
+            .filter_map(|id| self.cache.get(id).map(|u| (**u).clone()))
             .collect()
     }
 
     /// Register a process anchor (never-pruned reasoning pattern)
     pub fn register_process_anchor(&mut self, structure_hash: u64, unit_id: Uuid) {
         self.process_anchors.insert(structure_hash, unit_id);
+    }
+    
+    /// Mark a unit as a process unit (reasoning step).
+    /// Process units are filtered by reasoning_patterns_for_query.
+    pub fn mark_as_process_unit(&mut self, unit_id: Uuid) {
+        if let Some(arc) = self.cache.get_mut(&unit_id) {
+            let unit = Arc::make_mut(arc);
+            unit.is_process_unit = true;
+        }
     }
     
     /// Check if a structure hash is a process anchor
@@ -701,7 +851,7 @@ impl MemoryStore {
             .get(&channel)
             .into_iter()
             .flat_map(|ids| ids.iter())
-            .filter_map(|id| self.cache.get(id).cloned())
+            .filter_map(|id| self.cache.get(id).map(|u| (**u).clone()))
             .collect()
     }
 
@@ -841,7 +991,7 @@ impl MemoryStore {
 
         channel_ids
             .difference(&other_channel_ids)
-            .filter_map(|id| self.cache.get(id).cloned())
+            .filter_map(|id| self.cache.get(id).map(|u| (**u).clone()))
             .collect()
     }
 
@@ -1119,7 +1269,8 @@ impl MemoryStore {
         {
             let anchor_reuse_threshold = self.anchor_reuse_threshold;
             let anchor_salience_threshold = self.anchor_salience_threshold;
-            if let Some(existing) = self.cache.get_mut(&id) {
+            if let Some(existing_arc) = self.cache.get_mut(&id) {
+                let existing = Arc::make_mut(existing_arc);
                 existing.frequency += activation.frequency.max(1);
                 existing.utility_score =
                     (existing.utility_score * 0.7) + (activation.utility_score * 0.3);
@@ -1194,7 +1345,7 @@ impl MemoryStore {
         self.content_index.insert(key, id);
         self.reindex_channels(&unit);
         self.persist(&unit);
-        self.cache.insert(id, unit);
+        self.cache.insert(id, Arc::new(unit));
         ActivationOutcome::Active { id, is_new: true }
     }
 
@@ -1223,7 +1374,8 @@ impl MemoryStore {
         {
             let anchor_reuse_threshold = self.anchor_reuse_threshold;
             let anchor_salience_threshold = self.anchor_salience_threshold;
-            if let Some(existing) = self.cache.get_mut(&id) {
+            if let Some(existing_arc) = self.cache.get_mut(&id) {
+                let existing = Arc::make_mut(existing_arc);
                 existing.frequency += activation.frequency.max(1);
                 // Apply utility boost for StagingEpisodic units
                 existing.utility_score = ((existing.utility_score * 0.7) + (activation.utility_score * 0.3)).max(utility_boost);
@@ -1296,14 +1448,15 @@ impl MemoryStore {
         self.content_index.insert(key, id);
         self.reindex_channels(&unit);
         self.persist(&unit);
-        self.cache.insert(id, unit);
+        self.cache.insert(id, Arc::new(unit));
         ActivationOutcome::Active { id, is_new: true }
     }
 
     pub fn update_positions(&mut self, updates: &[(Uuid, [f32; 3])]) {
         for (id, position) in updates {
             let mut persisted = None;
-            if let Some(unit) = self.cache.get_mut(id) {
+            if let Some(unit_arc) = self.cache.get_mut(id) {
+                let unit = Arc::make_mut(unit_arc);
                 unit.semantic_position = *position;
                 persisted = Some(unit.clone());
             }
@@ -1314,21 +1467,29 @@ impl MemoryStore {
     }
 
     pub fn connect_units(&mut self, source_id: Uuid, target_ids: &[Uuid], edge_weight: f32) {
+        const MAX_LINKS_PER_UNIT: usize = 64;
         let mut persisted = None;
-        if let Some(source) = self.cache.get_mut(&source_id) {
+        if let Some(source_arc) = self.cache.get_mut(&source_id) {
+            let source = Arc::make_mut(source_arc);
+            let existing: HashSet<Uuid> = source.links.iter().map(|l| l.target_id).collect();
+            let mut added = 0;
             for target_id in target_ids {
-                if *target_id == source_id {
+                if *target_id == source_id || existing.contains(target_id) {
                     continue;
                 }
-                if source.links.iter().all(|link| link.target_id != *target_id) {
-                    source.links.push(Link::new(
-                        *target_id,
-                        crate::types::EdgeType::Semantic,
-                        edge_weight,
-                    ));
+                if source.links.len() >= MAX_LINKS_PER_UNIT {
+                    break;
                 }
+                source.links.push(Link::new(
+                    *target_id,
+                    crate::types::EdgeType::Semantic,
+                    edge_weight,
+                ));
+                added += 1;
             }
-            persisted = Some(source.clone());
+            if added > 0 {
+                persisted = Some(source.clone());
+            }
         }
         if let Some(unit) = persisted.as_ref() {
             self.persist(unit);
@@ -1362,7 +1523,8 @@ impl MemoryStore {
 
         for (unit_id, total_impact) in aggregated {
             let mut persisted = None;
-            if let Some(unit) = self.cache.get_mut(&unit_id) {
+            if let Some(unit_arc) = self.cache.get_mut(&unit_id) {
+                let unit = Arc::make_mut(unit_arc);
                 unit.confidence = (unit.confidence + total_impact * 0.05).clamp(0.05, 1.0);
                 unit.utility_score = (unit.utility_score + total_impact * 0.03).clamp(0.05, 2.0);
                 persisted = Some(unit.clone());
@@ -1431,6 +1593,65 @@ impl MemoryStore {
         (((bytes + candidate_bytes) as i64) / 1024).max(1)
     }
 
+    /// Lightweight maintenance: pruning, promotion, decay — no SQLite writes, no layout, no snapshot.
+    /// Suitable for inline calls during inference.
+    pub fn run_maintenance_lightweight(&mut self, governance: &GovernanceConfig) -> GovernanceReport {
+        self.apply_governance(governance);
+        let health = self.database_health();
+        let prune_utility_threshold = self.prune_threshold_for(health.maturity_stage);
+
+        let mut to_remove = Vec::new();
+        let mut promoted_units = 0u64;
+        let mut anchors_protected = 0u64;
+
+        for unit_arc in self.cache.values_mut() {
+            let unit = Arc::make_mut(unit_arc);
+            if unit.anchor_status { anchors_protected += 1; }
+            if unit.frequency >= self.core_promotion_threshold
+                || unit.corroboration_count >= self.promotion_min_corroborations
+                || unit.anchor_status
+            {
+                if unit.memory_type != MemoryType::Core {
+                    promoted_units += 1;
+                    unit.memory_type = MemoryType::Core;
+                }
+            }
+            let stale_hours = (Utc::now() - unit.last_seen_at).num_hours().max(0) as f32;
+            let decay_window_hours = (self.episodic_decay_days.max(1) as f32) * 24.0;
+            let decay = (stale_hours / decay_window_hours).min(0.4);
+            let recency_penalty = decay * self.recency_decay_rate.max(0.0);
+            unit.utility_score =
+                ((unit.utility_score * self.lfu_decay_factor) - recency_penalty).max(0.02);
+
+            if !unit.anchor_status
+                && unit.memory_type == MemoryType::Episodic
+                && unit.utility_score < prune_utility_threshold
+                && stale_hours > 24.0
+            {
+                to_remove.push(unit.id);
+            }
+        }
+
+        let pruned_units = self.archive_units_by_ids(&to_remove).len() as u64;
+        self.pruned_units_total += pruned_units;
+
+        GovernanceReport {
+            pruned_units,
+            pruned_candidates: 0,
+            purged_polluted_units: 0,
+            purged_polluted_candidates: 0,
+            promoted_units,
+            anchors_protected,
+            layout_adjustments: 0,
+            mean_displacement: 0.0,
+            layout_rolled_back: false,
+            snapshot_path: String::new(),
+            pruning_reasons: Vec::new(),
+            pruned_references: Vec::new(),
+            pollution_findings: Vec::new(),
+        }
+    }
+
     pub fn run_maintenance(&mut self, governance: &GovernanceConfig) -> GovernanceReport {
         self.apply_governance(governance);
         let pollution = self.purge_polluted_memory();
@@ -1438,8 +1659,8 @@ impl MemoryStore {
         let prune_utility_threshold = self.prune_threshold_for(health.maturity_stage);
         let layout = force_directed_layout(&self.all_units(), &self.semantic_map);
         for (id, position) in &layout.position_updates {
-            if let Some(unit) = self.cache.get_mut(id) {
-                unit.semantic_position = *position;
+            if let Some(unit_arc) = self.cache.get_mut(id) {
+                Arc::make_mut(unit_arc).semantic_position = *position;
             }
         }
 
@@ -1447,7 +1668,8 @@ impl MemoryStore {
         let mut promoted_units = 0;
         let mut anchors_protected = 0;
 
-        for unit in self.cache.values_mut() {
+        for unit_arc in self.cache.values_mut() {
+            let unit = Arc::make_mut(unit_arc);
             if unit.anchor_status {
                 anchors_protected += 1;
             }
@@ -1503,7 +1725,7 @@ impl MemoryStore {
                 self.cache
                     .values()
                     .filter(|unit| to_remove.contains(&unit.id))
-                    .cloned()
+                    .map(|u| (**u).clone())
                     .collect(),
                 "stale_low_utility",
             ));
@@ -1527,11 +1749,10 @@ impl MemoryStore {
             cap_pruned_references(&mut pruned_references);
         }
 
-        let units_to_persist: Vec<Unit> = self.cache.values().cloned().collect();
-        for unit in &units_to_persist {
-            self.persist(unit);
-        }
         self.flush_pending_writes();
+        let _ = self.db.batch_upsert_units(
+            &self.cache.values().map(|u| (**u).clone()).collect::<Vec<_>>(),
+        );
 
         let snapshot_path = self
             .db
@@ -1633,7 +1854,7 @@ impl MemoryStore {
             self.cache
                 .values()
                 .filter(|unit| to_remove.contains(&unit.id))
-                .cloned()
+                .map(|u| (**u).clone())
                 .collect(),
             "memory_budget",
         );
@@ -1678,12 +1899,12 @@ impl MemoryStore {
             return Vec::new();
         }
 
-        let mut archived = Vec::new();
+        let mut archived: Vec<Unit> = Vec::new();
         for id in ids {
             if let Some(unit) = self.cache.remove(id) {
                 self.content_index.remove(&unit.normalized);
                 self.remove_from_channels(&unit);
-                archived.push(unit);
+                archived.push((*unit).clone());
             }
         }
 
@@ -1706,7 +1927,7 @@ impl MemoryStore {
             .insert(restored.normalized.clone(), restored.id);
         self.bloom_filter.insert(&restored.normalized);
         self.reindex_channels(&restored);
-        self.cache.insert(restored.id, restored.clone());
+        self.cache.insert(restored.id, Arc::new(restored.clone()));
         Some(restored)
     }
 
@@ -1774,7 +1995,7 @@ impl MemoryStore {
         let records = self
             .cache
             .values()
-            .map(StoredRecord::from_unit)
+            .map(|u| StoredRecord::from_unit(u))
             .collect::<Vec<_>>();
         let mut findings = pollution_findings_for_records(
             &records,
@@ -1858,7 +2079,8 @@ impl MemoryStore {
                 continue;
             };
             let mut persisted = None;
-            if let Some(source) = self.cache.get_mut(&source_id) {
+            if let Some(source_arc) = self.cache.get_mut(&source_id) {
+                let source = Arc::make_mut(source_arc);
                 for link in &shard_unit.links {
                     let Some(target_id) = id_map.get(&link.target_id).copied() else {
                         continue;
@@ -1949,7 +2171,8 @@ impl MemoryStore {
                     continue;
                 };
                 let mut persisted = None;
-                if let Some(source) = self.cache.get_mut(&source_id) {
+                if let Some(source_arc) = self.cache.get_mut(&source_id) {
+                    let source = Arc::make_mut(source_arc);
                     for link in &shard_unit.links {
                         let Some(target_id) = id_map.get(&link.target_id).copied() else {
                             continue;
@@ -2008,7 +2231,7 @@ impl MemoryStore {
         let records = self
             .cache
             .values()
-            .map(StoredRecord::from_unit)
+            .map(|u| StoredRecord::from_unit(u))
             .chain(
                 self.candidate_cache
                     .values()
@@ -2054,8 +2277,8 @@ impl MemoryStore {
                 report.findings.push(finding.clone());
                 report.pruned_references.push(PrunedUnitReference {
                     id: polluted.id,
-                    content: polluted.content,
-                    normalized: polluted.normalized,
+                    content: polluted.content.clone(),
+                    normalized: polluted.normalized.clone(),
                     level: polluted.level,
                     memory_type: polluted.memory_type,
                     utility_score: polluted.utility_score,
@@ -2108,7 +2331,8 @@ impl MemoryStore {
 
     fn merge_unit_record(&mut self, target_id: Uuid, incoming: &Unit) {
         let mut persisted = None;
-        if let Some(existing) = self.cache.get_mut(&target_id) {
+        if let Some(existing_arc) = self.cache.get_mut(&target_id) {
+            let existing = Arc::make_mut(existing_arc);
             existing.frequency += incoming.frequency.max(1);
             existing.utility_score =
                 (existing.utility_score * 0.70) + (incoming.utility_score * 0.30);
@@ -2165,7 +2389,7 @@ impl MemoryStore {
         self.bloom_filter.insert(&unit.normalized);
         self.reindex_channels(&unit);
         self.persist(&unit);
-        self.cache.insert(id, unit);
+        self.cache.insert(id, Arc::new(unit));
         id
     }
 
@@ -2174,7 +2398,8 @@ impl MemoryStore {
             return;
         };
         let mut persisted = None;
-        if let Some(existing) = self.cache.get_mut(&target_id) {
+        if let Some(existing_arc) = self.cache.get_mut(&target_id) {
+            let existing = Arc::make_mut(existing_arc);
             existing.frequency += incoming.observation_count.max(1);
             existing.utility_score =
                 (existing.utility_score * 0.80) + (incoming.utility_score * 0.20);
@@ -2245,9 +2470,10 @@ impl MemoryStore {
     }
 
     fn absorb_polluted_unit(&mut self, finding: &PollutionFinding, polluted: &Unit) {
-        let Some(canonical) = self.cache.get_mut(&finding.canonical_id) else {
+        let Some(canonical_arc) = self.cache.get_mut(&finding.canonical_id) else {
             return;
         };
+        let canonical = Arc::make_mut(canonical_arc);
         canonical.frequency += polluted.frequency.max(1);
         let penalty = self.pollution_penalty_factor;
         canonical.utility_score =
@@ -2282,7 +2508,8 @@ impl MemoryStore {
     }
 
     fn absorb_polluted_candidate(&mut self, finding: &PollutionFinding, polluted: &UnitCandidate) {
-        if let Some(canonical) = self.cache.get_mut(&finding.canonical_id) {
+        if let Some(canonical_arc) = self.cache.get_mut(&finding.canonical_id) {
+            let canonical = Arc::make_mut(canonical_arc);
             canonical.frequency += polluted.observation_count.max(1);
             let penalty = self.pollution_penalty_factor;
             canonical.utility_score =
@@ -2454,7 +2681,7 @@ impl MemoryStore {
             self.bloom_filter.insert(&candidate.normalized);
             self.reindex_channels(&unit);
             self.persist(&unit);
-            self.cache.insert(id, unit);
+            self.cache.insert(id, Arc::new(unit));
 
             if let Some(stored) = self.candidate_cache.get_mut(&candidate.normalized) {
                 stored.status = CandidateStatus::Active;
@@ -2687,7 +2914,7 @@ impl MemoryStore {
             self.flush_pending_writes();
             // Bulk-write all cached units to SQLite
             self.flush_cache_to_db();
-            self.pending_writes_threshold = 500;
+            self.pending_writes_threshold = 50_000;
         }
     }
 
@@ -2697,7 +2924,7 @@ impl MemoryStore {
         if self.cache.is_empty() {
             return;
         }
-        let units: Vec<Unit> = self.cache.values().cloned().collect();
+        let units: Vec<Unit> = self.cache.values().map(|u| (**u).clone()).collect();
         let _ = self.db.batch_upsert_units(&units);
     }
 
@@ -3279,6 +3506,7 @@ mod tests {
     use super::{
         pollution_findings_for_records, MemoryStore, StoredRecord, StoredRecordKind,
     };
+    use std::sync::Arc;
     use crate::config::{GovernanceConfig, UnitBuilderConfig};
     use crate::layers::builder::UnitBuilder;
     use crate::layers::hierarchy::HierarchicalUnitOrganizer;
@@ -3509,7 +3737,7 @@ mod tests {
             is_process_unit: true,
             ..Default::default()
         };
-        store.cache.insert(unit_id, unit.clone());
+        store.cache.insert(unit_id, Arc::new(unit.clone()));
 
         // Should NOT prune because it's a process anchor
         let should_prune = store.should_prune_unit(&unit, 0.2, 48.0, false);
@@ -3569,7 +3797,7 @@ mod tests {
             is_process_unit: true,
             ..Default::default()
         };
-        store.cache.insert(pattern_id, pattern);
+        store.cache.insert(pattern_id, Arc::new(pattern));
         store.register_reasoning_pattern(crate::types::ReasoningType::General, pattern_id);
 
         // Query for patterns
@@ -3603,7 +3831,7 @@ mod tests {
             is_process_unit: true,
             ..Default::default()
         };
-        store.cache.insert(pattern_id, unit);
+        store.cache.insert(pattern_id, Arc::new(unit));
 
         let matches = store.reasoning_patterns_for_query(
             "calculate",

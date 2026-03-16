@@ -142,6 +142,18 @@ impl Db {
             "memory_channels_json",
             "TEXT NOT NULL DEFAULT '[\"main\"]'",
         )?;
+        ensure_column(
+            &conn,
+            "units",
+            "is_process_unit",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &conn,
+            "archived_units",
+            "is_process_unit",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
 
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         Ok(Self {
@@ -158,7 +170,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, content, normalized, level, frequency, utility_score, pos_x, pos_y, pos_z,
                     anchor_status, memory_type, memory_channels_json, created_at, last_seen_at, salience_score, confidence,
-                    trust_score, corroboration_count, links_json, contexts_json
+                    trust_score, corroboration_count, links_json, contexts_json, is_process_unit
              FROM units",
         )?;
 
@@ -172,7 +184,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, content, normalized, level, frequency, utility_score, pos_x, pos_y, pos_z,
                     anchor_status, memory_type, memory_channels_json, created_at, last_seen_at, salience_score, confidence,
-                    trust_score, corroboration_count, links_json, contexts_json
+                    trust_score, corroboration_count, links_json, contexts_json, is_process_unit
              FROM units
              ORDER BY normalized, id
              LIMIT ?1 OFFSET ?2",
@@ -201,9 +213,9 @@ impl Db {
                 "INSERT OR REPLACE INTO units (
                     id, content, normalized, level, frequency, utility_score, pos_x, pos_y, pos_z,
                     anchor_status, memory_type, memory_channels_json, created_at, last_seen_at, salience_score, confidence,
-                    trust_score, corroboration_count, links_json, contexts_json
+                    trust_score, corroboration_count, links_json, contexts_json, is_process_unit
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
                  )",
             )?;
             for unit in units {
@@ -228,6 +240,7 @@ impl Db {
                     unit.corroboration_count as i64,
                     serde_json::to_string(&unit.links).unwrap_or_else(|_| "[]".to_string()),
                     serde_json::to_string(&unit.contexts).unwrap_or_else(|_| "[]".to_string()),
+                    i64::from(unit.is_process_unit),
                 ])?;
             }
         }
@@ -614,7 +627,7 @@ fn hydrate_unit_from_row(row: &Row<'_>) -> SqlResult<Unit> {
         corroboration_count: row.get::<_, i64>(17)? as u32,
         links: serde_json::from_str(&links_json).unwrap_or_default(),
         contexts: serde_json::from_str(&contexts_json).unwrap_or_default(),
-        is_process_unit: false,
+        is_process_unit: row.get::<_, i64>(20).unwrap_or(0) != 0,
         content_lower,
         content_fingerprint,
     })
@@ -653,9 +666,9 @@ fn upsert_unit_in_table(conn: &Connection, table: &str, unit: &Unit) -> SqlResul
         "INSERT OR REPLACE INTO {table} (
             id, content, normalized, level, frequency, utility_score, pos_x, pos_y, pos_z,
             anchor_status, memory_type, memory_channels_json, created_at, last_seen_at, salience_score, confidence,
-            trust_score, corroboration_count, links_json, contexts_json
+            trust_score, corroboration_count, links_json, contexts_json, is_process_unit
          ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
          )"
     );
     conn.execute(
@@ -681,6 +694,7 @@ fn upsert_unit_in_table(conn: &Connection, table: &str, unit: &Unit) -> SqlResul
             unit.corroboration_count as i64,
             serde_json::to_string(&unit.links).unwrap_or_else(|_| "[]".to_string()),
             serde_json::to_string(&unit.contexts).unwrap_or_else(|_| "[]".to_string()),
+            i64::from(unit.is_process_unit),
         ],
     )?;
     Ok(())

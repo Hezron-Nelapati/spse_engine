@@ -233,21 +233,6 @@ fn default_allow_patterns() -> Vec<String> {
 pub struct IntentConfig {
     pub intent_floor_threshold: f32,
     pub intent_ambiguity_margin: f32,
-    pub context_reference_bonus: f32,
-    pub briefness_keyword_weight: f32,
-    pub social_intent_shortcircuit: bool,
-    pub min_lexical_tokens: usize,
-    pub temporal_cue_weight: f32,
-    pub domain_hint_weight: f32,
-    pub preference_signal_weight: f32,
-    pub certainty_softener_weight: f32,
-    // Question intent scoring patterns
-    pub question_marker_score: f32,
-    pub question_starter_score: f32,
-    pub proper_noun_bonus: f32,
-    pub of_construction_bonus: f32,
-    pub implicit_question_patterns: Vec<String>,
-    pub implicit_question_score: f32,
 }
 
 impl Default for IntentConfig {
@@ -255,29 +240,6 @@ impl Default for IntentConfig {
         Self {
             intent_floor_threshold: 0.40,
             intent_ambiguity_margin: 0.15,
-            context_reference_bonus: 0.20,
-            briefness_keyword_weight: 0.35,
-            social_intent_shortcircuit: true,
-            min_lexical_tokens: 3,
-            temporal_cue_weight: 0.16,
-            domain_hint_weight: 0.14,
-            preference_signal_weight: 0.14,
-            certainty_softener_weight: 0.10,
-            // Question intent scoring
-            question_marker_score: 0.30,
-            question_starter_score: 0.32,
-            proper_noun_bonus: 0.12,
-            of_construction_bonus: 0.18,
-            implicit_question_patterns: vec![
-                // Generalized patterns - single words that indicate information-seeking
-                "latest".to_string(), "current".to_string(), "recent".to_string(), 
-                "price".to_string(), "value".to_string(), "define".to_string(), "explain".to_string(),
-                // Common question phrase patterns (generalized)
-                "how to".to_string(), "how do".to_string(), "how many".to_string(), "how much".to_string(), 
-                "what is".to_string(), "what are".to_string(),
-                "who is".to_string(), "who was".to_string(), "what does".to_string(), "meaning of".to_string(),
-            ],
-            implicit_question_score: 0.25,
         }
     }
 }
@@ -1826,6 +1788,14 @@ pub struct ClassificationConfig {
     pub w_semantic: f32,
     /// Weight for derived scores (urgency, formality, technical, etc.)
     pub w_derived: f32,
+    /// Weight for POS-based intent hash (verbs, wh-words, modals)
+    pub w_intent_hash: f32,
+    /// Weight for POS-based tone hash (adjectives, adverbs)
+    pub w_tone_hash: f32,
+    /// Spatial grid cell size for classification pattern indexing
+    pub spatial_cell_size: f32,
+    /// Maximum number of top-k candidates to consider for vote aggregation
+    pub top_k_candidates: usize,
     /// Target accuracy for training convergence
     pub training_target_accuracy: f32,
     /// Maximum training iterations
@@ -1835,15 +1805,19 @@ pub struct ClassificationConfig {
 impl Default for ClassificationConfig {
     fn default() -> Self {
         Self {
-            spatial_query_radius: 0.5,
+            spatial_query_radius: 0.1,
             min_similarity_threshold: 0.3,
             low_confidence_threshold: 0.4,
             high_confidence_threshold: 0.85,
             pattern_merge_threshold: 0.95,
-            w_structure: 0.25,
-            w_punctuation: 0.20,
-            w_semantic: 0.35,
-            w_derived: 0.20,
+            w_structure: 0.10,
+            w_punctuation: 0.10,
+            w_semantic: 0.15,
+            w_derived: 0.10,
+            w_intent_hash: 0.35,
+            w_tone_hash: 0.20,
+            spatial_cell_size: 0.05,
+            top_k_candidates: 32,
             training_target_accuracy: 0.85,
             training_max_iterations: 10,
         }

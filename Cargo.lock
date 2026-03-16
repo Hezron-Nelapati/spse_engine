@@ -2487,6 +2487,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "postagger"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a28d74e65567bb85052ebea0b55486ac266ac8053980bcdf444be6227f1930c"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3379,6 +3389,7 @@ dependencies = [
  "once_cell",
  "parquet",
  "petgraph 0.6.5",
+ "postagger",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
