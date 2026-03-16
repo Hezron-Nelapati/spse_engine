@@ -18,8 +18,9 @@
 8. [Phase 7: Efficiency Optimizations](#8-phase-7-efficiency-optimizations)
 9. [Phase 8: Training Sweep Harness](#9-phase-8-training-sweep-harness)
 10. [Phase 9: Integration Testing](#10-phase-9-integration-testing)
-11. [Config Changes Summary](#11-config-changes-summary)
-12. [File Manifest](#12-file-manifest)
+11. [Phase 10: On-the-fly Learning](#11-phase-10-on-the-fly-learning)
+12. [Config Changes Summary](#12-config-changes-summary)
+13. [File Manifest](#13-file-manifest)
 
 ---
 
@@ -40,6 +41,7 @@ Phase 6 (Dataset Generators) → can start in parallel with Phase 1
 Phase 7 (Efficiency) → can start after Phase 2
 Phase 8 (Sweep Harness) → depends on Phases 2, 3, 4
 Phase 9 (Integration Tests) → depends on all phases
+Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Evidence Merge)
 ```
 
 ### Estimated Effort
@@ -55,7 +57,8 @@ Phase 9 (Integration Tests) → depends on all phases
 | 7. Efficiency | 0 | 8 | ~600 | P2 |
 | 8. Sweep Harness | 1 | 1 | ~400 | P1 |
 | 9. Integration Tests | 1 | 1 | ~600 | P1 |
-| **Total** | **12** | **~20** | **~7500** | |
+| 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
+| **Total** | **12** | **~23** | **~7620** | |
 
 ---
 
@@ -568,12 +571,12 @@ pub fn train_classification(
 
 ## 4. Phase 3: Reasoning System Training
 
-### Task 3.1: Query Decomposer (`src/layers/reasoning_decomposer.rs`) — NEW FILE
+### Task 3.1: Query Decomposer (`src/reasoning/decomposer.rs`) — NEW FILE
 
 Implements structured query decomposition for multi-hop reasoning.
 
 ```rust
-// src/layers/reasoning_decomposer.rs — NEW FILE
+// src/reasoning/decomposer.rs — NEW FILE
 
 use crate::types::IntentKind;
 use crate::config::ReasoningTrainingConfig;
@@ -642,8 +645,8 @@ impl QueryDecomposer {
 | Explain | `["What is {X}?", "Why does {X} work this way?", "What are the implications?"]` |
 | Critique | `["What is the claim?", "What evidence supports it?", "What evidence contradicts it?"]` |
 
-**Files created:** `src/layers/reasoning_decomposer.rs`  
-**Files modified:** `src/layers/mod.rs` (add `pub mod reasoning_decomposer;`)  
+**Files created:** `src/reasoning/decomposer.rs`  
+**Files modified:** `src/reasoning/mod.rs` (add `pub mod decomposer;`)  
 **Tests:**
 - `decompose_compare_query_produces_three_subquestions`
 - `decompose_simple_question_returns_single_subquestion`
@@ -729,12 +732,12 @@ fn generate_thought_unit(
 - `generate_thought_unit_chains_confidence_correctly`
 - `generate_thought_unit_flags_low_confidence_for_retrieval`
 
-### Task 3.3: L_reason Evaluation Function (`src/layers/search.rs`)
+### Task 3.3: L_reason Evaluation Function (`src/reasoning/search.rs`)
 
 Add MRR evaluation to `CandidateScorer`:
 
 ```rust
-// Add to src/layers/search.rs
+// Add to src/reasoning/search.rs
 
 impl CandidateScorer {
     /// Compute Mean Reciprocal Rank of correct answer in scored candidate list.
@@ -752,9 +755,9 @@ impl CandidateScorer {
 }
 ```
 
-**Files modified:** `src/layers/search.rs`
+**Files modified:** `src/reasoning/search.rs`
 
-### Task 3.4: Reasoning Training Pipeline (`src/training.rs`)
+### Task 3.4: Reasoning Training Pipeline (`src/training/pipeline.rs`)
 
 Add `train_reasoning()` to the training module:
 
@@ -805,17 +808,17 @@ pub fn train_reasoning(
 
 ## 5. Phase 4: Predictive System Training
 
-### Task 4.1: Spatial Walk Trainer (`src/layers/walk_trainer.rs`) — NEW FILE
+### Task 4.1: Word Graph Trainer (`src/predictive/walk_trainer.rs`) — NEW FILE
 
-Implements autoregressive spatial walk training with attract/repel.
+Implements Word Graph edge formation training with attract/repel layout.
 
 ```rust
-// src/layers/walk_trainer.rs — NEW FILE
+// src/predictive/walk_trainer.rs — NEW FILE
 
 use crate::config::PredictiveTrainingConfig;
 use crate::spatial_index::SpatialGrid;
-use crate::layers::search::CandidateScorer;
-use crate::layers::resolver::FineResolver;
+use crate::reasoning::search::CandidateScorer;
+use crate::predictive::resolver::FineResolver;
 use crate::types::*;
 
 /// Trains unit positions via autoregressive spatial walk.
@@ -920,8 +923,8 @@ impl SpatialWalkTrainer {
 }
 ```
 
-**Files created:** `src/layers/walk_trainer.rs`  
-**Files modified:** `src/layers/mod.rs` (add `pub mod walk_trainer;`)  
+**Files created:** `src/predictive/walk_trainer.rs`  
+**Files modified:** `src/predictive/mod.rs` (add `pub mod walk_trainer;`)  
 **Tests:**
 - `train_sequence_correct_prediction_attracts`
 - `train_sequence_incorrect_prediction_repels_and_attracts`
@@ -1017,10 +1020,10 @@ pub fn update_position(&mut self, unit_id: Uuid, delta: [f32; 3]) {
 
 ## 6. Phase 5: Cross-System Consistency
 
-### Task 5.1: Consistency Checker (`src/layers/consistency.rs`) — NEW FILE
+### Task 5.1: Consistency Checker (`src/reasoning/consistency.rs`) — NEW FILE
 
 ```rust
-// src/layers/consistency.rs — NEW FILE
+// src/reasoning/consistency.rs — NEW FILE
 
 use crate::types::*;
 use crate::config::ConsistencyCheckConfig;
@@ -1119,8 +1122,8 @@ pub struct ConfigCorrection {
 }
 ```
 
-**Files created:** `src/layers/consistency.rs`  
-**Files modified:** `src/layers/mod.rs`  
+**Files created:** `src/reasoning/consistency.rs`  
+**Files modified:** `src/reasoning/mod.rs` (add `pub mod consistency;`)  
 **Tests:**
 - `check_detects_r1_violations`
 - `check_generates_corrections_for_r3`
@@ -1461,7 +1464,7 @@ fn execute_reasoning_loop(&self, query: &str, ...) -> ReasoningResult {
 **Files modified:** `src/engine.rs`  
 **Tests:** `reasoning_cache_returns_cached_result`, `reasoning_cache_misses_for_different_intent`
 
-### Task 7.4: Delta Scoring in Evidence Merge (`src/layers/search.rs`)
+### Task 7.4: Delta Scoring in Evidence Merge (`src/reasoning/search.rs`)
 
 ```rust
 // Add to CandidateScorer
@@ -1482,7 +1485,7 @@ pub fn delta_rescore_evidence(
 }
 ```
 
-**Files modified:** `src/layers/search.rs`  
+**Files modified:** `src/reasoning/search.rs`  
 **Tests:** `delta_rescore_preserves_relative_order_except_evidence`
 
 ### Task 7.5: Pipeline Short-Circuit for Social Intents (`src/engine.rs`)
@@ -1703,7 +1706,188 @@ fn training_does_not_degrade_inference() {
 
 ---
 
-## 11. Config Changes Summary
+## 11. Phase 10: On-the-fly Learning
+
+Implements the minimal runtime learning mechanism described in Architecture §4.9. Zero new files — only extensions to 3 existing files (~40 lines total).
+
+**Architecture Reference:** §4.9 On-the-fly Learning (Runtime Edge Injection)
+
+### Task 10.1: Cold-Start Detection in IntentDetector (`src/classification/intent.rs`)
+
+Add a cold-start check to the existing `assess()` function. When input words have very few outgoing Word Graph edges, set `learning_flag = true` on the retrieval request.
+
+```rust
+// Add to IntentDetector::assess() in src/classification/intent.rs
+
+// After existing intent classification, before returning:
+let content_words = extract_content_words(&normalized_input);
+let mut cold_start = false;
+for word in &content_words {
+    if let Some(node_id) = word_graph.lookup(word) {
+        if word_graph.outgoing_edge_count(node_id)
+            < config.runtime_learning.cold_start_edge_threshold
+        {
+            cold_start = true;
+            break;
+        }
+    } else {
+        // Word not in graph at all — definitely cold
+        cold_start = true;
+        break;
+    }
+}
+
+// Set learning_flag on the assessment result
+assessment.learning_flag = cold_start
+    && assessment.confidence < config.retrieval_gate_threshold;
+```
+
+**Files modified:** `src/classification/intent.rs`
+**Config addition:** `cold_start_edge_threshold: u32` (default: 3) in `RuntimeLearningConfig`
+**Tests:**
+- `cold_start_detected_for_word_with_no_edges`
+- `cold_start_not_detected_for_well_connected_word`
+- `learning_flag_false_when_confidence_high`
+
+### Task 10.2: Edge Injection in Evidence Merge (`src/reasoning/merge.rs`)
+
+After the existing evidence merge logic, add an edge injection step when `learning_flag` is set. Tokenizes merged evidence and creates Word Graph edges between consecutive words.
+
+```rust
+// Add to EvidenceMerger::merge() in src/reasoning/merge.rs
+
+// After standard evidence merge (existing logic unchanged):
+if retrieval_request.learning_flag {
+    let context_hash = crate::types::text_fingerprint(&retrieval_request.query);
+    for snippet in &merged_evidence {
+        let words = crate::classification::input::tokenize_words(&snippet.content);
+        for window in words.windows(2) {
+            word_graph.create_or_strengthen_edge(
+                &window[0],
+                &window[1],
+                snippet.trust_score * config.runtime_learning.edge_learn_rate,
+                context_hash,
+            );
+        }
+    }
+}
+```
+
+**Files modified:** `src/reasoning/merge.rs`
+**Config addition:** `edge_learn_rate: f32` (default: 0.1) in `RuntimeLearningConfig`
+**Tests:**
+- `edge_injection_creates_edges_from_evidence`
+- `edge_injection_skipped_when_learning_flag_false`
+- `injected_edges_tagged_with_query_context`
+- `trust_score_scales_edge_weight`
+
+### Task 10.3: Implicit Feedback Reinforcement (`src/reasoning/feedback.rs`)
+
+Extend `FeedbackController::learn()` to track edges walked during response generation. On next user message (implicit accept), strengthen those edges. On explicit correction, weaken them.
+
+```rust
+// Add to FeedbackController in src/reasoning/feedback.rs
+
+/// Track which edges were walked during the last response.
+pub fn track_walked_edges(&mut self, edges: Vec<(WordId, WordId)>) {
+    self.last_walked_edges = edges;
+}
+
+/// Called on next user message. If not a correction, strengthen walked edges.
+pub fn apply_implicit_feedback(
+    &mut self,
+    is_correction: bool,
+    word_graph: &mut WordGraph,
+    config: &RuntimeLearningConfig,
+) {
+    for (from, to) in &self.last_walked_edges {
+        if is_correction {
+            word_graph.weaken_edge(*from, *to, config.correction_penalty);
+        } else {
+            word_graph.strengthen_edge(*from, *to, config.implicit_reinforce_delta);
+            // Promote to Core if used enough times
+            if let Some(edge) = word_graph.get_edge(*from, *to) {
+                if edge.frequency >= config.promotion_threshold {
+                    word_graph.set_edge_memory_type(*from, *to, MemoryType::Core);
+                }
+            }
+        }
+    }
+    self.last_walked_edges.clear();
+}
+```
+
+**Files modified:** `src/reasoning/feedback.rs`
+**Config additions:**
+- `implicit_reinforce_delta: f32` (default: 0.05)
+- `correction_penalty: f32` (default: 0.15)
+- `promotion_threshold: u32` (default: 5)
+
+**Tests:**
+- `implicit_accept_strengthens_walked_edges`
+- `explicit_correction_weakens_walked_edges`
+- `edge_promoted_to_core_after_threshold_uses`
+- `cleared_after_feedback_applied`
+
+### Task 10.4: RuntimeLearningConfig (`src/config/mod.rs`, `config/config.yaml`)
+
+Add the config struct and YAML defaults:
+
+```rust
+// Add to src/config/mod.rs
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeLearningConfig {
+    pub cold_start_edge_threshold: u32,     // default: 3
+    pub edge_learn_rate: f32,               // default: 0.1
+    pub implicit_reinforce_delta: f32,      // default: 0.05
+    pub correction_penalty: f32,            // default: 0.15
+    pub promotion_threshold: u32,           // default: 5
+}
+```
+
+```yaml
+# Add to config/config.yaml under layer_5_semantic_map
+runtime_learning:
+  cold_start_edge_threshold: 3
+  edge_learn_rate: 0.1
+  implicit_reinforce_delta: 0.05
+  correction_penalty: 0.15
+  promotion_threshold: 5
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+**Tests:** Config deserialization round-trip, default value assertions.
+
+### Task 10.5: Wire into Engine (`src/engine.rs`)
+
+Minimal wiring in `process_prompt()`:
+
+1. Pass `learning_flag` from Classification assessment to retrieval request (already in the assessment struct from Task 10.1)
+2. After L17 output, call `feedback_controller.track_walked_edges(walked_edges)` (L17 already knows which edges were walked)
+3. At start of `process_prompt()`, call `feedback_controller.apply_implicit_feedback(is_correction, word_graph, config)` for the *previous* response
+
+```rust
+// At start of process_prompt():
+let is_correction = self.detect_correction(&normalized_input);
+self.feedback_controller.apply_implicit_feedback(
+    is_correction,
+    &mut word_graph,
+    &self.config.runtime_learning,
+);
+
+// After L17 assembles output:
+self.feedback_controller.track_walked_edges(walked_edges);
+```
+
+**Files modified:** `src/engine.rs`
+**Tests:**
+- `second_query_uses_injected_edges_without_retrieval`
+- `cold_start_hi_learns_and_responds_locally_on_retry`
+
+---
+
+## 12. Config Changes Summary
 
 All new config fields with their defaults:
 
@@ -1735,18 +1919,23 @@ All new config fields with their defaults:
 | | `social_shortcircuit_confidence` | `f32` | 0.95 | Min confidence for social intent short-circuit |
 | | `platt_a` | `f32` | 1.0 | Platt scaling parameter A |
 | | `platt_b` | `f32` | 0.0 | Platt scaling parameter B |
+| `layer_5_semantic_map.runtime_learning` | `cold_start_edge_threshold` | `u32` | 3 | Min outgoing edges before word is "cold" |
+| | `edge_learn_rate` | `f32` | 0.1 | Trust-to-weight scaling for injected edges |
+| | `implicit_reinforce_delta` | `f32` | 0.05 | Edge weight boost on implicit accept |
+| | `correction_penalty` | `f32` | 0.15 | Edge weight penalty on explicit correction |
+| | `promotion_threshold` | `u32` | 5 | Uses before Episodic edge promotes to Core |
 
 ---
 
-## 12. File Manifest
+## 13. File Manifest
 
 ### New Files (12)
 
 | File | Phase | Purpose |
 |------|-------|---------|
-| `src/layers/reasoning_decomposer.rs` | 3 | Query decomposition for multi-hop reasoning |
-| `src/layers/walk_trainer.rs` | 4 | Autoregressive spatial walk trainer |
-| `src/layers/consistency.rs` | 5 | Cross-system consistency checker |
+| `src/reasoning/decomposer.rs` | 3 | Query decomposition for multi-hop reasoning |
+| `src/predictive/walk_trainer.rs` | 4 | Word Graph edge formation trainer |
+| `src/reasoning/consistency.rs` | 5 | Cross-system consistency checker |
 | `src/seed/classification_generator.rs` | 6 | Classification dataset generator (50K+) |
 | `src/seed/reasoning_generator.rs` | 6 | Reasoning QA dataset generator (20K+) |
 | `src/seed/predictive_generator.rs` | 6 | Predictive sequence generator (100K+) |
@@ -1761,18 +1950,21 @@ All new config fields with their defaults:
 |------|-------|---------|
 | `src/types.rs` | 1 | Add loss types, SystemTrainingReport |
 | `src/seed/mod.rs` | 1 | Extend TrainingExample, add new module exports |
-| `src/config/mod.rs` | 1 | Add SystemTrainingConfig and sub-configs |
-| `config/config.yaml` | 1 | Add system_training section |
+| `src/config/mod.rs` | 1, 10 | Add SystemTrainingConfig, sub-configs, RuntimeLearningConfig |
+| `config/config.yaml` | 1, 10 | Add system_training section + runtime_learning section |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
 | `src/classification/trainer.rs` | 2 | Full rewrite: centroid + sweep + calibration |
 | `src/classification/calculator.rs` | 2, 7 | Add evaluate_loss(), two-phase, calibration |
 | `src/classification/signature.rs` | 7 | Add POS tag LRU cache |
-| `src/engine.rs` | 2, 3, 4, 5, 7 | Add train_*() methods, reasoning cache, short-circuit, real generate_thought_unit |
-| `src/layers/mod.rs` | 3, 4, 5 | Add new module exports |
-| `src/layers/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10 | Add train_*() methods, reasoning cache, short-circuit, real generate_thought_unit, wire on-the-fly learning |
+| `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
+| `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
+| `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
 | `src/spatial_index.rs` | 4, 7 | Add update_position(), batch_update_positions(), neighbor cache |
-| `src/training.rs` | 3 | Wire train_reasoning() |
-| `src/layers/feedback.rs` | 5 | Wire consistency corrections |
+| `src/training/pipeline.rs` | 3 | Wire train_reasoning() |
+| `src/classification/intent.rs` | 10 | Add cold-start detection to assess() |
+| `src/reasoning/merge.rs` | 10 | Add edge injection after evidence merge |
+| `src/reasoning/feedback.rs` | 5, 10 | Wire consistency corrections + implicit feedback reinforcement |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
 
 ### Execution Order (Critical Path)
@@ -1784,6 +1976,7 @@ Week 3: Phase 3 (Reasoning Training)
 Week 4: Phase 4 (Predictive Training)
 Week 5: Phase 5 (Consistency) + Phase 7 (Efficiency — can parallelize)
 Week 6: Phase 8 (Sweep Harness) + Phase 9 (Integration Tests)
+Week 7: Phase 10 (On-the-fly Learning) — lightweight, can overlap with Week 6
 ```
 
 ### Verification Commands
@@ -1794,9 +1987,9 @@ cargo check --no-default-features
 
 # Unit tests for specific module
 cargo test --lib --no-default-features -- classification::trainer
-cargo test --lib --no-default-features -- layers::reasoning_decomposer
-cargo test --lib --no-default-features -- layers::walk_trainer
-cargo test --lib --no-default-features -- layers::consistency
+cargo test --lib --no-default-features -- reasoning::decomposer
+cargo test --lib --no-default-features -- predictive::walk_trainer
+cargo test --lib --no-default-features -- reasoning::consistency
 
 # Integration tests (after all phases)
 cargo test --test training_integration --no-default-features

@@ -1,8 +1,8 @@
 # Structured Predictive Search (SPS) Architecture
 
-**Document Version:** 13.0  
+**Document Version:** 13.1  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning
 
 ---
 
@@ -790,6 +790,409 @@ GovernanceReport {
 | **Batched feedback ingestion** | Accumulate `FeedbackEvent` instances across queries; apply in batch during maintenance cycle instead of per-query | Reduces mutex contention on MemoryStore |
 | **Pipeline short-circuit** | If Classification confidence > 0.95 AND intent ∈ {Greeting, Farewell, Gratitude, Continue}, skip Reasoning entirely — route directly to Predictive | Eliminates Reasoning overhead for social/simple intents |
 
+### 4.9 On-the-fly Learning (Runtime Edge Injection)
+
+The engine learns during normal conversation — **no separate training session required**. This uses three minimal extensions to existing layers, with zero new layers or systems.
+
+#### Principle: Retrieval → Edge Injection → Immediate Use
+
+When the system retrieves external information to answer a query, the retrieved content is simultaneously **injected as Word Graph edges** so the same answer can be produced from local graph walk next time, without retrieval.
+
+#### Extension 1: Cold-Start Detection (L9 — existing IntentDetector)
+
+`IntentDetector::assess()` already computes entropy and confidence. The extension adds a single check:
+
+```
+After intent classification:
+  starting_words = extract_content_words(input)
+  for word in starting_words:
+    if word_graph.outgoing_edge_count(word) < cold_start_edge_threshold:
+      cold_start = true
+      break
+
+  if cold_start AND confidence < retrieval_gate_threshold:
+    retrieval_flag = true    // existing mechanism
+    learning_flag = true     // NEW: tells L13 to inject edges
+```
+
+Config: `cold_start_edge_threshold` (default: 3) — words with fewer outgoing edges are considered cold.
+
+This is **not a new layer** — it's a 5-line check added to the existing `assess()` function. The `learning_flag` is a boolean added to `RetrievalRequest`.
+
+#### Extension 2: Edge Injection in Evidence Merge (L13 — existing EvidenceMerger)
+
+`EvidenceMerger::merge()` already processes retrieved text into trust-scored evidence. The extension adds an edge injection step **after** the existing merge:
+
+```
+After standard evidence merge (existing logic unchanged):
+  if learning_flag:
+    for snippet in merged_evidence:
+      words = tokenize(snippet.content)  // reuse L1 tokenizer
+      context_hash = hash(original_query)
+      for i in 0..words.len()-1:
+        word_graph.create_or_strengthen_edge(
+          from: words[i],
+          to: words[i+1],
+          weight_delta: snippet.trust_score × edge_learn_rate,
+          context_tag: context_hash,
+        )
+      // Mark edges as Episodic (subject to normal decay/promotion)
+```
+
+Config: `edge_learn_rate` (default: 0.1) — scales how much trust translates to edge weight.
+
+This adds ~20 lines to the existing `merge()` function. No new files. Edges created this way are **Episodic** — they decay normally unless reinforced by subsequent use.
+
+#### Extension 3: Implicit Feedback Reinforcement (L18 — existing FeedbackController)
+
+`FeedbackController::learn()` already generates `FeedbackEvent` instances. The extension adds a new event type:
+
+```
+After generating response:
+  track edges_used = list of (from, to) edges walked during this response
+
+On next user message (not a correction/complaint):
+  implicit_accept = true
+  for (from, to) in edges_used:
+    word_graph.strengthen_edge(from, to, implicit_reinforce_delta)
+    if edge.frequency >= promotion_threshold:
+      edge.memory_type = Core  // permanent, survives decay
+
+On explicit correction ("No, I meant..."):
+  for (from, to) in edges_used:
+    word_graph.weaken_edge(from, to, correction_penalty)
+```
+
+Config: `implicit_reinforce_delta` (default: 0.05), `correction_penalty` (default: 0.15), `promotion_threshold` (default: 5).
+
+This is ~15 lines added to the existing `learn()` function. No new files.
+
+#### What This Achieves
+
+| Query | First Time | Second Time |
+|-------|-----------|-------------|
+| "Hi" | L9 detects cold start → retrieval → L13 injects Hi→Hello edge → response: "Hello!" | L15 walks Hi→Hello edge directly → response: "Hello!" (no retrieval) |
+| "What is HIIT?" | L9 detects no edges for "HIIT" → retrieval → L13 injects edges from evidence → response with definition | L15 walks local edges → response from graph (no retrieval) |
+| "Compare X and Y" | Full reasoning + retrieval → edges injected for both X→... and Y→... paths | Partial retrieval (only for changed facts), local edges for structure |
+
+**Total code change:** ~40 lines across 3 existing files. No new layers, no new systems, no new data structures.
+
+---
+
+## 4.10 Product Flow Scenarios
+
+Detailed end-to-end flows for every type of query the engine handles. Each scenario traces through all three systems with exact layer references.
+
+### Flow A: Direct Answer (Warm Path — ~70% of queries)
+
+**Condition:** Input words have strong Word Graph edges. Classification confident. No retrieval needed.
+
+```
+User: "What is the capital of France?"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L1: Normalize → "what is the capital of france"          │
+│ L2: Build units → [what, is, the, capital, of, france]   │
+│ L3: Hierarchy → Word level, entity: "france"             │
+│ L9: Intent = Question (0.92), Tone = NeutralProfessional │
+│     Retrieval: NOT needed (confidence > 0.72)            │
+│     Cold start: NO (all words have edges)                │
+│ Output: IntentProfile + retrieval_flag=false              │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L4: Load memory, find "france" anchor (Core, freq=47)    │
+│ L7: Context matrix: entity="france", task=factual        │
+│ L8: Profile=factual, Temperature=0.10, BeamWidth=3       │
+│ L14: Score candidates → "Paris" ranks #1 (spatial+anchor)│
+│ No retrieval triggered. No reasoning loop needed.        │
+│ Output: Ranked candidates with "Paris" at top            │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L5: Map "capital" → node. Outgoing edges found.          │
+│ L15: Graph walk:                                         │
+│   "capital" →(of)→ "france" →(is)→ "Paris" [Tier 1]     │
+│   Highway match: "capital_of_france_is_Paris" ✓          │
+│ L16: Deterministic resolve → "Paris" (0.94 confidence)   │
+│ L17: Assemble → "The capital of France is Paris."        │
+│ Output: ProcessResult                                    │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ FINALIZATION ───────────────────────────────────────────┐
+│ L18: Feedback → strengthen walked edges (+0.02)          │
+│ L21: Update sequence state                               │
+│ L20: Emit telemetry (total: ~35ms)                       │
+└──────────────────────────────────────────────────────────┘
+
+Response: "The capital of France is Paris."
+Latency: ~35ms (no retrieval, no reasoning loop)
+```
+
+### Flow B: Internal Reasoning (No Retrieval — ~15% of queries)
+
+**Condition:** Classification confident, but initial candidate scoring is low. Reasoning loop triggered to improve confidence. No web retrieval.
+
+```
+User: "Is Paris bigger than Berlin?"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L9: Intent = Compare (0.88), Tone = NeutralProfessional  │
+│     Retrieval: NOT needed (confidence > 0.72)            │
+│     Cold start: NO                                       │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L4: Load memory. "Paris" and "Berlin" both anchors.      │
+│ L7: Context: entities=["Paris","Berlin"], task=compare   │
+│ L8: Profile=factual, Temperature=0.10                    │
+│ L14: Initial scoring → confidence = 0.35 (below 0.40)   │
+│                                                          │
+│ ┌─ REASONING LOOP (confidence < trigger_floor) ────────┐ │
+│ │ Step 0: Decompose → "Size of Paris?", "Size of Berlin?"│
+│ │         Search Reasoning channel → find prior units   │
+│ │         Confidence → 0.52                             │
+│ │ Step 1: Synthesize comparison from memory anchors     │
+│ │         "Paris ~2.1M, Berlin ~3.6M"                   │
+│ │         Confidence → 0.68 (> exit_threshold 0.60)     │
+│ │         EXIT reasoning loop                           │
+│ └───────────────────────────────────────────────────────┘ │
+│ L14: Final scoring with reasoning output                  │
+│ Output: Ranked candidates                                 │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk graph using reasoning output as context         │
+│   "Berlin" →(is)→ "larger" →(than)→ "Paris" [Tier 1]    │
+│ L16: Balanced resolve, compare profile                    │
+│ L17: Assemble → "Berlin (~3.6M) is larger than           │
+│      Paris (~2.1M)."                                     │
+└──────────────────────────────────────────────────────────┘
+
+Response: "Berlin (~3.6M) is larger than Paris (~2.1M)."
+Latency: ~80ms (reasoning loop, no retrieval)
+```
+
+### Flow C: Retrieval-Augmented Answer (~10% of queries)
+
+**Condition:** Classification detects uncertainty or open-world question. Web retrieval triggered. Evidence merged.
+
+```
+User: "What happened at the 2024 Olympics opening ceremony?"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L9: Intent = Question (0.78), confidence moderate         │
+│     Entropy high — no strong centroid match               │
+│     Retrieval: YES (confidence < 0.72 OR open-world)     │
+│     Cold start: PARTIAL (some edges, but "2024 Olympics"  │
+│     is Custom node with few connections)                  │
+│     learning_flag = true                                  │
+│ L10: Query → "2024 Olympics opening ceremony events"      │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L4: Load memory. No strong anchors for "2024 Olympics".   │
+│ L14: Initial scoring → low confidence (0.22)             │
+│                                                          │
+│ ┌─ RETRIEVAL (Classification flagged) ─────────────────┐ │
+│ │ L11: SearxNG fetch → 5 snippets returned              │ │
+│ │ L12: Trust scoring → 3 pass quality gates             │ │
+│ │ L13: Evidence merge:                                   │ │
+│ │   Standard: merge evidence into candidate pool        │ │
+│ │   ON-THE-FLY LEARNING (learning_flag=true):           │ │
+│ │     Extract word sequences from trusted snippets      │ │
+│ │     Create edges: "opening"→"ceremony"→"Seine"→       │ │
+│ │       "river" [context: 2024_olympics]                │ │
+│ │     Mark edges as Episodic                            │ │
+│ └───────────────────────────────────────────────────────┘ │
+│ L14: Re-score with evidence → confidence 0.75            │
+│ Output: Ranked candidates grounded in evidence            │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk using evidence-grounded candidates              │
+│   Now has NEW local edges from injection                 │
+│ L17: Assemble → grounded_evidence_answer with citations   │
+└──────────────────────────────────────────────────────────┘
+
+Response: "The 2024 Olympics opening ceremony was held along
+the Seine River in Paris..." [with evidence sources]
+Latency: ~5s (network-bound retrieval)
+
+NEXT QUERY about 2024 Olympics: edges exist locally →
+  retrieval may not be needed → Flow A or B instead
+```
+
+### Flow D: Cold-Start Learning (First Encounter — ~3% of queries)
+
+**Condition:** Input contains words with zero or very few Word Graph edges. System has never seen this topic. Must learn from scratch.
+
+```
+User: "Hi"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L1: Normalize → "hi"                                     │
+│ L2: Build unit → [hi]                                    │
+│ L9: Intent = Greeting (0.65), but LOW confidence          │
+│     "hi" has 0 outgoing edges in Word Graph              │
+│     cold_start = true, learning_flag = true              │
+│     Retrieval: YES (cold_start override)                 │
+│ L10: Query → "common responses to greeting hi"            │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L11: SearxNG → conversational pattern snippets            │
+│ L12: Trust → filter to linguistic sources                 │
+│ L13: Evidence merge + EDGE INJECTION:                     │
+│   "hi"→"hello" (w=0.8), "hi"→"hey" (w=0.6),            │
+│   "hi"→"there" (w=0.5) [context: greeting]              │
+│ L14: Score → "hello" ranks #1                            │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk → "hi"→"hello" [Tier 1, just-injected edge]   │
+│ L17: Assemble → "Hello! How can I help you?"             │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ FEEDBACK ───────────────────────────────────────────────┐
+│ L18: Track edges_used = [(hi, hello)]                    │
+│ User continues conversation → implicit accept            │
+│ Strengthen: hi→hello weight 0.8 → 0.85                   │
+│ After 5 successful uses → promote to Core (permanent)    │
+└──────────────────────────────────────────────────────────┘
+
+Response: "Hello! How can I help you?"
+First time: ~3s (retrieval). Second time: ~20ms (local edge walk).
+```
+
+### Flow E: Social Short-Circuit (~5% of queries)
+
+**Condition:** High-confidence social intent. Skips Reasoning entirely.
+
+```
+User: "Thanks!"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L9: Intent = Gratitude (0.97)                            │
+│     confidence > social_shortcircuit_confidence (0.95)   │
+│     SHORT-CIRCUIT: skip Reasoning                        │
+└──────────────────────────────────────────────────────────┘
+                          │
+                     (skip Reasoning)
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk from "thanks" → established edges              │
+│   "thanks"→"you're"→"welcome" [Highway match]           │
+│ L17: Assemble → "You're welcome!"                        │
+└──────────────────────────────────────────────────────────┘
+
+Response: "You're welcome!"
+Latency: ~15ms (no Reasoning, no retrieval)
+```
+
+### Flow F: Reasoning + Retrieval Retry (Low Confidence — ~2% of queries)
+
+**Condition:** First retrieval yields low-quality results. Dynamic reasoning loop triggers a second retrieval attempt.
+
+```
+User: "What is the Kigali Amendment?"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L9: Intent = Question (0.71), confidence borderline       │
+│     "Kigali" = Custom node, 1 edge. "Amendment" = Content│
+│     cold_start = true, learning_flag = true              │
+│ L10: Query → "Kigali Amendment"                          │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L11: First retrieval → low-quality results (ads, spam)   │
+│ L12: Trust → most snippets rejected                       │
+│ L13: Merge → confidence still low (0.28)                 │
+│                                                          │
+│ ┌─ REASONING LOOP (confidence < 0.40) ─────────────────┐ │
+│ │ Step 0: Internal search → nothing useful               │ │
+│ │ Step 1: confidence < exit × 0.7 → re-trigger retrieval│ │
+│ │ L11: RETRY with refined query                          │ │
+│ │   "Kigali Amendment HFC Montreal Protocol"             │ │
+│ │ L12: Better results this time                          │ │
+│ │ L13: Merge + edge injection → confidence 0.62          │ │
+│ │ EXIT reasoning loop                                    │ │
+│ └───────────────────────────────────────────────────────┘ │
+│ Output: Evidence-grounded candidates                      │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk with newly injected edges                       │
+│ L17: grounded_evidence_answer with sources                │
+└──────────────────────────────────────────────────────────┘
+
+Response: "The Kigali Amendment is a 2016 amendment to the
+Montreal Protocol that phases down HFCs..." [with sources]
+Latency: ~8s (two retrieval attempts)
+```
+
+### Flow G: Multi-Turn Context Carry
+
+**Condition:** Follow-up question referencing prior conversation context.
+
+```
+Turn 1: "What is the capital of France?" → "Paris" (Flow A)
+Turn 2: "How many people live there?"
+
+┌─ CLASSIFICATION ─────────────────────────────────────────┐
+│ L1: Normalize → "how many people live there"             │
+│ L9: Intent = Question (0.85)                             │
+│     "there" = anaphoric reference → check sequence state │
+│     Recent entities: ["france", "Paris"]                 │
+│     Resolve "there" → "Paris" via sequence_state         │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ REASONING ──────────────────────────────────────────────┐
+│ L7: Context carries entity "Paris" from Turn 1            │
+│ L14: Score candidates with context_fit boosted for Paris  │
+│ Confidence 0.55 → reasoning loop:                        │
+│   Search memory → "Paris population ~2.1M" anchor found  │
+│   Confidence → 0.72 → exit                               │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─ PREDICTIVE ─────────────────────────────────────────────┐
+│ L15: Walk with "Paris" + "population" context             │
+│ L17: "Paris has a population of approximately 2.1 million │
+│      in the city proper."                                │
+└──────────────────────────────────────────────────────────┘
+
+Response: "Paris has a population of approximately 2.1 million
+in the city proper."
+Latency: ~60ms (reasoning loop, context carry, no retrieval)
+```
+
+### Flow Summary Table
+
+| Flow | Trigger | Systems Used | Retrieval | Learning | Typical Latency |
+|------|---------|-------------|-----------|----------|-----------------|
+| **A: Direct Answer** | Confident, warm edges | Class → Reason → Predict | No | No (edges reinforced) | ~35ms |
+| **B: Internal Reasoning** | Confident but low initial score | Class → Reason (loop) → Predict | No | No | ~80ms |
+| **C: Retrieval-Augmented** | Uncertain or open-world | Class → Reason (retrieve) → Predict | Yes | Yes (edge injection) | ~5s |
+| **D: Cold-Start Learning** | Word has no edges | Class → Reason (retrieve) → Predict | Yes | Yes (edge injection + promotion) | ~3s first, ~20ms after |
+| **E: Social Short-Circuit** | High-confidence social intent | Class → Predict (skip Reason) | No | No | ~15ms |
+| **F: Retrieval Retry** | First retrieval low-quality | Class → Reason (loop+retry) → Predict | Yes ×2 | Yes | ~8s |
+| **G: Multi-Turn Context** | Follow-up with anaphora | Class → Reason → Predict | Maybe | No | ~60ms |
+
 ---
 
 ## 5. Predictive System
@@ -1377,7 +1780,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 |-------|-----------|------|
 | `retrieval` | `layer_9_retrieval_gating` | `RetrievalThresholds` |
 | `retrieval_io` | `layer_11_retrieval` | `RetrievalIoConfig` |
-| `evidence_merge` | `layer_13_evidence_merge` | `EvidenceMergeConfig` |
+| `evidence_merge` | `layer_13_evidence_merge` | `EvidenceMergeConfig` (includes `edge_learn_rate` for on-the-fly injection) |
 | `scoring` | `layer_14_candidate_scoring` | `ScoringWeights` |
 | `adaptive_behavior` | `adaptive_behavior` | `AdaptiveBehaviorConfig` |
 | `governance` | `layer_21_memory_governance` | `GovernanceConfig` |
@@ -1391,6 +1794,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
 | `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
+| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold) |
 
 **Cross-Cutting:**
 
@@ -2366,6 +2770,10 @@ spse_engine/
 | **MRR** | Mean Reciprocal Rank — measures how high the correct answer ranks in candidate list | Reasoning |
 | **Platt Scaling** | Post-hoc confidence calibration via logistic sigmoid fit | Classification |
 | **The Bus** | Shared global state connecting all three systems: Intent Channel, Candidate Pool, Word Graph | Cross-cutting |
+| **Cold Start** | State where input words have zero or very few outgoing Word Graph edges — triggers retrieval + edge injection | Predictive |
+| **Edge Injection** | On-the-fly creation of Word Graph edges from retrieved evidence during L13 merge | Reasoning / Predictive |
+| **Implicit Accept** | When user continues conversation naturally after a response, interpreted as positive feedback | Reasoning |
+| **Runtime Learning** | On-the-fly edge injection + implicit feedback reinforcement — no separate training needed | Cross-cutting |
 
 ### Appendix B: Three-System Quick Reference
 
@@ -2386,6 +2794,8 @@ spse_engine/
 | How do we train reasoning quality? | Reasoning | §11.3: 7D weight optimization + decomposition templates |
 | How do we train the Word Graph? | Predictive | §11.4: Edge formation from Q&A + highway detection + layout |
 | How do we ensure systems agree? | Cross-cutting | §11.5: Consistency loop with 4 rules + asymmetric correction |
+| How does the system learn on-the-fly? | Reasoning + Predictive | §4.9: Cold-start detection → retrieval → L13 edge injection → L18 implicit feedback |
+| What are the product flow scenarios? | All | §4.10: Flows A–G covering direct answer, reasoning, retrieval, cold start, social, retry, multi-turn |
 
 ### Appendix C: References
 
