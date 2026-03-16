@@ -173,8 +173,8 @@ fn rolling_hash_units(
                     continue;
                 };
 
-                let stable = stable_window_hash(window_text.as_bytes(), config.hash_base)
-                    .unwrap_or(hash);
+                let stable =
+                    stable_window_hash(window_text.as_bytes(), config.hash_base).unwrap_or(hash);
                 let byte_len = window_end - window_start;
                 let fast_key = (stable, byte_len);
 
@@ -206,14 +206,25 @@ fn rolling_hash_units(
                     continue;
                 };
 
-                windows.insert(fast_key, WindowStats {
-                    content,
-                    normalized,
-                    byte_len,
-                    frequency: 1,
-                    full_token_boundary_hits: if left_boundary && right_boundary { 1 } else { 0 },
-                    edge_boundary_hits: if left_boundary || right_boundary { 1 } else { 0 },
-                });
+                windows.insert(
+                    fast_key,
+                    WindowStats {
+                        content,
+                        normalized,
+                        byte_len,
+                        frequency: 1,
+                        full_token_boundary_hits: if left_boundary && right_boundary {
+                            1
+                        } else {
+                            0
+                        },
+                        edge_boundary_hits: if left_boundary || right_boundary {
+                            1
+                        } else {
+                            0
+                        },
+                    },
+                );
             }
         }
     }
@@ -336,7 +347,8 @@ fn looks_like_url_fragment(normalized: &str) -> bool {
         let colon_pos = normalized.find(':').unwrap_or(0);
         let before = &normalized[..colon_pos];
         let after = &normalized[colon_pos + 1..];
-        if !before.chars().all(|c| c.is_ascii_digit()) || !after.chars().all(|c| c.is_ascii_digit()) {
+        if !before.chars().all(|c| c.is_ascii_digit()) || !after.chars().all(|c| c.is_ascii_digit())
+        {
             return true;
         }
     }
@@ -344,12 +356,13 @@ fn looks_like_url_fragment(normalized: &str) -> bool {
     // Reject file extension fragments (e.g., ".png", "file.pdf", "-map.png")
     if normalized.len() < 20 && normalized.contains('.') {
         let common_extensions = [
-            "png", "jpg", "jpeg", "gif", "pdf", "txt", "gz", "tar", "zip",
-            "html", "htm", "css", "js", "json", "xml", "md", "rst",
-            "py", "rs", "c", "cpp", "h", "java", "go", "ts",
+            "png", "jpg", "jpeg", "gif", "pdf", "txt", "gz", "tar", "zip", "html", "htm", "css",
+            "js", "json", "xml", "md", "rst", "py", "rs", "c", "cpp", "h", "java", "go", "ts",
         ];
         for ext in common_extensions {
-            if normalized.ends_with(&format!(".{}", ext)) || normalized.ends_with(&format!(".{}\"", ext)) {
+            if normalized.ends_with(&format!(".{}", ext))
+                || normalized.ends_with(&format!(".{}\"", ext))
+            {
                 return true;
             }
         }
@@ -476,22 +489,23 @@ fn has_outer_punctuation(content: &str) -> bool {
     if content.is_empty() {
         return false;
     }
-    
+
     let chars: Vec<char> = content.chars().collect();
     let first = chars[0];
     let last = chars[chars.len() - 1];
-    
+
     // Check for leading punctuation (but allow common prefixes like "$" for currency)
-    let has_leading_punct = !first.is_alphanumeric() && first != '$' && first != '£' && first != '€';
-    
+    let has_leading_punct =
+        !first.is_alphanumeric() && first != '$' && first != '£' && first != '€';
+
     // Check for trailing punctuation (but allow common suffixes like "%" for percentages)
     let has_trailing_punct = !last.is_alphanumeric() && last != '%' && last != '\'';
-    
+
     // Reject if has outer punctuation and is short (likely pollution)
     if (has_leading_punct || has_trailing_punct) && chars.len() <= 12 {
         return true;
     }
-    
+
     false
 }
 
@@ -691,9 +705,9 @@ fn max_window_size(config: &UnitBuilderConfig) -> usize {
 #[cfg(test)]
 mod tests {
     use super::UnitBuilder;
-    use crate::config::{GovernanceConfig, UnitBuilderConfig};
     use crate::classification::hierarchy::HierarchicalUnitOrganizer;
     use crate::classification::input;
+    use crate::config::{GovernanceConfig, UnitBuilderConfig};
     use crate::memory::store::MemoryStore;
     use crate::types::{DatabaseHealthMetrics, DatabaseMaturityStage, SourceKind};
     use uuid::Uuid;

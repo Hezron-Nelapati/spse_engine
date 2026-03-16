@@ -57,16 +57,13 @@ impl SpatialGrid {
         }
         ids
     }
-    
+
     /// Insert a unit with given position into the spatial grid.
     pub fn insert(&mut self, id: Uuid, position: &[f32; 3]) {
         let cell = cell_id(*position, self.cell_size);
-        self.cells
-            .entry(cell)
-            .or_default()
-            .push((id, *position));
+        self.cells.entry(cell).or_default().push((id, *position));
     }
-    
+
     /// Attract a unit toward a target position (Layer 18 feedback for correct predictions).
     /// Moves the unit closer to the target by a fraction of the distance.
     pub fn attract(&mut self, id: Uuid, target: &[f32; 3], strength: f32) {
@@ -87,7 +84,7 @@ impl SpatialGrid {
             }
         }
     }
-    
+
     /// Repel a unit away from a source position (Layer 18 feedback for incorrect predictions).
     /// Moves the unit away from the source by a fraction of the distance.
     pub fn repel(&mut self, id: Uuid, source: &[f32; 3], strength: f32) {
@@ -130,7 +127,7 @@ pub fn force_directed_layout(units: &[Unit], config: &SemanticMapConfig) -> Layo
             }
         }
     }
-    
+
     // CPU fallback
     force_directed_layout_cpu(units, config)
 }
@@ -205,19 +202,28 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
         // Parallelize O(n²) repulsion: each row computes its net displacement independently
         let n = positions.len();
         let displacements: Vec<[f32; 3]> = if n > 64 {
-            (0..n).into_par_iter().map(|lhs| {
-                let mut disp = [0.0f32; 3];
-                for rhs in 0..n {
-                    if lhs == rhs { continue; }
-                    let delta = subtract(positions[lhs], positions[rhs]);
-                    let distance = magnitude(delta).max(0.05);
-                    let direction = scale(delta, 1.0 / distance);
-                    let multiplier = if process_flags[lhs] != process_flags[rhs] { 3.0 } else { 1.0 };
-                    let repulsive_force = ((k * k) / distance) * repulsive_coeff * multiplier;
-                    disp = add(disp, scale(direction, repulsive_force));
-                }
-                disp
-            }).collect()
+            (0..n)
+                .into_par_iter()
+                .map(|lhs| {
+                    let mut disp = [0.0f32; 3];
+                    for rhs in 0..n {
+                        if lhs == rhs {
+                            continue;
+                        }
+                        let delta = subtract(positions[lhs], positions[rhs]);
+                        let distance = magnitude(delta).max(0.05);
+                        let direction = scale(delta, 1.0 / distance);
+                        let multiplier = if process_flags[lhs] != process_flags[rhs] {
+                            3.0
+                        } else {
+                            1.0
+                        };
+                        let repulsive_force = ((k * k) / distance) * repulsive_coeff * multiplier;
+                        disp = add(disp, scale(direction, repulsive_force));
+                    }
+                    disp
+                })
+                .collect()
         } else {
             // Small n: sequential is faster (no thread overhead)
             let mut displacements = vec![[0.0; 3]; n];
@@ -226,7 +232,11 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
                     let delta = subtract(positions[lhs], positions[rhs]);
                     let distance = magnitude(delta).max(0.05);
                     let direction = scale(delta, 1.0 / distance);
-                    let multiplier = if process_flags[lhs] != process_flags[rhs] { 3.0 } else { 1.0 };
+                    let multiplier = if process_flags[lhs] != process_flags[rhs] {
+                        3.0
+                    } else {
+                        1.0
+                    };
                     let repulsive_force = ((k * k) / distance) * repulsive_coeff * multiplier;
                     let adjustment = scale(direction, repulsive_force);
                     displacements[lhs] = add(displacements[lhs], adjustment);
@@ -262,7 +272,7 @@ fn force_directed_layout_cpu(units: &[Unit], config: &SemanticMapConfig) -> Layo
             let capped = scale(displacement, (temperature / distance).min(1.0));
             positions[index] =
                 clamp_position(add(positions[index], capped), config.layout_boundary);
-                
+
             // Confine process units to Z = -1.0 subspace
             if process_flags[index] {
                 positions[index][2] = -1.0;
@@ -319,22 +329,27 @@ fn select_layout_units(units: &[Unit], max_layout_units: usize) -> Vec<Unit> {
         .iter()
         .enumerate()
         .map(|(i, u)| {
-            (i, (
-                u.anchor_status,
-                u.memory_type == MemoryType::Core,
-                u.utility_score,
-                u.frequency,
-            ))
+            (
+                i,
+                (
+                    u.anchor_status,
+                    u.memory_type == MemoryType::Core,
+                    u.utility_score,
+                    u.frequency,
+                ),
+            )
         })
         .collect();
-    
+
     indexed.sort_by(|lhs, rhs| {
-        rhs.1.0.cmp(&lhs.1.0)  // anchor_status desc
-            .then(rhs.1.1.cmp(&lhs.1.1))  // is_core desc
-            .then(rhs.1.2.total_cmp(&lhs.1.2))  // utility_score desc
-            .then(rhs.1.3.cmp(&lhs.1.3))  // frequency desc
+        rhs.1
+             .0
+            .cmp(&lhs.1 .0) // anchor_status desc
+            .then(rhs.1 .1.cmp(&lhs.1 .1)) // is_core desc
+            .then(rhs.1 .2.total_cmp(&lhs.1 .2)) // utility_score desc
+            .then(rhs.1 .3.cmp(&lhs.1 .3)) // frequency desc
     });
-    
+
     indexed
         .into_iter()
         .take(max_layout_units.max(1))

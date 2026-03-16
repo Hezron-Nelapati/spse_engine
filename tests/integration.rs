@@ -13,11 +13,11 @@ use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
 use prost::Message;
 use spse_engine::api;
+use spse_engine::classification::query::SafeQueryBuilder;
+use spse_engine::classification::safety::TrustSafetyValidator;
 use spse_engine::config::{EngineConfig, GovernanceConfig, QueryBuilderConfig};
 use spse_engine::datasets;
 use spse_engine::engine::Engine;
-use spse_engine::classification::query::SafeQueryBuilder;
-use spse_engine::classification::safety::TrustSafetyValidator;
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::open_sources;
 use spse_engine::persistence::Db;
@@ -578,12 +578,20 @@ Rust is a [[multi-paradigm]] programming language focused on safety.<ref>citatio
         .await;
     let after = engine.memory_counts();
 
-    eprintln!("DEBUG wikipedia: status={:?}, new_units={}, intent_dist={:?}", 
-        status.status, status.learning_metrics.new_units_discovered, status.intent_distribution);
-    eprintln!("DEBUG wikipedia: before=({}, {}), after=({}, {})", before.0, before.1, after.0, after.1);
+    eprintln!(
+        "DEBUG wikipedia: status={:?}, new_units={}, intent_dist={:?}",
+        status.status, status.learning_metrics.new_units_discovered, status.intent_distribution
+    );
+    eprintln!(
+        "DEBUG wikipedia: before=({}, {}), after=({}, {})",
+        before.0, before.1, after.0, after.1
+    );
 
     assert_eq!(status.status, spse_engine::types::JobState::Completed);
-    assert!(status.learning_metrics.new_units_discovered > 0, "Should discover new units");
+    assert!(
+        status.learning_metrics.new_units_discovered > 0,
+        "Should discover new units"
+    );
     assert!(!status.intent_distribution.is_empty());
     // Note: Units go to candidate pool first, so memory_counts may not increase immediately
     // The key metric is new_units_discovered > 0
@@ -636,7 +644,10 @@ async fn wikidata_truthy_training_streams_into_core_memory() {
     let after = engine.memory_counts();
 
     assert_eq!(status.status, spse_engine::types::JobState::Completed);
-    assert!(status.learning_metrics.new_units_discovered > 0, "Should discover new units");
+    assert!(
+        status.learning_metrics.new_units_discovered > 0,
+        "Should discover new units"
+    );
     assert!(!status.intent_distribution.is_empty());
     // Note: Units go to candidate pool first, so memory_counts may not increase immediately
 }
@@ -688,7 +699,10 @@ async fn openwebtext_training_reads_local_parquet_shard() {
     let after = engine.memory_counts();
 
     assert_eq!(status.status, spse_engine::types::JobState::Completed);
-    assert!(status.learning_metrics.new_units_discovered > 0, "Should discover new units");
+    assert!(
+        status.learning_metrics.new_units_discovered > 0,
+        "Should discover new units"
+    );
     assert!(!status.intent_distribution.is_empty());
     // Note: Units go to candidate pool first, so memory_counts may not increase immediately
 }
@@ -1310,7 +1324,10 @@ paths:
     let after = engine.memory_counts();
 
     assert_eq!(status.status, spse_engine::types::JobState::Completed);
-    assert!(status.learning_metrics.new_units_discovered > 0, "Should discover new units");
+    assert!(
+        status.learning_metrics.new_units_discovered > 0,
+        "Should discover new units"
+    );
     // Note: Units go to candidate pool first, so memory_counts may not increase immediately
 }
 
@@ -1645,15 +1662,27 @@ async fn spawn_test_http_server(body: &str) -> String {
 fn channel_isolation_validation_detects_violations() {
     let db_path = temp_db_path("channel_isolation");
     let store = MemoryStore::new(&db_path);
-    
+
     // MemoryStore bootstraps seed units, some of which go into Intent channel
     // but isolation should still be valid (no violations)
     let report = store.validate_channel_isolation();
-    assert!(report.is_valid, "Store with bootstrap seed units should have valid isolation");
-    assert!(report.main_count > 0, "Store should have bootstrap seed units in Main");
+    assert!(
+        report.is_valid,
+        "Store with bootstrap seed units should have valid isolation"
+    );
+    assert!(
+        report.main_count > 0,
+        "Store should have bootstrap seed units in Main"
+    );
     // Bootstrap seeds include Intent channel units, so intent_count may be > 0
-    assert!(report.main_count >= report.intent_count, "Main should contain all Intent units");
-    assert!(report.main_count >= report.reasoning_count, "Main should contain all Reasoning units");
+    assert!(
+        report.main_count >= report.intent_count,
+        "Main should contain all Intent units"
+    );
+    assert!(
+        report.main_count >= report.reasoning_count,
+        "Main should contain all Reasoning units"
+    );
 }
 
 #[test]
@@ -1662,10 +1691,10 @@ fn channel_isolation_validates_main_contains_all() {
     use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
-    
+
     let db_path = temp_db_path("channel_isolation_main");
     let mut store = MemoryStore::new(&db_path);
-    
+
     // Create units using UnitBuilder
     let config = UnitBuilderConfig::default();
     let input_packet = InputPacket {
@@ -1677,7 +1706,7 @@ fn channel_isolation_validates_main_contains_all() {
     };
     let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
-    
+
     // Ingest with Intent channel
     store.ingest_hierarchy_with_channels(
         &hierarchy,
@@ -1686,12 +1715,18 @@ fn channel_isolation_validates_main_contains_all() {
         MemoryType::Episodic,
         &[MemoryChannel::Main, MemoryChannel::Intent],
     );
-    
+
     // Validate isolation - should pass since Intent units are also in Main
     let report = store.validate_channel_isolation();
-    assert!(report.is_valid, "Channel isolation should be valid when Intent is subset of Main");
+    assert!(
+        report.is_valid,
+        "Channel isolation should be valid when Intent is subset of Main"
+    );
     assert!(report.intent_count > 0, "Should have Intent channel units");
-    assert!(report.main_count >= report.intent_count, "Main should contain all Intent units");
+    assert!(
+        report.main_count >= report.intent_count,
+        "Main should contain all Intent units"
+    );
 }
 
 #[test]
@@ -1700,10 +1735,10 @@ fn channel_isolation_detects_excessive_overlap() {
     use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
-    
+
     let db_path = temp_db_path("channel_isolation_overlap");
     let mut store = MemoryStore::new(&db_path);
-    
+
     // Create units using UnitBuilder
     let config = UnitBuilderConfig::default();
     let input_packet = InputPacket {
@@ -1715,16 +1750,20 @@ fn channel_isolation_detects_excessive_overlap() {
     };
     let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
-    
+
     // Ingest with both Intent and Reasoning channels (will cause overlap)
     store.ingest_hierarchy_with_channels(
         &hierarchy,
         spse_engine::types::SourceKind::TrainingDocument,
         "test context",
         MemoryType::Episodic,
-        &[MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
+        &[
+            MemoryChannel::Main,
+            MemoryChannel::Intent,
+            MemoryChannel::Reasoning,
+        ],
     );
-    
+
     // Validate isolation - may flag excessive overlap
     let report = store.validate_channel_isolation();
     // This should pass since we have proper Main containment
@@ -1738,10 +1777,10 @@ fn isolated_units_for_channel_returns_correct_units() {
     use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
-    
+
     let db_path = temp_db_path("isolated_units");
     let mut store = MemoryStore::new(&db_path);
-    
+
     // Create units using UnitBuilder
     let config = UnitBuilderConfig::default();
     let input_packet = InputPacket {
@@ -1753,7 +1792,7 @@ fn isolated_units_for_channel_returns_correct_units() {
     };
     let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
-    
+
     store.ingest_hierarchy_with_channels(
         &hierarchy,
         spse_engine::types::SourceKind::TrainingDocument,
@@ -1761,7 +1800,7 @@ fn isolated_units_for_channel_returns_correct_units() {
         MemoryType::Episodic,
         &[MemoryChannel::Main, MemoryChannel::Intent],
     );
-    
+
     // Get isolated units for Intent channel
     let isolated = store.isolated_units_for_channel(MemoryChannel::Intent);
     // Should return units in Intent but not in Reasoning (all of them since Reasoning is empty)
@@ -1774,12 +1813,12 @@ fn intent_channel_isolation_prevents_core_pollution() {
     use spse_engine::classification::hierarchy::HierarchicalUnitOrganizer;
     use spse_engine::config::UnitBuilderConfig;
     use spse_engine::types::InputPacket;
-    
+
     let db_path = temp_db_path("intent_channel_isolation");
     let mut governance = GovernanceConfig::default();
     governance.intent_channel_core_promotion_blocked = true;
     let mut store = MemoryStore::new_with_governance(&db_path, &governance);
-    
+
     // Create units using UnitBuilder
     let config = UnitBuilderConfig::default();
     let input_packet = InputPacket {
@@ -1791,7 +1830,7 @@ fn intent_channel_isolation_prevents_core_pollution() {
     };
     let build_output = UnitBuilder::ingest_with_config(&input_packet, &config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &config);
-    
+
     // Ingest with Intent channel, requesting Core memory
     store.ingest_hierarchy_with_channels(
         &hierarchy,
@@ -1800,23 +1839,24 @@ fn intent_channel_isolation_prevents_core_pollution() {
         MemoryType::Core, // Request Core, but Intent channel should block promotion
         &[MemoryChannel::Main, MemoryChannel::Intent],
     );
-    
+
     // Verify channel isolation
     let isolation_report = store.validate_channel_isolation();
     assert!(isolation_report.is_valid);
     assert!(isolation_report.intent_count > 0);
-    
+
     // Verify Intent-channel units are NOT promoted to Core
     let intent_units = store.units_in_channel(MemoryChannel::Intent);
     for unit in &intent_units {
         // Intent-channel units should remain Episodic, not Core
         assert_eq!(
-            unit.memory_type, MemoryType::Episodic,
+            unit.memory_type,
+            MemoryType::Episodic,
             "Intent-channel unit '{}' was incorrectly promoted to Core memory",
             unit.content
         );
     }
-    
+
     // Verify Main channel has the units
     assert!(isolation_report.main_count > 0);
 }
@@ -1831,16 +1871,18 @@ fn e2e_factual_query_lifecycle() {
     let db_path = temp_db_path("e2e_factual");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Full lifecycle: input → layers → output
     let result = rt.block_on(engine.process("What is the capital of France?"));
-    
+
     // Verify lifecycle completed
-    assert!(!result.predicted_text.is_empty() || result.confidence < 0.5, 
-            "Factual query should produce output");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.confidence < 0.5,
+        "Factual query should produce output"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1850,16 +1892,18 @@ fn e2e_brainstorm_creative_lifecycle() {
     let db_path = temp_db_path("e2e_brainstorm");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Brainstorm query should trigger creative/exploratory mode
     let result = rt.block_on(engine.process("Help me brainstorm ideas for a new product"));
-    
+
     // Verify creative mode output
-    assert!(!result.predicted_text.is_empty(),
-            "Brainstorm query should produce exploratory output");
-    
+    assert!(
+        !result.predicted_text.is_empty(),
+        "Brainstorm query should produce exploratory output"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1869,16 +1913,18 @@ fn e2e_retrieval_triggered_lifecycle() {
     let db_path = temp_db_path("e2e_retrieval");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Query that may trigger external retrieval
     let result = rt.block_on(engine.process("What are the latest developments in AI?"));
-    
+
     // Verify retrieval handling (may or may not retrieve depending on config)
-    assert!(!result.predicted_text.is_empty() || result.used_retrieval,
-            "Retrieval query should handle gracefully");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.used_retrieval,
+        "Retrieval query should handle gracefully"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1888,17 +1934,19 @@ fn e2e_query_layer_failure() {
     let db_path = temp_db_path("e2e_layer_failure");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Malformed input that may fail at some layer
     let result = rt.block_on(engine.process(""));
-    
+
     // Verify graceful failure handling
     // Empty input should still produce some output (even if just error message)
-    assert!(!result.predicted_text.is_empty() || result.confidence < 0.5,
-            "Layer failure should be handled gracefully");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.confidence < 0.5,
+        "Layer failure should be handled gracefully"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1907,10 +1955,13 @@ fn e2e_query_layer_failure() {
 fn e2e_concurrent_queries() {
     let db_path = temp_db_path("e2e_concurrent");
     let engine_config = EngineConfig::load_default_file();
-    let engine = Arc::new(Engine::new_with_config_and_db_path(engine_config.clone(), &db_path));
-    
+    let engine = Arc::new(Engine::new_with_config_and_db_path(
+        engine_config.clone(),
+        &db_path,
+    ));
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     let queries = vec![
         "What is machine learning?",
         "Explain neural networks",
@@ -1918,15 +1969,16 @@ fn e2e_concurrent_queries() {
         "Describe natural language processing",
         "What is computer vision?",
     ];
-    
+
     // Process queries concurrently
-    let handles: Vec<_> = queries.into_iter().map(|q| {
-        let engine = engine.clone();
-        rt.spawn(async move {
-            engine.process(&q).await
+    let handles: Vec<_> = queries
+        .into_iter()
+        .map(|q| {
+            let engine = engine.clone();
+            rt.spawn(async move { engine.process(&q).await })
         })
-    }).collect();
-    
+        .collect();
+
     // Wait for all queries
     let results: Vec<_> = rt.block_on(async {
         let mut outcomes = Vec::new();
@@ -1937,10 +1989,10 @@ fn e2e_concurrent_queries() {
         }
         outcomes
     });
-    
+
     // Verify all queries processed
     assert_eq!(results.len(), 5, "All concurrent queries should complete");
-    
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1950,18 +2002,21 @@ fn e2e_multi_turn_context_preserved() {
     let db_path = temp_db_path("e2e_multi_turn");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // First turn
     let _result1 = rt.block_on(engine.process("My name is Alice"));
-    
+
     // Second turn - should remember context
     let result2 = rt.block_on(engine.process("What is my name?"));
-    
+
     // Verify context is preserved (answer may or may not contain "Alice")
-    assert!(!result2.predicted_text.is_empty(), "Multi-turn should produce output");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Multi-turn should produce output"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1971,18 +2026,21 @@ fn e2e_multi_turn_topic_shift() {
     let db_path = temp_db_path("e2e_topic_shift");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Topic 1: Technology
     let _result1 = rt.block_on(engine.process("Tell me about computers"));
-    
+
     // Topic 2: Cooking (topic shift)
     let result2 = rt.block_on(engine.process("How do I bake a cake?"));
-    
+
     // Verify topic shift handled
-    assert!(!result2.predicted_text.is_empty(), "Topic shift should be handled");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Topic shift should be handled"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -1992,18 +2050,21 @@ fn e2e_multi_turn_intent_change() {
     let db_path = temp_db_path("e2e_intent_change");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Intent 1: Question
     let _result1 = rt.block_on(engine.process("What is the weather?"));
-    
+
     // Intent 2: Action request (intent change)
     let result2 = rt.block_on(engine.process("Help me plan a trip"));
-    
+
     // Verify intent change handled
-    assert!(!result2.predicted_text.is_empty(), "Intent change should be handled");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Intent change should be handled"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2013,19 +2074,22 @@ fn e2e_multi_turn_context_loss() {
     let db_path = temp_db_path("e2e_context_loss");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Build context
     let _result1 = rt.block_on(engine.process("I am working on a Python project"));
-    
+
     // Simulate context loss by clearing (using /clear or similar)
     // In this test, we just verify the system handles gracefully
     let result2 = rt.block_on(engine.process("What was I working on?"));
-    
+
     // Verify system handles potential context loss
-    assert!(!result2.predicted_text.is_empty(), "Context loss should be handled gracefully");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Context loss should be handled gracefully"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2035,25 +2099,36 @@ fn e2e_multi_turn_long_conversation() {
     let db_path = temp_db_path("e2e_long_conv");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // GPU-aware conversation sizing: longer when GPU available
     #[cfg(feature = "gpu")]
-    let turn_count = if spse_engine::gpu::is_gpu_available() { 50 } else { 20 };
+    let turn_count = if spse_engine::gpu::is_gpu_available() {
+        50
+    } else {
+        20
+    };
     #[cfg(not(feature = "gpu"))]
     let turn_count = 20;
-    
+
     for i in 0..turn_count {
-        let result = rt.block_on(engine.process(&format!("Query number {} about topic {}", i, i % 5)));
-        assert!(!result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
-                "Long conversation turn {} should complete", i);
+        let result =
+            rt.block_on(engine.process(&format!("Query number {} about topic {}", i, i % 5)));
+        assert!(
+            !result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
+            "Long conversation turn {} should complete",
+            i
+        );
     }
-    
+
     // Final query
     let final_result = rt.block_on(engine.process("Summarize our conversation"));
-    assert!(!final_result.predicted_text.is_empty(), "Long conversation should handle final query");
-    
+    assert!(
+        !final_result.predicted_text.is_empty(),
+        "Long conversation should handle final query"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2063,18 +2138,20 @@ fn e2e_silent_training_ingestion() {
     let db_path = temp_db_path("e2e_silent_training");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Silent training - no output expected
     let training_input = "Training document content for silent ingestion test";
     let result = rt.block_on(engine.process(training_input));
-    
+
     // Training mode should handle silently
     // (In actual implementation, training_mode flag would be set)
-    assert!(!result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
-            "Silent training should complete");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
+        "Silent training should complete"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2084,18 +2161,21 @@ fn e2e_interactive_training_feedback() {
     let db_path = temp_db_path("e2e_interactive_training");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Interactive training
     let _result1 = rt.block_on(engine.process("Learn this: The sky is blue"));
-    
+
     // Query to test learning
     let result2 = rt.block_on(engine.process("What color is the sky?"));
-    
+
     // Verify interactive training
-    assert!(!result2.predicted_text.is_empty(), "Interactive training should respond to queries");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Interactive training should respond to queries"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2105,18 +2185,21 @@ fn e2e_training_interrupted() {
     let db_path = temp_db_path("e2e_training_interrupt");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Start training
     let _train_result = rt.block_on(engine.process("Training content about science"));
-    
+
     // Interrupt with inference query
     let inference_result = rt.block_on(engine.process("What is 2+2?"));
-    
+
     // Verify interruption handled
-    assert!(!inference_result.predicted_text.is_empty(), "Interrupted training should handle inference");
-    
+    assert!(
+        !inference_result.predicted_text.is_empty(),
+        "Interrupted training should handle inference"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2126,17 +2209,19 @@ fn e2e_training_data_corruption() {
     let db_path = temp_db_path("e2e_training_corruption");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Corrupted training data (malformed)
     let corrupted = "!!!@@@###$$$%%%^^^&&&***((()))";
     let result = rt.block_on(engine.process(corrupted));
-    
+
     // Verify corruption handled gracefully
-    assert!(!result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
-            "Corrupted training data should be handled");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
+        "Corrupted training data should be handled"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2146,28 +2231,35 @@ fn e2e_large_corpus_training() {
     let db_path = temp_db_path("e2e_large_corpus");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // GPU-aware corpus sizing: larger when GPU available for better acceleration
     #[cfg(feature = "gpu")]
-    let doc_count = if spse_engine::gpu::is_gpu_available() { 200 } else { 30 };
+    let doc_count = if spse_engine::gpu::is_gpu_available() {
+        200
+    } else {
+        30
+    };
     #[cfg(not(feature = "gpu"))]
     let doc_count = 30;
-    
+
     let start = std::time::Instant::now();
     for i in 0..doc_count {
         let doc = format!("Large corpus document {} with substantial content for training purposes. We need enough text for unit discovery.", i);
         let _ = rt.block_on(engine.process(&doc));
     }
     let duration = start.elapsed();
-    
+
     // Verify large corpus handled
     let (units, core) = engine.memory_counts();
     assert!(units >= 0, "Large corpus should produce valid memory state");
-    
-    println!("Processed {} docs in {:?}, {} units, {} core", doc_count, duration, units, core);
-    
+
+    println!(
+        "Processed {} docs in {:?}, {} units, {} core",
+        doc_count, duration, units, core
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2177,16 +2269,20 @@ fn e2e_graceful_degradation() {
     let db_path = temp_db_path("e2e_graceful_degradation");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Query that may trigger retrieval (which may fail if no sources configured)
     let result = rt.block_on(engine.process("Search for information about quantum computing"));
-    
+
     // Verify graceful degradation - should still produce output
-    assert!(!result.predicted_text.is_empty() || !result.trace.active_regions.is_empty() || result.trace.active_regions.is_empty(),
-            "Should degrade gracefully on retrieval failure");
-    
+    assert!(
+        !result.predicted_text.is_empty()
+            || !result.trace.active_regions.is_empty()
+            || result.trace.active_regions.is_empty(),
+        "Should degrade gracefully on retrieval failure"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2198,27 +2294,33 @@ fn e2e_partial_output() {
     // Configure low limits to simulate resource exhaustion
     engine_config.governance.cold_start_unit_threshold = 50;
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // GPU-aware stress sizing: larger when GPU available
     #[cfg(feature = "gpu")]
-    let stress_count = if spse_engine::gpu::is_gpu_available() { 100 } else { 30 };
+    let stress_count = if spse_engine::gpu::is_gpu_available() {
+        100
+    } else {
+        30
+    };
     #[cfg(not(feature = "gpu"))]
     let stress_count = 30;
-    
+
     for i in 0..stress_count {
         let doc = format!("Resource exhaustion test document {} with content", i);
         let _ = rt.block_on(engine.process(&doc));
     }
-    
+
     // Query under resource pressure
     let result = rt.block_on(engine.process("What can you tell me?"));
-    
+
     // Verify partial output
-    assert!(!result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
-            "Should produce partial output under resource pressure");
-    
+    assert!(
+        !result.predicted_text.is_empty() || result.trace.active_regions.is_empty(),
+        "Should produce partial output under resource pressure"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2228,19 +2330,22 @@ fn e2e_pipeline_failure_recovery() {
     let db_path = temp_db_path("e2e_pipeline_failure");
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // Cause potential failure with extreme input
     let extreme_input: String = (0..1000).map(|_| "x").collect();
     let _result1 = rt.block_on(engine.process(&extreme_input));
-    
+
     // Recovery query
     let result2 = rt.block_on(engine.process("What is the weather?"));
-    
+
     // Verify recovery
-    assert!(!result2.predicted_text.is_empty(), "Pipeline should recover from failure");
-    
+    assert!(
+        !result2.predicted_text.is_empty(),
+        "Pipeline should recover from failure"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }
 
@@ -2251,25 +2356,33 @@ fn e2e_cascading_failures() {
     let mut engine_config = EngineConfig::load_default_file();
     engine_config.governance.cold_start_unit_threshold = 10;
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-    
+
     // GPU-aware failure test sizing: more iterations when GPU available
     #[cfg(feature = "gpu")]
-    let test_count = if spse_engine::gpu::is_gpu_available() { 50 } else { 20 };
+    let test_count = if spse_engine::gpu::is_gpu_available() {
+        50
+    } else {
+        20
+    };
     #[cfg(not(feature = "gpu"))]
     let test_count = 20;
-    
+
     let mut failures = 0;
     for i in 0..test_count {
-        let result = rt.block_on(engine.process(&format!("Cascading test {} with garbage !!!@@@", i)));
+        let result =
+            rt.block_on(engine.process(&format!("Cascading test {} with garbage !!!@@@", i)));
         if result.predicted_text.is_empty() && result.trace.active_regions.is_empty() {
             failures += 1;
         }
     }
-    
+
     // Verify cascading failures handled (not all should fail)
-    assert!(failures < test_count, "Not all queries should fail in cascading scenario");
-    
+    assert!(
+        failures < test_count,
+        "Not all queries should fail in cascading scenario"
+    );
+
     let _ = std::fs::remove_file(&db_path);
 }

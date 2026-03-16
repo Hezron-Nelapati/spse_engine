@@ -12,7 +12,8 @@ impl DedupUtils {
     /// Deduplicate items by identity (Hash + Eq)
     pub fn dedup_by_identity<T: Hash + Eq + Clone>(items: Vec<T>) -> Vec<T> {
         let mut seen = HashSet::new();
-        items.into_iter()
+        items
+            .into_iter()
             .filter(|item| seen.insert(item.clone()))
             .collect()
     }
@@ -30,7 +31,8 @@ impl DedupUtils {
         F: Fn(&T) -> K,
     {
         let mut seen = HashSet::new();
-        items.into_iter()
+        items
+            .into_iter()
             .filter(|item| seen.insert(key_fn(item)))
             .collect()
     }

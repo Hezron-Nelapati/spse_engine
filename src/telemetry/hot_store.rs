@@ -3,7 +3,7 @@
 //! SQLite-based hot store for real-time UI queries of telemetry events.
 //! Provides fast access to recent events for debugging and visualization.
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
@@ -63,8 +63,7 @@ impl HotStore {
             }
         }
 
-        let conn = Connection::open(path)
-            .map_err(|e| format!("Failed to open hot store: {e}"))?;
+        let conn = Connection::open(path).map_err(|e| format!("Failed to open hot store: {e}"))?;
 
         // Enable WAL mode for better concurrency
         conn.execute_batch(
@@ -103,13 +102,15 @@ impl HotStore {
 
     /// Insert an event into the hot store
     pub fn insert(&self, event: &TelemetryEvent) -> Result<i64, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
         let (event_type, layer, session_id, trace_id) = Self::extract_event_metadata(event);
 
-        let event_data = serde_json::to_string(event)
-            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+        let event_data =
+            serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
         conn.execute(
             "INSERT INTO events (event_type, event_data, session_id, trace_id, layer) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -124,52 +125,73 @@ impl HotStore {
     /// Extract metadata from a telemetry event
     fn extract_event_metadata(event: &TelemetryEvent) -> (&'static str, Option<u8>, Uuid, Uuid) {
         match event {
-            TelemetryEvent::Calculation { layer, session_id, trace_id, .. } => {
-                ("calculation", Some(*layer), *session_id, *trace_id)
-            }
-            TelemetryEvent::DbPush { session_id, trace_id, .. } => {
-                ("db_push", Some(4), *session_id, *trace_id)
-            }
-            TelemetryEvent::Retrieval { session_id, trace_id, .. } => {
-                ("retrieval", Some(11), *session_id, *trace_id)
-            }
-            TelemetryEvent::MorphAction { session_id, trace_id, .. } => {
-                ("morph_action", None, *session_id, *trace_id)
-            }
-            TelemetryEvent::IntentLabel { session_id, trace_id, .. } => {
-                ("intent_label", Some(7), *session_id, *trace_id)
-            }
-            TelemetryEvent::ReasoningStep { session_id, trace_id, .. } => {
-                ("reasoning_step", None, *session_id, *trace_id)
-            }
-            TelemetryEvent::LatencySpike { layer, session_id, trace_id, .. } => {
-                ("latency_spike", Some(*layer), *session_id, *trace_id)
-            }
-            TelemetryEvent::MemoryAllocation { session_id, trace_id, .. } => {
-                ("memory_allocation", None, *session_id, *trace_id)
-            }
-            TelemetryEvent::ProcessAnchorProtected { session_id, trace_id, .. } => {
-                ("process_anchor_protected", Some(21), *session_id, *trace_id)
-            }
+            TelemetryEvent::Calculation {
+                layer,
+                session_id,
+                trace_id,
+                ..
+            } => ("calculation", Some(*layer), *session_id, *trace_id),
+            TelemetryEvent::DbPush {
+                session_id,
+                trace_id,
+                ..
+            } => ("db_push", Some(4), *session_id, *trace_id),
+            TelemetryEvent::Retrieval {
+                session_id,
+                trace_id,
+                ..
+            } => ("retrieval", Some(11), *session_id, *trace_id),
+            TelemetryEvent::MorphAction {
+                session_id,
+                trace_id,
+                ..
+            } => ("morph_action", None, *session_id, *trace_id),
+            TelemetryEvent::IntentLabel {
+                session_id,
+                trace_id,
+                ..
+            } => ("intent_label", Some(7), *session_id, *trace_id),
+            TelemetryEvent::ReasoningStep {
+                session_id,
+                trace_id,
+                ..
+            } => ("reasoning_step", None, *session_id, *trace_id),
+            TelemetryEvent::LatencySpike {
+                layer,
+                session_id,
+                trace_id,
+                ..
+            } => ("latency_spike", Some(*layer), *session_id, *trace_id),
+            TelemetryEvent::MemoryAllocation {
+                session_id,
+                trace_id,
+                ..
+            } => ("memory_allocation", None, *session_id, *trace_id),
+            TelemetryEvent::ProcessAnchorProtected {
+                session_id,
+                trace_id,
+                ..
+            } => ("process_anchor_protected", Some(21), *session_id, *trace_id),
         }
     }
 
     /// Query events by trace ID
     pub fn query_by_trace(&self, trace_id: Uuid) -> Result<Vec<TelemetryEvent>, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT event_data FROM events WHERE trace_id = ?1 ORDER BY id"
-        ).map_err(|e| format!("Failed to prepare query: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT event_data FROM events WHERE trace_id = ?1 ORDER BY id")
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
-        let events = stmt.query_map(
-            params![trace_id.to_string()],
-            |row| {
+        let events = stmt
+            .query_map(params![trace_id.to_string()], |row| {
                 let data: String = row.get(0)?;
                 Ok(serde_json::from_str::<TelemetryEvent>(&data))
-            }
-        ).map_err(|e| format!("Failed to query events: {e}"))?;
+            })
+            .map_err(|e| format!("Failed to query events: {e}"))?;
 
         Ok(events
             .filter_map(|r| r.ok())
@@ -179,20 +201,21 @@ impl HotStore {
 
     /// Query events by session ID
     pub fn query_by_session(&self, session_id: Uuid) -> Result<Vec<TelemetryEvent>, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT event_data FROM events WHERE session_id = ?1 ORDER BY id"
-        ).map_err(|e| format!("Failed to prepare query: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT event_data FROM events WHERE session_id = ?1 ORDER BY id")
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
-        let events = stmt.query_map(
-            params![session_id.to_string()],
-            |row| {
+        let events = stmt
+            .query_map(params![session_id.to_string()], |row| {
                 let data: String = row.get(0)?;
                 Ok(serde_json::from_str::<TelemetryEvent>(&data))
-            }
-        ).map_err(|e| format!("Failed to query events: {e}"))?;
+            })
+            .map_err(|e| format!("Failed to query events: {e}"))?;
 
         Ok(events
             .filter_map(|r| r.ok())
@@ -202,20 +225,21 @@ impl HotStore {
 
     /// Query events by layer
     pub fn query_by_layer(&self, layer: u8, limit: usize) -> Result<Vec<TelemetryEvent>, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT event_data FROM events WHERE layer = ?1 ORDER BY id DESC LIMIT ?2"
-        ).map_err(|e| format!("Failed to prepare query: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT event_data FROM events WHERE layer = ?1 ORDER BY id DESC LIMIT ?2")
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
-        let events = stmt.query_map(
-            params![layer, limit as i64],
-            |row| {
+        let events = stmt
+            .query_map(params![layer, limit as i64], |row| {
                 let data: String = row.get(0)?;
                 Ok(serde_json::from_str::<TelemetryEvent>(&data))
-            }
-        ).map_err(|e| format!("Failed to query events: {e}"))?;
+            })
+            .map_err(|e| format!("Failed to query events: {e}"))?;
 
         Ok(events
             .filter_map(|r| r.ok())
@@ -224,29 +248,41 @@ impl HotStore {
     }
 
     /// Query reasoning steps for a trace
-    pub fn query_reasoning_steps(&self, trace_id: Uuid) -> Result<Vec<ReasoningStepRecord>, String> {
-        let conn = self.connection.lock()
+    pub fn query_reasoning_steps(
+        &self,
+        trace_id: Uuid,
+    ) -> Result<Vec<ReasoningStepRecord>, String> {
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
-        let mut stmt = conn.prepare(
-            r#"SELECT event_data FROM events 
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT event_data FROM events 
                WHERE trace_id = ?1 AND event_type = 'reasoning_step' 
-               ORDER BY id"#
-        ).map_err(|e| format!("Failed to prepare query: {e}"))?;
+               ORDER BY id"#,
+            )
+            .map_err(|e| format!("Failed to prepare query: {e}"))?;
 
-        let steps = stmt.query_map(
-            params![trace_id.to_string()],
-            |row| {
+        let steps = stmt
+            .query_map(params![trace_id.to_string()], |row| {
                 let data: String = row.get(0)?;
                 let event: TelemetryEvent = from_json(&data)?;
                 Ok(event)
-            }
-        ).map_err(|e| format!("Failed to query events: {e}"))?;
+            })
+            .map_err(|e| format!("Failed to query events: {e}"))?;
 
         Ok(steps
             .filter_map(|r| r.ok())
             .filter_map(|event| {
-                if let TelemetryEvent::ReasoningStep { step, thought, confidence, .. } = event {
+                if let TelemetryEvent::ReasoningStep {
+                    step,
+                    thought,
+                    confidence,
+                    ..
+                } = event
+                {
                     Some(ReasoningStepRecord {
                         step,
                         thought,
@@ -261,29 +297,31 @@ impl HotStore {
 
     /// Get event count
     pub fn event_count(&self) -> Result<usize, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events",
-            [],
-            |row| row.get(0)
-        ).map_err(|e| format!("Failed to count events: {e}"))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .map_err(|e| format!("Failed to count events: {e}"))?;
 
         Ok(count as usize)
     }
 
     /// Prune old events to maintain max_events limit
     pub fn prune(&self) -> Result<usize, String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
         // Count directly without re-locking
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events",
-            [],
-            |row| row.get::<_, i64>(0)
-        ).map_err(|e| format!("Failed to count events: {e}"))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|e| format!("Failed to count events: {e}"))?;
 
         if count as usize <= self.config.max_events {
             return Ok(0);
@@ -293,15 +331,18 @@ impl HotStore {
 
         conn.execute(
             "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?1)",
-            params![to_delete as i64]
-        ).map_err(|e| format!("Failed to prune events: {e}"))?;
+            params![to_delete as i64],
+        )
+        .map_err(|e| format!("Failed to prune events: {e}"))?;
 
         Ok(to_delete)
     }
 
     /// Clear all events
     pub fn clear(&self) -> Result<(), String> {
-        let conn = self.connection.lock()
+        let conn = self
+            .connection
+            .lock()
             .map_err(|e| format!("Failed to lock connection: {e}"))?;
 
         conn.execute("DELETE FROM events", [])

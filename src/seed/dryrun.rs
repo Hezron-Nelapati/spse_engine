@@ -7,10 +7,15 @@
 //! - Quality gates for validation
 //! - TrainingOptions hints for the pipeline
 
-use crate::seed::dialogue_generator::{DialogueGenerator, DialogueJsonDataset, templates, validate_dialogue_dataset};
-use crate::seed::entity_generator::{EntityGenerator, EntityJsonDataset, validate_entity_dataset};
+use crate::seed::dialogue_generator::{
+    templates, validate_dialogue_dataset, DialogueGenerator, DialogueJsonDataset,
+};
+use crate::seed::entity_generator::{validate_entity_dataset, EntityGenerator, EntityJsonDataset};
 use crate::seed::{CurriculumMetadata, QualityGates, QualityMetrics};
-use crate::types::{IntentKind, MemoryChannel, MemoryType, TrainingExecutionMode, TrainingOptions, TrainingPhaseKind};
+use crate::types::{
+    IntentKind, MemoryChannel, MemoryType, TrainingExecutionMode, TrainingOptions,
+    TrainingPhaseKind,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -44,10 +49,10 @@ pub struct DryRunDatasetConfig {
 impl Default for DryRunDatasetConfig {
     fn default() -> Self {
         Self {
-            intent_dataset_size_mb: 1800.0,  // Target ~2GB total
-            entity_dataset_size_mb: 200.0,   // Larger entity dataset
-            dialogues_per_intent: 100_000,   // 2.4M dialogues total (24 intents * 100K)
-            entity_count: 200_000,           // High-density entity corpus
+            intent_dataset_size_mb: 1800.0, // Target ~2GB total
+            entity_dataset_size_mb: 200.0,  // Larger entity dataset
+            dialogues_per_intent: 100_000,  // 2.4M dialogues total (24 intents * 100K)
+            entity_count: 200_000,          // High-density entity corpus
             output_dir: "datasets/dryrun".to_string(),
             phase_hint: TrainingPhaseKind::DryRun,
             quality_gates: QualityGates {
@@ -102,16 +107,18 @@ pub struct DryRunGenerationResult {
 /// Generate DryRun datasets for pipeline validation
 pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGenerationResult {
     let mut warnings = Vec::new();
-    
+
     // Generate intent/dialogue dataset
     let intent_dataset = generate_intent_dataset(config.dialogues_per_intent);
     let intent_dialogue_count = intent_dataset.dialogues.len();
-    let intents_covered: Vec<String> = intent_dataset.dialogues.iter()
+    let intents_covered: Vec<String> = intent_dataset
+        .dialogues
+        .iter()
         .map(|d| d.intent.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    
+
     // Check all 24 intents are covered
     if intents_covered.len() < 24 {
         warnings.push(format!(
@@ -119,24 +126,24 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
             intents_covered.len()
         ));
     }
-    
+
     // Generate entity dataset
     let entity_dataset = generate_entity_dataset(config.entity_count);
     let entity_count = entity_dataset.entities.len();
-    
+
     // Create output directory
     let output_path = Path::new(&config.output_dir);
     if let Err(e) = std::fs::create_dir_all(output_path) {
         warnings.push(format!("Failed to create output directory: {}", e));
     }
-    
+
     // Write datasets to files (JSONL format for streaming large datasets)
     let intent_path = output_path.join("dryrun_intent_core.jsonl");
     let entity_path = output_path.join("dryrun_entity_seed.jsonl");
-    
+
     let intent_dataset_path = intent_path.display().to_string();
     let entity_dataset_path = entity_path.display().to_string();
-    
+
     // Write intent dataset as JSONL (one dialogue per line)
     match std::fs::File::create(&intent_path) {
         Ok(mut file) => {
@@ -154,7 +161,7 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
         }
         Err(e) => warnings.push(format!("Failed to create intent dataset file: {}", e)),
     }
-    
+
     // Write entity dataset as JSONL (one entity per line)
     match std::fs::File::create(&entity_path) {
         Ok(mut file) => {
@@ -172,11 +179,11 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
         }
         Err(e) => warnings.push(format!("Failed to create entity dataset file: {}", e)),
     }
-    
+
     // Compute quality metrics from actual generated datasets
     let dialogue_metrics = validate_dialogue_dataset(&intent_dataset);
     let entity_metrics = validate_entity_dataset(&entity_dataset);
-    
+
     // Merge metrics: use entity density from entity validator, intent balance from dialogue validator
     let quality_metrics = QualityMetrics {
         entity_density: entity_metrics.entity_density,
@@ -187,15 +194,15 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
         estimated_unit_discovery_efficiency: dialogue_metrics.estimated_unit_discovery_efficiency,
         estimated_semantic_routing_accuracy: entity_metrics.estimated_semantic_routing_accuracy,
     };
-    
+
     // Validate against quality gates
     let gate_errors = quality_metrics.validate_against_gates(&config.quality_gates);
     warnings.extend(gate_errors);
-    
+
     let quality_passed = warnings.is_empty() 
         && intents_covered.len() >= 24  // 24 IntentKind variants
         && entity_count >= 100;
-    
+
     DryRunGenerationResult {
         intent_dataset_path,
         entity_dataset_path,
@@ -213,7 +220,7 @@ pub fn generate_dryrun_datasets(config: &DryRunDatasetConfig) -> DryRunGeneratio
 /// Generate intent/dialogue dataset for DryRun
 fn generate_intent_dataset(dialogues_per_intent: usize) -> DialogueJsonDataset {
     let mut gen = DialogueGenerator::new();
-    
+
     // Generate dialogues for all intent kinds
     let all_intents = [
         IntentKind::Greeting,
@@ -241,21 +248,21 @@ fn generate_intent_dataset(dialogues_per_intent: usize) -> DialogueJsonDataset {
         IntentKind::Brainstorm,
         IntentKind::Unknown,
     ];
-    
+
     for intent in all_intents {
         templates::generate_intent_dialogues(&mut gen, intent, dialogues_per_intent);
     }
-    
+
     gen.build("dryrun_intent_core")
 }
 
 /// Generate entity dataset for DryRun
 fn generate_entity_dataset(entity_count: usize) -> EntityJsonDataset {
     let mut gen = EntityGenerator::new();
-    
+
     // Use bulk generation for high-density coverage
     gen.generate_bulk_entities(entity_count);
-    
+
     gen.build("dryrun_entity_seed")
 }
 
@@ -271,9 +278,9 @@ mod tests {
             output_dir: std::env::temp_dir().to_string_lossy().to_string(),
             ..Default::default()
         };
-        
+
         let result = generate_dryrun_datasets(&config);
-        
+
         assert!(result.intent_dialogue_count >= 10);
         assert!(result.entity_count >= 50);
         // Should cover most intents (may not cover all with small sample)

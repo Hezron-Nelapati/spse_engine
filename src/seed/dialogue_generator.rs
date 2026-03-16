@@ -1,27 +1,30 @@
 //! DialogueJson dataset generator for intent classification training.
 //! Includes combinations of IntentKind, ToneKind, and ResolverMode for comprehensive coverage.
 
-use crate::seed::{DatasetMetadata, QualityMetrics, CurriculumMetadata, QualityGates};
-use crate::types::{IntentKind, ToneKind, ResolverMode, MemoryChannel, MemoryType, TrainingOptions, TrainingPhaseKind, TrainingExecutionMode};
+use crate::seed::{CurriculumMetadata, DatasetMetadata, QualityGates, QualityMetrics};
+use crate::types::{
+    IntentKind, MemoryChannel, MemoryType, ResolverMode, ToneKind, TrainingExecutionMode,
+    TrainingOptions, TrainingPhaseKind,
+};
+use crate::types::{ReasoningStep, ReasoningStepType, ReasoningTrace, ReasoningType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use crate::types::{ReasoningTrace, ReasoningStep, ReasoningType, ReasoningStepType};
 
 /// Hash the logical structure of a reasoning trace
 /// Returns a hash that identifies the pattern, not the specific content
 pub fn hash_trace_structure(trace: &ReasoningTrace) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let mut hasher = DefaultHasher::new();
-    
+
     // Hash the sequence of step types (the logical structure)
     for step in &trace.steps {
         step.step_type.hash(&mut hasher);
         step.dependencies.hash(&mut hasher);
     }
     trace.reasoning_type.hash(&mut hasher);
-    
+
     hasher.finish()
 }
 
@@ -30,7 +33,7 @@ pub fn hash_trace_structure(trace: &ReasoningTrace) -> u64 {
 #[allow(dead_code)]
 pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningTrace {
     let mut abstracted = trace.clone();
-    
+
     for step in &mut abstracted.steps {
         // Replace specific entities with placeholders
         for (i, entity) in entities.iter().enumerate() {
@@ -38,7 +41,7 @@ pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningT
         }
         step.structure_hash = Some(hash_trace_structure(trace));
     }
-    
+
     abstracted.entities = Vec::new(); // No specific entities in abstract
     abstracted
 }
@@ -47,7 +50,7 @@ pub fn abstract_trace(trace: &ReasoningTrace, entities: &[String]) -> ReasoningT
 #[allow(dead_code)]
 pub fn generate_math_reasoning_trace(
     _problem: &str,
-    steps: &[(&str, ReasoningStepType)],  // (content, step_type) pairs
+    steps: &[(&str, ReasoningStepType)], // (content, step_type) pairs
     entities: &[String],
 ) -> ReasoningTrace {
     let reasoning_steps: Vec<ReasoningStep> = steps
@@ -61,7 +64,7 @@ pub fn generate_math_reasoning_trace(
             structure_hash: None,
         })
         .collect();
-    
+
     ReasoningTrace {
         steps: reasoning_steps,
         reasoning_type: ReasoningType::Mathematical,
@@ -255,12 +258,9 @@ impl DialogueGenerator {
         let intent_str = format!("{:?}", intent);
         let counter = self.intent_counters.entry(intent_str.clone()).or_insert(0);
         *counter += 1;
-        
-        let id = format!("dialogue_{}_{:04}", 
-            intent_str.to_lowercase(), 
-            counter
-        );
-        
+
+        let id = format!("dialogue_{}_{:04}", intent_str.to_lowercase(), counter);
+
         let dialogue_turns: Vec<DialogueTurn> = turns
             .into_iter()
             .map(|(role, content, trace)| {
@@ -281,10 +281,13 @@ impl DialogueGenerator {
                 }
             })
             .collect();
-        
+
         // Track intent distribution
-        *self.intent_distribution.entry(intent_str.clone()).or_insert(0) += 1;
-        
+        *self
+            .intent_distribution
+            .entry(intent_str.clone())
+            .or_insert(0) += 1;
+
         // Build training-aligned curriculum metadata
         let curriculum = CurriculumMetadata {
             curriculum_score: Self::compute_curriculum_score(intent, &complexity),
@@ -294,7 +297,7 @@ impl DialogueGenerator {
             suggested_batch_size: 500,
             max_chunk_chars: 8000,
         };
-        
+
         // Quality gates based on complexity
         let quality_gates = QualityGates {
             min_unit_discovery_efficiency: Some(match complexity {
@@ -309,20 +312,23 @@ impl DialogueGenerator {
             }),
             min_corroboration_count: default_corroboration_threshold(),
         };
-        
+
         // Training options based on intent type
         let training_options = TrainingOptions {
             consolidate_immediately: true,
             max_memory_delta_mb: 50.0,
             progress_interval_sec: 10,
             tag_intent: true,
-            merge_to_core: matches!(intent, IntentKind::Question | IntentKind::Explain | IntentKind::Verify),
+            merge_to_core: matches!(
+                intent,
+                IntentKind::Question | IntentKind::Explain | IntentKind::Verify
+            ),
             bypass_retrieval_gate: true,
             bypass_generation: true,
             daily_growth_limit_mb: Some(100.0),
             execution_mode: TrainingExecutionMode::Development,
         };
-        
+
         Dialogue {
             id,
             intent: intent_str,
@@ -343,7 +349,7 @@ impl DialogueGenerator {
             },
         }
     }
-    
+
     /// Compute curriculum score for training ordering (higher = earlier)
     fn compute_curriculum_score(intent: IntentKind, complexity: &str) -> i32 {
         let base_score = match intent {
@@ -362,7 +368,7 @@ impl DialogueGenerator {
             // Other intents
             _ => 80,
         };
-        
+
         // Adjust by complexity (simpler examples earlier)
         let complexity_adjustment = match complexity {
             "simple" => 5,
@@ -371,7 +377,7 @@ impl DialogueGenerator {
             "highly_complex" | "expert" => -10,
             _ => 0,
         };
-        
+
         base_score + complexity_adjustment
     }
 
@@ -388,7 +394,7 @@ impl DialogueGenerator {
         let (tone, resolver) = Self::infer_tone_resolver(intent);
         let channels = Self::infer_memory_channels(intent);
         let levels = vec!["Word".to_string(), "Phrase".to_string()];
-        
+
         self.create_dialogue(
             intent,
             Some(tone),
@@ -410,13 +416,15 @@ impl DialogueGenerator {
                 (ToneKind::Casual, ResolverMode::Balanced)
             }
             // Factual/informational - neutral/professional, deterministic
-            IntentKind::Question | IntentKind::Verify | IntentKind::Extract | IntentKind::Classify => {
-                (ToneKind::NeutralProfessional, ResolverMode::Deterministic)
-            }
+            IntentKind::Question
+            | IntentKind::Verify
+            | IntentKind::Extract
+            | IntentKind::Classify => (ToneKind::NeutralProfessional, ResolverMode::Deterministic),
             // Explanatory - technical tone, balanced
-            IntentKind::Explain | IntentKind::Summarize | IntentKind::Compare | IntentKind::Analyze => {
-                (ToneKind::Technical, ResolverMode::Balanced)
-            }
+            IntentKind::Explain
+            | IntentKind::Summarize
+            | IntentKind::Compare
+            | IntentKind::Analyze => (ToneKind::Technical, ResolverMode::Balanced),
             // Action-oriented - direct tone, deterministic
             IntentKind::Act | IntentKind::Debug | IntentKind::Plan | IntentKind::Recommend => {
                 (ToneKind::Direct, ResolverMode::Deterministic)
@@ -426,17 +434,15 @@ impl DialogueGenerator {
                 (ToneKind::Empathetic, ResolverMode::Exploratory)
             }
             // Assistance - neutral, balanced
-            IntentKind::Help | IntentKind::Clarify | IntentKind::Rewrite | IntentKind::Continue | IntentKind::Forget => {
-                (ToneKind::NeutralProfessional, ResolverMode::Balanced)
-            }
+            IntentKind::Help
+            | IntentKind::Clarify
+            | IntentKind::Rewrite
+            | IntentKind::Continue
+            | IntentKind::Forget => (ToneKind::NeutralProfessional, ResolverMode::Balanced),
             // Translation - formal, deterministic
-            IntentKind::Translate => {
-                (ToneKind::Formal, ResolverMode::Deterministic)
-            }
+            IntentKind::Translate => (ToneKind::Formal, ResolverMode::Deterministic),
             // Unknown - neutral, balanced
-            IntentKind::Unknown => {
-                (ToneKind::NeutralProfessional, ResolverMode::Balanced)
-            }
+            IntentKind::Unknown => (ToneKind::NeutralProfessional, ResolverMode::Balanced),
         }
     }
 
@@ -449,7 +455,7 @@ impl DialogueGenerator {
             IntentKind::Plan | IntentKind::Analyze | IntentKind::Debug => {
                 vec![MemoryChannel::Main, MemoryChannel::Reasoning]
             }
-            _ => vec![MemoryChannel::Main]
+            _ => vec![MemoryChannel::Main],
         }
     }
 
@@ -463,10 +469,10 @@ impl DialogueGenerator {
     /// Build the final dataset
     pub fn build(self, dataset_id: &str) -> DialogueJsonDataset {
         let unit_count_estimate = self.dialogues.len() as u64;
-        
+
         // Calculate density score
         let density = 0.85; // Target density for DialogueJson
-        
+
         DialogueJsonDataset {
             metadata: DatasetMetadata::new(
                 dataset_id,
@@ -491,15 +497,35 @@ impl DialogueGenerator {
     /// Check if all intents are covered
     pub fn all_intents_covered(&self) -> bool {
         let all_intents = [
-            "Greeting", "Gratitude", "Farewell", "Help", "Clarify", "Rewrite", "Verify",
-            "Continue", "Forget", "Question", "Summarize", "Explain", "Compare", "Extract",
-            "Analyze", "Plan", "Act", "Recommend", "Classify", "Translate", "Debug",
-            "Critique", "Brainstorm", "Unknown"
+            "Greeting",
+            "Gratitude",
+            "Farewell",
+            "Help",
+            "Clarify",
+            "Rewrite",
+            "Verify",
+            "Continue",
+            "Forget",
+            "Question",
+            "Summarize",
+            "Explain",
+            "Compare",
+            "Extract",
+            "Analyze",
+            "Plan",
+            "Act",
+            "Recommend",
+            "Classify",
+            "Translate",
+            "Debug",
+            "Critique",
+            "Brainstorm",
+            "Unknown",
         ];
-        
-        all_intents.iter().all(|intent| {
-            self.intent_distribution.contains_key(*intent)
-        })
+
+        all_intents
+            .iter()
+            .all(|intent| self.intent_distribution.contains_key(*intent))
     }
 }
 
@@ -512,10 +538,10 @@ impl Default for DialogueGenerator {
 /// Validate dialogue dataset quality
 pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetrics {
     let dialogues = &dataset.dialogues;
-    
+
     // Entity density not directly applicable - use dialogue density
     let entity_density = dialogues.len() as f32; // dialogues per "unit"
-    
+
     // Calculate unique normalized intents ratio
     let mut intent_set = HashSet::new();
     for dialogue in dialogues {
@@ -526,9 +552,10 @@ pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetric
     } else {
         0.0
     };
-    
+
     // Link coverage - entities referenced
-    let dialogues_with_entities = dialogues.iter()
+    let dialogues_with_entities = dialogues
+        .iter()
         .filter(|d| !d.metadata.entities_referenced.is_empty())
         .count();
     let link_coverage = if !dialogues.is_empty() {
@@ -536,9 +563,10 @@ pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetric
     } else {
         0.0
     };
-    
+
     // Noise ratio - dialogues with very short content
-    let noisy_dialogues = dialogues.iter()
+    let noisy_dialogues = dialogues
+        .iter()
         .filter(|d| d.turns.iter().all(|t| t.content.len() < 10))
         .count();
     let noise_ratio = if !dialogues.is_empty() {
@@ -546,29 +574,31 @@ pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetric
     } else {
         0.0
     };
-    
+
     // Intent balance - distribution evenness
     let mut intent_counts: BTreeMap<String, u64> = BTreeMap::new();
     for dialogue in dialogues {
         *intent_counts.entry(dialogue.intent.clone()).or_insert(0) += 1;
     }
-    
+
     let avg_count = dialogues.len() as f32 / intent_counts.len().max(1) as f32;
-    let variance: f32 = intent_counts.values()
+    let variance: f32 = intent_counts
+        .values()
         .map(|&count| {
             let diff = count as f32 - avg_count;
             diff * diff
         })
-        .sum::<f32>() / intent_counts.len().max(1) as f32;
+        .sum::<f32>()
+        / intent_counts.len().max(1) as f32;
     let std_dev = variance.sqrt();
-    
+
     // Balance score: lower std_dev relative to mean = better balance
     let intent_balance = if avg_count > 0.0 {
         1.0 - (std_dev / avg_count).min(1.0)
     } else {
         0.0
     };
-    
+
     QualityMetrics {
         entity_density,
         unique_ratio,
@@ -583,7 +613,7 @@ pub fn validate_dialogue_dataset(dataset: &DialogueJsonDataset) -> QualityMetric
 /// Template dialogues for each intent kind
 pub mod templates {
     use super::*;
-    
+
     /// Generate template dialogues for a given intent with all tone/resolver combinations
     pub fn generate_intent_dialogues(
         gen: &mut DialogueGenerator,
@@ -593,17 +623,17 @@ pub mod templates {
         let templates = get_templates_for_intent(intent);
         let tones = get_tones_for_intent(intent);
         let resolvers = get_resolvers_for_intent(intent);
-        
+
         // Generate dialogues covering all tone/resolver combinations
         let mut combo_index = 0;
         for i in 0..count {
             let template = &templates[i % templates.len()];
-            
+
             // Cycle through tone/resolver combinations for this intent
             let tone = tones[combo_index % tones.len()];
             let resolver = resolvers[combo_index % resolvers.len()];
             combo_index += 1;
-            
+
             let dialogue = gen.create_dialogue(
                 intent,
                 Some(tone),
@@ -618,26 +648,44 @@ pub mod templates {
             gen.add_dialogue(dialogue);
         }
     }
-    
+
     /// Get appropriate tones for an intent (allows variation for training)
     pub fn get_tones_for_intent(intent: IntentKind) -> Vec<ToneKind> {
         match intent {
             IntentKind::Greeting | IntentKind::Gratitude | IntentKind::Farewell => {
-                vec![ToneKind::Casual, ToneKind::NeutralProfessional, ToneKind::Formal]
+                vec![
+                    ToneKind::Casual,
+                    ToneKind::NeutralProfessional,
+                    ToneKind::Formal,
+                ]
             }
-            IntentKind::Question | IntentKind::Verify | IntentKind::Extract | IntentKind::Classify => {
+            IntentKind::Question
+            | IntentKind::Verify
+            | IntentKind::Extract
+            | IntentKind::Classify => {
                 vec![ToneKind::NeutralProfessional, ToneKind::Technical]
             }
-            IntentKind::Explain | IntentKind::Summarize | IntentKind::Compare | IntentKind::Analyze => {
+            IntentKind::Explain
+            | IntentKind::Summarize
+            | IntentKind::Compare
+            | IntentKind::Analyze => {
                 vec![ToneKind::Technical, ToneKind::NeutralProfessional]
             }
             IntentKind::Act | IntentKind::Debug | IntentKind::Plan | IntentKind::Recommend => {
                 vec![ToneKind::Direct, ToneKind::Technical]
             }
             IntentKind::Brainstorm | IntentKind::Critique => {
-                vec![ToneKind::Empathetic, ToneKind::Casual, ToneKind::NeutralProfessional]
+                vec![
+                    ToneKind::Empathetic,
+                    ToneKind::Casual,
+                    ToneKind::NeutralProfessional,
+                ]
             }
-            IntentKind::Help | IntentKind::Clarify | IntentKind::Rewrite | IntentKind::Continue | IntentKind::Forget => {
+            IntentKind::Help
+            | IntentKind::Clarify
+            | IntentKind::Rewrite
+            | IntentKind::Continue
+            | IntentKind::Forget => {
                 vec![ToneKind::NeutralProfessional, ToneKind::Empathetic]
             }
             IntentKind::Translate => {
@@ -648,11 +696,17 @@ pub mod templates {
             }
         }
     }
-    
+
     /// Get appropriate resolver modes for an intent
     pub fn get_resolvers_for_intent(intent: IntentKind) -> Vec<ResolverMode> {
         match intent {
-            IntentKind::Question | IntentKind::Verify | IntentKind::Extract | IntentKind::Classify | IntentKind::Act | IntentKind::Debug | IntentKind::Translate => {
+            IntentKind::Question
+            | IntentKind::Verify
+            | IntentKind::Extract
+            | IntentKind::Classify
+            | IntentKind::Act
+            | IntentKind::Debug
+            | IntentKind::Translate => {
                 vec![ResolverMode::Deterministic]
             }
             IntentKind::Brainstorm | IntentKind::Critique => {
@@ -663,7 +717,7 @@ pub mod templates {
             }
         }
     }
-    
+
     pub struct DialogueTemplate {
         pub turns: Vec<(String, String)>,
         pub domain: &'static str,
@@ -672,7 +726,7 @@ pub mod templates {
         pub memory_channels: Vec<MemoryChannel>,
         pub unit_levels: Vec<String>,
     }
-    
+
     impl Default for DialogueTemplate {
         fn default() -> Self {
             Self {
@@ -685,20 +739,20 @@ pub mod templates {
             }
         }
     }
-    
+
     pub fn get_templates_for_intent(intent: IntentKind) -> Vec<DialogueTemplate> {
         // Base templates plus programmatically generated variations
         let mut templates = base_templates_for_intent(intent);
-        
+
         // Add domain-specific variations for high-density coverage
         templates.extend(domain_variations_for_intent(intent));
-        
+
         // Add complexity variations (multi-turn dialogues)
         templates.extend(complexity_variations_for_intent(intent));
-        
+
         templates
     }
-    
+
     /// Base templates for each intent
     fn base_templates_for_intent(intent: IntentKind) -> Vec<DialogueTemplate> {
         match intent {
@@ -993,7 +1047,7 @@ pub mod templates {
             ],
         }
     }
-    
+
     /// Domain-specific variations for high-density coverage
     fn domain_variations_for_intent(intent: IntentKind) -> Vec<DialogueTemplate> {
         let domains = [
@@ -1018,38 +1072,60 @@ pub mod templates {
             ("sustainability", "environmental impact, resource efficiency, carbon footprint, green initiatives, ESG reporting"),
             ("strategy", "competitive positioning, market expansion, partnership development, long-term planning, scenario analysis"),
         ];
-        
+
         let entity_types = [
-            "workflow", "process", "system", "document", "report",
-            "analysis", "proposal", "review", "assessment", "plan",
+            "workflow",
+            "process",
+            "system",
+            "document",
+            "report",
+            "analysis",
+            "proposal",
+            "review",
+            "assessment",
+            "plan",
         ];
-        
-        domains.iter().flat_map(|(domain, context)| {
-            (0..15).map(|i| {
-                let entity = entity_types[i % entity_types.len()];
-                let complexity = match i % 5 {
-                    0 => "complex",
-                    1 => "highly_complex",
-                    2 => "moderate",
-                    3 => "expert",
-                    _ => "advanced",
-                };
-                DialogueTemplate {
-                    turns: generate_domain_turns(intent, domain, context, entity),
-                    domain,
-                    complexity,
-                    entities: vec![entity.to_string()],
-                    memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
-                    unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string()],
-                }
-            }).collect::<Vec<_>>()
-        }).collect()
+
+        domains
+            .iter()
+            .flat_map(|(domain, context)| {
+                (0..15)
+                    .map(|i| {
+                        let entity = entity_types[i % entity_types.len()];
+                        let complexity = match i % 5 {
+                            0 => "complex",
+                            1 => "highly_complex",
+                            2 => "moderate",
+                            3 => "expert",
+                            _ => "advanced",
+                        };
+                        DialogueTemplate {
+                            turns: generate_domain_turns(intent, domain, context, entity),
+                            domain,
+                            complexity,
+                            entities: vec![entity.to_string()],
+                            memory_channels: vec![
+                                MemoryChannel::Main,
+                                MemoryChannel::Intent,
+                                MemoryChannel::Reasoning,
+                            ],
+                            unit_levels: vec![
+                                "Word".to_string(),
+                                "Phrase".to_string(),
+                                "Sentence".to_string(),
+                                "Paragraph".to_string(),
+                            ],
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
-    
+
     /// Multi-turn complexity variations with reasoning chains
     fn complexity_variations_for_intent(intent: IntentKind) -> Vec<DialogueTemplate> {
         let mut templates = Vec::new();
-        
+
         // Generate 3-turn dialogues
         for i in 0..5 {
             templates.push(DialogueTemplate {
@@ -1061,7 +1137,7 @@ pub mod templates {
                 unit_levels: vec!["Word".to_string(), "Phrase".to_string()],
             });
         }
-        
+
         // Generate 5-turn dialogues with reasoning
         for i in 0..4 {
             templates.push(DialogueTemplate {
@@ -1069,11 +1145,19 @@ pub mod templates {
                 domain: "general",
                 complexity: "complex",
                 entities: vec![],
-                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
-                unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string()],
+                memory_channels: vec![
+                    MemoryChannel::Main,
+                    MemoryChannel::Intent,
+                    MemoryChannel::Reasoning,
+                ],
+                unit_levels: vec![
+                    "Word".to_string(),
+                    "Phrase".to_string(),
+                    "Sentence".to_string(),
+                ],
             });
         }
-        
+
         // Generate 7-turn dialogues with deep reasoning
         for i in 0..3 {
             templates.push(DialogueTemplate {
@@ -1081,11 +1165,20 @@ pub mod templates {
                 domain: "expert",
                 complexity: "highly_complex",
                 entities: vec![],
-                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
-                unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string()],
+                memory_channels: vec![
+                    MemoryChannel::Main,
+                    MemoryChannel::Intent,
+                    MemoryChannel::Reasoning,
+                ],
+                unit_levels: vec![
+                    "Word".to_string(),
+                    "Phrase".to_string(),
+                    "Sentence".to_string(),
+                    "Paragraph".to_string(),
+                ],
             });
         }
-        
+
         // Generate 10-turn dialogues for expert scenarios
         for i in 0..2 {
             templates.push(DialogueTemplate {
@@ -1093,51 +1186,92 @@ pub mod templates {
                 domain: "expert",
                 complexity: "expert",
                 entities: vec![],
-                memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent, MemoryChannel::Reasoning],
-                unit_levels: vec!["Word".to_string(), "Phrase".to_string(), "Sentence".to_string(), "Paragraph".to_string(), "Document".to_string()],
+                memory_channels: vec![
+                    MemoryChannel::Main,
+                    MemoryChannel::Intent,
+                    MemoryChannel::Reasoning,
+                ],
+                unit_levels: vec![
+                    "Word".to_string(),
+                    "Phrase".to_string(),
+                    "Sentence".to_string(),
+                    "Paragraph".to_string(),
+                    "Document".to_string(),
+                ],
             });
         }
-        
+
         templates
     }
-    
-    fn generate_domain_turns(intent: IntentKind, domain: &str, context: &str, entity: &str) -> Vec<(String, String)> {
+
+    fn generate_domain_turns(
+        intent: IntentKind,
+        domain: &str,
+        context: &str,
+        entity: &str,
+    ) -> Vec<(String, String)> {
         let user_prompt = match intent {
-            IntentKind::Question => format!("What are the key {} considerations for {} in {}?", entity, context, domain),
+            IntentKind::Question => format!(
+                "What are the key {} considerations for {} in {}?",
+                entity, context, domain
+            ),
             IntentKind::Explain => format!("Explain how {} impacts {} operations.", entity, domain),
-            IntentKind::Analyze => format!("Analyze the {} trends in {} regarding {}.", entity, domain, context),
+            IntentKind::Analyze => format!(
+                "Analyze the {} trends in {} regarding {}.",
+                entity, domain, context
+            ),
             IntentKind::Summarize => format!("Summarize the {} findings for {}.", entity, domain),
             IntentKind::Plan => format!("Create a {} plan for {} implementation.", entity, domain),
             IntentKind::Help => format!("I need help with {} in the {} domain.", entity, domain),
-            IntentKind::Compare => format!("Compare different {} approaches in {}.", entity, domain),
-            IntentKind::Recommend => format!("Recommend best practices for {} in {}.", entity, domain),
+            IntentKind::Compare => {
+                format!("Compare different {} approaches in {}.", entity, domain)
+            }
+            IntentKind::Recommend => {
+                format!("Recommend best practices for {} in {}.", entity, domain)
+            }
             IntentKind::Debug => format!("Debug the {} issue in our {} system.", entity, domain),
             IntentKind::Verify => format!("Verify {} compliance in {} processes.", entity, domain),
             IntentKind::Classify => format!("Classify {} items by priority in {}.", entity, domain),
             IntentKind::Extract => format!("Extract key {} data from {} records.", entity, domain),
             IntentKind::Brainstorm => format!("Brainstorm {} improvements for {}.", entity, domain),
             IntentKind::Critique => format!("Critique our {} strategy in {}.", entity, domain),
-            IntentKind::Translate => format!("Translate {} requirements to {} specifications.", entity, domain),
+            IntentKind::Translate => format!(
+                "Translate {} requirements to {} specifications.",
+                entity, domain
+            ),
             IntentKind::Act => format!("Execute {} action for {} workflow.", entity, domain),
             IntentKind::Clarify => format!("Clarify the {} requirements for {}.", entity, domain),
             IntentKind::Rewrite => format!("Rewrite the {} documentation for {}.", entity, domain),
             IntentKind::Continue => format!("Continue with {} processing in {}.", entity, domain),
-            IntentKind::Forget => format!("Clear {} context and restart {} session.", entity, domain),
-            IntentKind::Greeting => format!("Hello, I'm working in {} and need help with {}.", domain, context),
-            IntentKind::Gratitude => format!("Thank you for the {} assistance with {}.", entity, domain),
-            IntentKind::Farewell => format!("Goodbye, thanks for the {} help in {}.", entity, domain),
+            IntentKind::Forget => {
+                format!("Clear {} context and restart {} session.", entity, domain)
+            }
+            IntentKind::Greeting => format!(
+                "Hello, I'm working in {} and need help with {}.",
+                domain, context
+            ),
+            IntentKind::Gratitude => {
+                format!("Thank you for the {} assistance with {}.", entity, domain)
+            }
+            IntentKind::Farewell => {
+                format!("Goodbye, thanks for the {} help in {}.", entity, domain)
+            }
             IntentKind::Unknown => format!("Unclear request about {} in {}.", entity, domain),
         };
-        
+
         let assistant_response = generate_assistant_response(intent, domain, entity, context);
-        
+
         vec![
             ("user".to_string(), user_prompt),
             ("assistant".to_string(), assistant_response),
         ]
     }
-    
-    fn generate_multi_turn_dialogue(intent: IntentKind, turns: usize, variant: usize) -> Vec<(String, String)> {
+
+    fn generate_multi_turn_dialogue(
+        intent: IntentKind,
+        turns: usize,
+        variant: usize,
+    ) -> Vec<(String, String)> {
         let mut dialogue = Vec::new();
         let topics = [
             "workflow optimization and efficiency gains",
@@ -1157,27 +1291,31 @@ pub mod templates {
             "change management and adoption",
         ];
         let topic = topics[variant % topics.len()];
-        
+
         for i in 0..turns {
             let turn_num = i / 2;
             if i % 2 == 0 {
                 dialogue.push((
                     "user".to_string(),
-                    format!("{} turn {} about {}: {}", 
-                        intent_as_verb(intent), turn_num + 1, topic, 
-                        generate_followup_question(intent, turn_num, variant))
+                    format!(
+                        "{} turn {} about {}: {}",
+                        intent_as_verb(intent),
+                        turn_num + 1,
+                        topic,
+                        generate_followup_question(intent, turn_num, variant)
+                    ),
                 ));
             } else {
                 dialogue.push((
                     "assistant".to_string(),
-                    generate_reasoning_response(intent, turn_num, topic, variant, turns)
+                    generate_reasoning_response(intent, turn_num, topic, variant, turns),
                 ));
             }
         }
-        
+
         dialogue
     }
-    
+
     fn intent_as_verb(intent: IntentKind) -> &'static str {
         match intent {
             IntentKind::Question => "Ask",
@@ -1206,7 +1344,7 @@ pub mod templates {
             IntentKind::Unknown => "Process",
         }
     }
-    
+
     fn generate_followup_question(_intent: IntentKind, turn: usize, variant: usize) -> String {
         let questions = [
             "What are the initial findings and how do they compare to our baseline?",
@@ -1224,17 +1362,29 @@ pub mod templates {
         ];
         questions[(turn + variant) % questions.len()].to_string()
     }
-    
+
     /// Generate reasoning-rich response with step-by-step analysis
-    fn generate_reasoning_response(_intent: IntentKind, turn: usize, topic: &str, variant: usize, total_turns: usize) -> String {
-        let depth = if total_turns >= 7 { "deep" } else if total_turns >= 5 { "moderate" } else { "basic" };
-        
+    fn generate_reasoning_response(
+        _intent: IntentKind,
+        turn: usize,
+        topic: &str,
+        variant: usize,
+        total_turns: usize,
+    ) -> String {
+        let depth = if total_turns >= 7 {
+            "deep"
+        } else if total_turns >= 5 {
+            "moderate"
+        } else {
+            "basic"
+        };
+
         let reasoning_prefix = match depth {
             "deep" => format!("Let me work through this systematically. First, I'll analyze the core components of {}. Then, I'll evaluate the interdependencies and potential impact areas. Finally, I'll synthesize the findings into actionable recommendations.\n\n", topic),
             "moderate" => format!("Analyzing {} through multiple lenses: operational, strategic, and tactical perspectives.\n\n", topic),
             _ => String::new(),
         };
-        
+
         let responses = [
             format!("{}Based on my analysis of {}, I've identified three key areas: efficiency, accuracy, and scalability. \n\nStep 1: Efficiency analysis reveals that current processes have 15% redundancy. \nStep 2: Accuracy metrics show 98.2% success rate with room for improvement in edge cases. \nStep 3: Scalability assessment indicates capacity for 3x growth without architectural changes. \n\nLet me elaborate on each area with specific recommendations.", reasoning_prefix, topic),
             
@@ -1254,8 +1404,13 @@ pub mod templates {
         ];
         responses[(turn + variant) % responses.len()].clone()
     }
-    
-    fn generate_assistant_response(intent: IntentKind, domain: &str, entity: &str, context: &str) -> String {
+
+    fn generate_assistant_response(
+        intent: IntentKind,
+        domain: &str,
+        entity: &str,
+        context: &str,
+    ) -> String {
         match intent {
             IntentKind::Question => format!("In the {} domain, {} considerations include compliance requirements, stakeholder alignment, and performance metrics. Would you like me to elaborate on any specific aspect?", domain, entity),
             IntentKind::Explain => format!("{} in {} operates through interconnected processes. The key components are: input validation, processing logic, output generation, and feedback loops. Each component has specific requirements and dependencies.", entity, domain),
@@ -1287,11 +1442,15 @@ pub mod templates {
 
 /// Generate bulk multi-turn dialogue data, streaming to a JSONL file as TrainingExamples.
 /// Returns (examples_written, bytes_written).
-pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64, seed: u64) -> (u64, u64) {
+pub fn generate_bulk_dialogues(
+    output_path: &std::path::Path,
+    target_bytes: u64,
+    seed: u64,
+) -> (u64, u64) {
     use crate::seed::bulk_generator::{
-        self, expand_template, human_bytes, pick, pick_idx, pick_str, seeded_rng, topics_for_domain,
-        JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DETAIL_POOLS, DOMAINS,
-        GREETING_VARIATIONS, GRATITUDE_VARIATIONS,
+        self, expand_template, human_bytes, pick, pick_idx, pick_str, seeded_rng,
+        topics_for_domain, JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DETAIL_POOLS, DOMAINS,
+        GRATITUDE_VARIATIONS, GREETING_VARIATIONS,
     };
     use crate::seed::TrainingExample;
     use crate::types::MemoryChannel;
@@ -1302,13 +1461,26 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
     let mut count: u64 = 0;
 
     let all_intents = [
-        IntentKind::Question, IntentKind::Explain, IntentKind::Compare,
-        IntentKind::Analyze, IntentKind::Plan, IntentKind::Debug,
-        IntentKind::Verify, IntentKind::Summarize, IntentKind::Classify,
-        IntentKind::Recommend, IntentKind::Extract, IntentKind::Critique,
-        IntentKind::Brainstorm, IntentKind::Translate, IntentKind::Act,
-        IntentKind::Help, IntentKind::Clarify, IntentKind::Rewrite,
-        IntentKind::Continue, IntentKind::Forget,
+        IntentKind::Question,
+        IntentKind::Explain,
+        IntentKind::Compare,
+        IntentKind::Analyze,
+        IntentKind::Plan,
+        IntentKind::Debug,
+        IntentKind::Verify,
+        IntentKind::Summarize,
+        IntentKind::Classify,
+        IntentKind::Recommend,
+        IntentKind::Extract,
+        IntentKind::Critique,
+        IntentKind::Brainstorm,
+        IntentKind::Translate,
+        IntentKind::Act,
+        IntentKind::Help,
+        IntentKind::Clarify,
+        IntentKind::Rewrite,
+        IntentKind::Continue,
+        IntentKind::Forget,
     ];
 
     let followup_templates = [
@@ -1383,7 +1555,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
 
         // First turn
         let q_template = pick(&mut rng, bulk_generator::QUESTION_TEMPLATES);
-        let first_question = q_template.0.replace("{}", &format!("{} in {}", topic, domain));
+        let first_question = q_template
+            .0
+            .replace("{}", &format!("{} in {}", topic, domain));
         let tmpl_prefix = pick_str(&mut rng, ANSWER_PREFIXES);
         let prefix = expand_template(&mut rng, tmpl_prefix, domain, topic);
         let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
@@ -1394,7 +1568,12 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
         let example = TrainingExample {
             question: first_question.clone(),
             answer: first_answer.clone(),
-            context: Some(format!("dialogue:turn_1:{}:{}:{}", domain, format!("{:?}", intent), format!("{:?}", tone))),
+            context: Some(format!(
+                "dialogue:turn_1:{}:{}:{}",
+                domain,
+                format!("{:?}", intent),
+                format!("{:?}", tone)
+            )),
             reasoning: None,
             intent: Some(format!("{:?}", intent)),
             entities: vec![topic.to_string(), domain.to_string()],
@@ -1407,7 +1586,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
             quality_gates: Default::default(),
             training_options: Default::default(),
         };
-        writer.write_example(&example).expect("write dialogue turn 1");
+        writer
+            .write_example(&example)
+            .expect("write dialogue turn 1");
         count += 1;
 
         // Follow-up turns
@@ -1416,7 +1597,8 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
             let detail = pick_str(&mut rng, DETAIL_POOLS);
             let followup_q = format!(
                 "Regarding {} in {}: {}",
-                topic, domain,
+                topic,
+                domain,
                 pick_str(&mut rng, &followup_templates).replacen("{}", detail, 1)
             );
 
@@ -1424,12 +1606,21 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
                 .replacen("{}", topic, 1)
                 .replace("{detail}", detail);
 
-            let followup_intent = if rng.gen_bool(0.3) { IntentKind::Clarify } else { *intent };
+            let followup_intent = if rng.gen_bool(0.3) {
+                IntentKind::Clarify
+            } else {
+                *intent
+            };
 
             let example = TrainingExample {
                 question: followup_q.clone(),
                 answer: continuation.clone(),
-                context: Some(format!("dialogue:turn_{}:{}:{}", turn_num, domain, format!("{:?}", followup_intent))),
+                context: Some(format!(
+                    "dialogue:turn_{}:{}:{}",
+                    turn_num,
+                    domain,
+                    format!("{:?}", followup_intent)
+                )),
                 reasoning: None,
                 intent: Some(format!("{:?}", followup_intent)),
                 entities: vec![topic.to_string(), domain.to_string()],
@@ -1442,13 +1633,19 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
                 quality_gates: Default::default(),
                 training_options: Default::default(),
             };
-            writer.write_example(&example).expect("write dialogue followup");
+            writer
+                .write_example(&example)
+                .expect("write dialogue followup");
             count += 1;
             _prev_answer = continuation;
         }
 
         if count % 100_000 == 0 {
-            eprintln!("  dialogues: {} examples, {}", count, human_bytes(writer.bytes_written()));
+            eprintln!(
+                "  dialogues: {} examples, {}",
+                count,
+                human_bytes(writer.bytes_written())
+            );
         }
     }
 
@@ -1504,7 +1701,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
         // Greeting → knowledge question → gratitude triplet
         let (gq, ga) = pick(&mut rng, GREETING_VARIATIONS);
         let q_template = pick(&mut rng, bulk_generator::QUESTION_TEMPLATES);
-        let question = q_template.0.replace("{}", &format!("{} in {}", topic, domain));
+        let question = q_template
+            .0
+            .replace("{}", &format!("{} in {}", topic, domain));
         let tmpl_prefix = pick_str(&mut rng, ANSWER_PREFIXES);
         let prefix = expand_template(&mut rng, tmpl_prefix, domain, topic);
         let tmpl_body = pick_str(&mut rng, ANSWER_BODIES);
@@ -1519,7 +1718,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
             .with_entities(vec![topic.to_string(), domain.to_string()])
             .with_context(&format!("dialogue:social:greeting:{}", domain))
             .with_curriculum_score(130);
-        writer.write_example(&example).expect("write social greeting");
+        writer
+            .write_example(&example)
+            .expect("write social greeting");
         count += 1;
 
         // Write the knowledge question
@@ -1528,7 +1729,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
             .with_entities(vec![topic.to_string(), domain.to_string()])
             .with_context(&format!("dialogue:social:knowledge:{}", domain))
             .with_curriculum_score(100);
-        writer.write_example(&example).expect("write social question");
+        writer
+            .write_example(&example)
+            .expect("write social question");
         count += 1;
 
         // Write gratitude with summary
@@ -1540,7 +1743,9 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
             .with_entities(vec![topic.to_string(), domain.to_string()])
             .with_context(&format!("dialogue:social:gratitude:{}", domain))
             .with_curriculum_score(130);
-        writer.write_example(&example).expect("write social gratitude");
+        writer
+            .write_example(&example)
+            .expect("write social gratitude");
         count += 1;
     }
 
@@ -1557,17 +1762,30 @@ pub fn generate_bulk_dialogues(output_path: &std::path::Path, target_bytes: u64,
 
         if rng.gen_bool(0.6) {
             // Remember pattern
-            let question = format!("Remember this: the {} approach to {} in {} uses {} and {}.", domain, topic, domain, detail, detail_b);
-            let answer = format!("Noted. I'll remember that the {} approach to {} uses {} and {}. For context: {}", domain, topic, detail, detail_b, body);
+            let question = format!(
+                "Remember this: the {} approach to {} in {} uses {} and {}.",
+                domain, topic, domain, detail, detail_b
+            );
+            let answer = format!(
+                "Noted. I'll remember that the {} approach to {} uses {} and {}. For context: {}",
+                domain, topic, detail, detail_b, body
+            );
             let example = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Act)
-                .with_entities(vec![topic.to_string(), detail.to_string(), domain.to_string()])
+                .with_entities(vec![
+                    topic.to_string(),
+                    detail.to_string(),
+                    domain.to_string(),
+                ])
                 .with_context(&format!("dialogue:remember:{}", domain))
                 .with_curriculum_score(110);
             writer.write_example(&example).expect("write remember");
         } else {
             // Forget pattern
-            let question = format!("Forget what I said about {} and {} in {}.", topic, detail, domain);
+            let question = format!(
+                "Forget what I said about {} and {} in {}.",
+                topic, detail, domain
+            );
             let answer = format!("Done. I've removed the previous information about {} in {}. Previously noted: {} That context has been cleared.", topic, domain, body);
             let example = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Forget)
@@ -1590,18 +1808,21 @@ mod tests {
     #[test]
     fn test_dialogue_generator_creates_dialogues() {
         let mut gen = DialogueGenerator::new();
-        
+
         let d = gen.create_dialogue_simple(
             IntentKind::Question,
             vec![
                 ("user".to_string(), "What is the process?".to_string()),
-                ("assistant".to_string(), "The process involves...".to_string()),
+                (
+                    "assistant".to_string(),
+                    "The process involves...".to_string(),
+                ),
             ],
             "test",
             "simple",
             vec![],
         );
-        
+
         assert_eq!(d.intent, "Question");
         assert_eq!(d.turns.len(), 2);
         assert!(d.expected_tone.is_some());
@@ -1611,14 +1832,17 @@ mod tests {
     #[test]
     fn test_dialogue_with_full_params() {
         let mut gen = DialogueGenerator::new();
-        
+
         let d = gen.create_dialogue(
             IntentKind::Explain,
             Some(ToneKind::Technical),
             Some(ResolverMode::Balanced),
             vec![
                 ("user".to_string(), "Explain the workflow".to_string()),
-                ("assistant".to_string(), "The workflow consists of...".to_string()),
+                (
+                    "assistant".to_string(),
+                    "The workflow consists of...".to_string(),
+                ),
             ],
             "technical",
             "moderate",
@@ -1626,17 +1850,20 @@ mod tests {
             vec![MemoryChannel::Main, MemoryChannel::Intent],
             vec!["Word".to_string(), "Phrase".to_string()],
         );
-        
+
         assert_eq!(d.intent, "Explain");
         assert_eq!(d.expected_tone, Some("Technical".to_string()));
         assert_eq!(d.resolver_mode, Some("Balanced".to_string()));
-        assert_eq!(d.metadata.memory_channels, vec![MemoryChannel::Main, MemoryChannel::Intent]);
+        assert_eq!(
+            d.metadata.memory_channels,
+            vec![MemoryChannel::Main, MemoryChannel::Intent]
+        );
     }
 
     #[test]
     fn test_validate_dialogue_dataset() {
         let mut gen = DialogueGenerator::new();
-        
+
         // Generate dialogues for multiple intents
         for intent in [IntentKind::Question, IntentKind::Explain, IntentKind::Help].iter() {
             for _ in 0..10 {
@@ -1644,7 +1871,10 @@ mod tests {
                     *intent,
                     vec![
                         ("user".to_string(), "Test question".to_string()),
-                        ("assistant".to_string(), "Test answer with sufficient length".to_string()),
+                        (
+                            "assistant".to_string(),
+                            "Test answer with sufficient length".to_string(),
+                        ),
                     ],
                     "test",
                     "simple",
@@ -1653,10 +1883,10 @@ mod tests {
                 gen.add_dialogue(d);
             }
         }
-        
+
         let dataset = gen.build("test_dialogues");
         let metrics = validate_dialogue_dataset(&dataset);
-        
+
         assert!(metrics.noise_ratio <= 0.05);
     }
 
@@ -1680,16 +1910,32 @@ mod tests {
     #[test]
     fn test_all_intents_have_templates() {
         let all_intents = [
-            IntentKind::Greeting, IntentKind::Gratitude, IntentKind::Farewell,
-            IntentKind::Help, IntentKind::Clarify, IntentKind::Rewrite,
-            IntentKind::Verify, IntentKind::Continue, IntentKind::Forget,
-            IntentKind::Question, IntentKind::Summarize, IntentKind::Explain,
-            IntentKind::Compare, IntentKind::Extract, IntentKind::Analyze,
-            IntentKind::Plan, IntentKind::Act, IntentKind::Recommend,
-            IntentKind::Classify, IntentKind::Translate, IntentKind::Debug,
-            IntentKind::Critique, IntentKind::Brainstorm, IntentKind::Unknown,
+            IntentKind::Greeting,
+            IntentKind::Gratitude,
+            IntentKind::Farewell,
+            IntentKind::Help,
+            IntentKind::Clarify,
+            IntentKind::Rewrite,
+            IntentKind::Verify,
+            IntentKind::Continue,
+            IntentKind::Forget,
+            IntentKind::Question,
+            IntentKind::Summarize,
+            IntentKind::Explain,
+            IntentKind::Compare,
+            IntentKind::Extract,
+            IntentKind::Analyze,
+            IntentKind::Plan,
+            IntentKind::Act,
+            IntentKind::Recommend,
+            IntentKind::Classify,
+            IntentKind::Translate,
+            IntentKind::Debug,
+            IntentKind::Critique,
+            IntentKind::Brainstorm,
+            IntentKind::Unknown,
         ];
-        
+
         for intent in all_intents {
             let templates = templates::get_templates_for_intent(intent);
             assert!(!templates.is_empty(), "No templates for {:?}", intent);

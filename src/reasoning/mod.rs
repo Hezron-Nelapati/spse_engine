@@ -13,4 +13,4 @@ pub mod search;
 pub use context::ContextManager;
 pub use feedback::FeedbackController;
 pub use merge::EvidenceMerger;
-pub use search::{CandidateScorer, score_candidates_gpu_accelerated, top_unit_ids};
+pub use search::{score_candidates_gpu_accelerated, top_unit_ids, CandidateScorer};

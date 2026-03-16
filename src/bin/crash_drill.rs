@@ -10,23 +10,20 @@
 //!   --crash-point <POINT>  Crash simulation point (default: all)
 //!   --iterations <N>      Number of iterations per crash point (default: 10)
 
-use spse_engine::crash_drill_lib::{
-    CrashPoint, CrashDrillConfig,
-    run_crash_drill,
-};
+use spse_engine::crash_drill_lib::{run_crash_drill, CrashDrillConfig, CrashPoint};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    
+
     let config = parse_args(&args);
-    
+
     println!("=== SPSE Engine Crash Drill ===");
     println!("Crash points: {:?}", config.crash_points);
     println!("Iterations per point: {}", config.iterations);
     println!();
-    
+
     let result = run_crash_drill(&config);
-    
+
     println!();
     println!("=== Crash Drill Results ===");
     println!("Total simulations: {}", result.total_simulations);
@@ -34,12 +31,15 @@ fn main() {
     println!("Failed recoveries: {}", result.failed_recoveries);
     println!("Consistency errors: {}", result.consistency_errors);
     println!();
-    
+
     println!("=== Per-Point Results ===");
     for (point, stats) in &result.per_point_stats {
-        println!("  {:?}: {} passed, {} failed", point, stats.passed, stats.failed);
+        println!(
+            "  {:?}: {} passed, {} failed",
+            point, stats.passed, stats.failed
+        );
     }
-    
+
     if result.passed {
         println!();
         println!("✓ CRASH DRILL PASSED");
@@ -56,7 +56,7 @@ fn main() {
 
 fn parse_args(args: &[String]) -> CrashDrillConfig {
     let mut config = CrashDrillConfig::default();
-    
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -81,7 +81,7 @@ fn parse_args(args: &[String]) -> CrashDrillConfig {
         }
         i += 1;
     }
-    
+
     config
 }
 

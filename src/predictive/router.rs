@@ -64,22 +64,22 @@ impl SemanticRouter {
             .filter(|u| !u.is_process_unit)
             .cloned()
             .collect();
-            
+
         self.grid.rebuild(&content_units);
         let positions = active_units
             .iter()
             .filter(|u| !u.is_process_unit)
             .map(|unit| unit.semantic_position)
             .collect::<Vec<_>>();
-            
+
         let center = if positions.is_empty() {
             [0.5, 0.5, 0.5]
         } else {
             centroid(&positions)
         };
-        
+
         let mut neighbor_ids = self.grid.nearby(center, self.neighbor_radius);
-        
+
         // Use HashSet for O(1) lookup instead of O(n*m) nested iteration
         let active_ids: HashSet<Uuid> = active_units.iter().map(|u| u.id).collect();
         neighbor_ids.retain(|id| !active_ids.contains(id));
@@ -118,7 +118,7 @@ impl SemanticRouter {
                 .filter(|u| !u.is_process_unit)
                 .cloned()
                 .collect();
-                
+
             global.sort_by(|a, b| {
                 b.utility_score
                     .partial_cmp(&a.utility_score)

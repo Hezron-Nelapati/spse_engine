@@ -66,35 +66,252 @@ impl EntityGenerator {
     pub fn new() -> Self {
         Self {
             target_density: 50.0,
-            min_links: 3, // Increased for higher density
+            min_links: 3,                       // Increased for higher density
             definition_length_range: (50, 300), // Longer definitions
             entity_registry: HashMap::new(),
             category_counters: HashMap::new(),
             categories: vec![
-                ("process".to_string(), vec!["workflow".to_string(), "procedure".to_string(), "operation".to_string(), "task".to_string(), "activity".to_string(), "protocol".to_string(), "methodology".to_string(), "pipeline".to_string(), "sequence".to_string(), "cycle".to_string()]),
-                ("concept".to_string(), vec!["idea".to_string(), "principle".to_string(), "theory".to_string(), "framework".to_string(), "model".to_string(), "paradigm".to_string(), "hypothesis".to_string(), "axiom".to_string(), "construct".to_string(), "pattern".to_string()]),
-                ("artifact".to_string(), vec!["document".to_string(), "report".to_string(), "specification".to_string(), "deliverable".to_string(), "output".to_string(), "record".to_string(), "template".to_string(), "manifest".to_string(), "schema".to_string(), "blueprint".to_string()]),
-                ("role".to_string(), vec!["stakeholder".to_string(), "participant".to_string(), "owner".to_string(), "contributor".to_string(), "reviewer".to_string(), "approver".to_string(), "executor".to_string(), "coordinator".to_string(), "facilitator".to_string(), "observer".to_string()]),
-                ("metric".to_string(), vec!["kpi".to_string(), "indicator".to_string(), "measurement".to_string(), "benchmark".to_string(), "target".to_string(), "threshold".to_string(), "baseline".to_string(), "score".to_string(), "ratio".to_string(), "trend".to_string()]),
-                ("tool".to_string(), vec!["application".to_string(), "system".to_string(), "platform".to_string(), "service".to_string(), "utility".to_string(), "framework".to_string(), "engine".to_string(), "interface".to_string(), "dashboard".to_string(), "workbench".to_string()]),
-                ("resource".to_string(), vec!["asset".to_string(), "material".to_string(), "input".to_string(), "component".to_string(), "element".to_string(), "repository".to_string(), "dataset".to_string(), "inventory".to_string(), "catalog".to_string(), "archive".to_string()]),
-                ("event".to_string(), vec!["milestone".to_string(), "checkpoint".to_string(), "trigger".to_string(), "occurrence".to_string(), "incident".to_string(), "signal".to_string(), "notification".to_string(), "alert".to_string(), "deadline".to_string(), "ceremony".to_string()]),
-                ("domain".to_string(), vec!["area".to_string(), "field".to_string(), "discipline".to_string(), "sector".to_string(), "industry".to_string(), "vertical".to_string(), "function".to_string(), "capability".to_string(), "practice".to_string(), "domain".to_string()]),
-                ("policy".to_string(), vec!["rule".to_string(), "guideline".to_string(), "standard".to_string(), "requirement".to_string(), "constraint".to_string(), "regulation".to_string(), "mandate".to_string(), "directive".to_string(), "protocol".to_string(), "compliance".to_string()]),
-                ("method".to_string(), vec!["technique".to_string(), "approach".to_string(), "strategy".to_string(), "practice".to_string(), "methodology".to_string(), "algorithm".to_string(), "procedure".to_string(), "tactic".to_string(), "mechanism".to_string(), "routine".to_string()]),
-                ("attribute".to_string(), vec!["property".to_string(), "characteristic".to_string(), "feature".to_string(), "quality".to_string(), "trait".to_string(), "parameter".to_string(), "dimension".to_string(), "aspect".to_string(), "factor".to_string(), "criterion".to_string()]),
-                ("risk".to_string(), vec!["threat".to_string(), "vulnerability".to_string(), "hazard".to_string(), "exposure".to_string(), "uncertainty".to_string(), "contingency".to_string(), "impact".to_string(), "probability".to_string(), "mitigation".to_string(), "severity".to_string()]),
-                ("decision".to_string(), vec!["choice".to_string(), "selection".to_string(), "judgment".to_string(), "determination".to_string(), "resolution".to_string(), "verdict".to_string(), "conclusion".to_string(), "outcome".to_string(), "action".to_string(), "commitment".to_string()]),
-                ("relationship".to_string(), vec!["connection".to_string(), "association".to_string(), "linkage".to_string(), "dependency".to_string(), "correlation".to_string(), "interaction".to_string(), "coupling".to_string(), "alignment".to_string(), "mapping".to_string(), "binding".to_string()]),
+                (
+                    "process".to_string(),
+                    vec![
+                        "workflow".to_string(),
+                        "procedure".to_string(),
+                        "operation".to_string(),
+                        "task".to_string(),
+                        "activity".to_string(),
+                        "protocol".to_string(),
+                        "methodology".to_string(),
+                        "pipeline".to_string(),
+                        "sequence".to_string(),
+                        "cycle".to_string(),
+                    ],
+                ),
+                (
+                    "concept".to_string(),
+                    vec![
+                        "idea".to_string(),
+                        "principle".to_string(),
+                        "theory".to_string(),
+                        "framework".to_string(),
+                        "model".to_string(),
+                        "paradigm".to_string(),
+                        "hypothesis".to_string(),
+                        "axiom".to_string(),
+                        "construct".to_string(),
+                        "pattern".to_string(),
+                    ],
+                ),
+                (
+                    "artifact".to_string(),
+                    vec![
+                        "document".to_string(),
+                        "report".to_string(),
+                        "specification".to_string(),
+                        "deliverable".to_string(),
+                        "output".to_string(),
+                        "record".to_string(),
+                        "template".to_string(),
+                        "manifest".to_string(),
+                        "schema".to_string(),
+                        "blueprint".to_string(),
+                    ],
+                ),
+                (
+                    "role".to_string(),
+                    vec![
+                        "stakeholder".to_string(),
+                        "participant".to_string(),
+                        "owner".to_string(),
+                        "contributor".to_string(),
+                        "reviewer".to_string(),
+                        "approver".to_string(),
+                        "executor".to_string(),
+                        "coordinator".to_string(),
+                        "facilitator".to_string(),
+                        "observer".to_string(),
+                    ],
+                ),
+                (
+                    "metric".to_string(),
+                    vec![
+                        "kpi".to_string(),
+                        "indicator".to_string(),
+                        "measurement".to_string(),
+                        "benchmark".to_string(),
+                        "target".to_string(),
+                        "threshold".to_string(),
+                        "baseline".to_string(),
+                        "score".to_string(),
+                        "ratio".to_string(),
+                        "trend".to_string(),
+                    ],
+                ),
+                (
+                    "tool".to_string(),
+                    vec![
+                        "application".to_string(),
+                        "system".to_string(),
+                        "platform".to_string(),
+                        "service".to_string(),
+                        "utility".to_string(),
+                        "framework".to_string(),
+                        "engine".to_string(),
+                        "interface".to_string(),
+                        "dashboard".to_string(),
+                        "workbench".to_string(),
+                    ],
+                ),
+                (
+                    "resource".to_string(),
+                    vec![
+                        "asset".to_string(),
+                        "material".to_string(),
+                        "input".to_string(),
+                        "component".to_string(),
+                        "element".to_string(),
+                        "repository".to_string(),
+                        "dataset".to_string(),
+                        "inventory".to_string(),
+                        "catalog".to_string(),
+                        "archive".to_string(),
+                    ],
+                ),
+                (
+                    "event".to_string(),
+                    vec![
+                        "milestone".to_string(),
+                        "checkpoint".to_string(),
+                        "trigger".to_string(),
+                        "occurrence".to_string(),
+                        "incident".to_string(),
+                        "signal".to_string(),
+                        "notification".to_string(),
+                        "alert".to_string(),
+                        "deadline".to_string(),
+                        "ceremony".to_string(),
+                    ],
+                ),
+                (
+                    "domain".to_string(),
+                    vec![
+                        "area".to_string(),
+                        "field".to_string(),
+                        "discipline".to_string(),
+                        "sector".to_string(),
+                        "industry".to_string(),
+                        "vertical".to_string(),
+                        "function".to_string(),
+                        "capability".to_string(),
+                        "practice".to_string(),
+                        "domain".to_string(),
+                    ],
+                ),
+                (
+                    "policy".to_string(),
+                    vec![
+                        "rule".to_string(),
+                        "guideline".to_string(),
+                        "standard".to_string(),
+                        "requirement".to_string(),
+                        "constraint".to_string(),
+                        "regulation".to_string(),
+                        "mandate".to_string(),
+                        "directive".to_string(),
+                        "protocol".to_string(),
+                        "compliance".to_string(),
+                    ],
+                ),
+                (
+                    "method".to_string(),
+                    vec![
+                        "technique".to_string(),
+                        "approach".to_string(),
+                        "strategy".to_string(),
+                        "practice".to_string(),
+                        "methodology".to_string(),
+                        "algorithm".to_string(),
+                        "procedure".to_string(),
+                        "tactic".to_string(),
+                        "mechanism".to_string(),
+                        "routine".to_string(),
+                    ],
+                ),
+                (
+                    "attribute".to_string(),
+                    vec![
+                        "property".to_string(),
+                        "characteristic".to_string(),
+                        "feature".to_string(),
+                        "quality".to_string(),
+                        "trait".to_string(),
+                        "parameter".to_string(),
+                        "dimension".to_string(),
+                        "aspect".to_string(),
+                        "factor".to_string(),
+                        "criterion".to_string(),
+                    ],
+                ),
+                (
+                    "risk".to_string(),
+                    vec![
+                        "threat".to_string(),
+                        "vulnerability".to_string(),
+                        "hazard".to_string(),
+                        "exposure".to_string(),
+                        "uncertainty".to_string(),
+                        "contingency".to_string(),
+                        "impact".to_string(),
+                        "probability".to_string(),
+                        "mitigation".to_string(),
+                        "severity".to_string(),
+                    ],
+                ),
+                (
+                    "decision".to_string(),
+                    vec![
+                        "choice".to_string(),
+                        "selection".to_string(),
+                        "judgment".to_string(),
+                        "determination".to_string(),
+                        "resolution".to_string(),
+                        "verdict".to_string(),
+                        "conclusion".to_string(),
+                        "outcome".to_string(),
+                        "action".to_string(),
+                        "commitment".to_string(),
+                    ],
+                ),
+                (
+                    "relationship".to_string(),
+                    vec![
+                        "connection".to_string(),
+                        "association".to_string(),
+                        "linkage".to_string(),
+                        "dependency".to_string(),
+                        "correlation".to_string(),
+                        "interaction".to_string(),
+                        "coupling".to_string(),
+                        "alignment".to_string(),
+                        "mapping".to_string(),
+                        "binding".to_string(),
+                    ],
+                ),
             ],
         }
     }
 
     /// Generate entity ID for a category
     fn generate_id(&mut self, category: &str) -> String {
-        let counter = self.category_counters.entry(category.to_string()).or_insert(0);
+        let counter = self
+            .category_counters
+            .entry(category.to_string())
+            .or_insert(0);
         *counter += 1;
-        format!("entity_{}__{:03}", category.to_lowercase().replace(' ', "_"), counter)
+        format!(
+            "entity_{}__{:03}",
+            category.to_lowercase().replace(' ', "_"),
+            counter
+        )
     }
 
     /// Create an entity with automatic link generation
@@ -108,10 +325,10 @@ impl EntityGenerator {
     ) -> Entity {
         let id = self.generate_id(category);
         let normalized = name.to_lowercase().trim().to_string();
-        
+
         // Generate links to existing entities
         let links = self.generate_links(&id, self.min_links);
-        
+
         let entity = Entity {
             id: id.clone(),
             name: name.to_string(),
@@ -123,7 +340,7 @@ impl EntityGenerator {
             links,
             contexts: Vec::new(),
         };
-        
+
         self.entity_registry.insert(id, entity.clone());
         entity
     }
@@ -131,24 +348,28 @@ impl EntityGenerator {
     /// Generate links to existing entities
     fn generate_links(&self, source_id: &str, count: usize) -> Vec<EntityLink> {
         let mut links = Vec::new();
-        let existing_ids: Vec<_> = self.entity_registry.keys()
+        let existing_ids: Vec<_> = self
+            .entity_registry
+            .keys()
             .filter(|id| *id != source_id)
             .collect();
-        
-        let link_types = ["related", "parent", "child", "synonym", "part_of", "has_part"];
-        
+
+        let link_types = [
+            "related", "parent", "child", "synonym", "part_of", "has_part",
+        ];
+
         // Select random existing entities to link to
         for (i, target_id) in existing_ids.iter().take(count).enumerate() {
             let link_type = link_types[i % link_types.len()];
             let weight = 0.5 + (rand_weight() * 0.5); // 0.5-1.0
-            
+
             links.push(EntityLink {
                 target: (*target_id).clone(),
                 link_type: link_type.to_string(),
                 weight,
             });
         }
-        
+
         links
     }
 
@@ -166,7 +387,7 @@ impl EntityGenerator {
     pub fn build(self, dataset_id: &str) -> EntityJsonDataset {
         let entities: Vec<Entity> = self.entity_registry.into_values().collect();
         let unit_count_estimate = entities.len() as u64;
-        
+
         // Calculate density score based on estimated size
         let estimated_kb = estimate_dataset_size_kb(&entities);
         let density = if estimated_kb > 0.0 {
@@ -174,14 +395,9 @@ impl EntityGenerator {
         } else {
             0.95
         };
-        
+
         EntityJsonDataset {
-            metadata: DatasetMetadata::new(
-                dataset_id,
-                "EntityJson",
-                density,
-                unit_count_estimate,
-            ),
+            metadata: DatasetMetadata::new(dataset_id, "EntityJson", density, unit_count_estimate),
             entities,
         }
     }
@@ -190,16 +406,32 @@ impl EntityGenerator {
     pub fn entity_count(&self) -> usize {
         self.entity_registry.len()
     }
-    
+
     /// Generate bulk entities for high-density coverage with rich definitions
     pub fn generate_bulk_entities(&mut self, total_count: usize) {
         let domains = [
-            "technology", "finance", "healthcare", "education", "legal",
-            "marketing", "engineering", "research", "operations", "support",
-            "hr", "sales", "product", "security", "data",
-            "quality", "innovation", "sustainability", "strategy", "governance",
+            "technology",
+            "finance",
+            "healthcare",
+            "education",
+            "legal",
+            "marketing",
+            "engineering",
+            "research",
+            "operations",
+            "support",
+            "hr",
+            "sales",
+            "product",
+            "security",
+            "data",
+            "quality",
+            "innovation",
+            "sustainability",
+            "strategy",
+            "governance",
         ];
-        
+
         let definition_templates = [
             "A structured approach to {} that ensures consistency and quality across the organization. This {} encompasses planning, execution, monitoring, and continuous improvement phases. Key success factors include stakeholder alignment, resource optimization, and measurable outcomes.",
             "The process of {} involves multiple stakeholders and requires careful coordination across functional boundaries. Implementation considerations include timing, dependencies, risk mitigation, and success criteria. Regular review cycles ensure alignment with organizational objectives.",
@@ -217,48 +449,70 @@ impl EntityGenerator {
             "The {} capability enables the organization to respond effectively to changing conditions. Flexibility is built into the {} through modular design, configurable parameters, and adaptive workflows. Scenario planning prepares the organization for various contingencies.",
             "{} serves as a foundation for organizational excellence and competitive advantage. The {} integrates people, process, and technology elements into a cohesive whole. Investment in this capability demonstrates commitment to long-term success and stakeholder value.",
         ];
-        
+
         // Clone categories to avoid borrow issues
         let categories: Vec<_> = self.categories.clone();
         let mut idx = 0;
-        
+
         for (category, subtypes) in &categories {
             for subtype in subtypes {
                 for domain in &domains {
                     if idx >= total_count {
                         return;
                     }
-                    
+
                     let name = format!("{} {} {}", domain, subtype, category);
                     let template = definition_templates[idx % definition_templates.len()];
                     let definition = template.replace("{}", &format!("{} {}", domain, subtype));
-                    
+
                     let mut attributes = HashMap::new();
                     attributes.insert("domain".to_string(), domain.to_string());
                     attributes.insert("category".to_string(), category.clone());
                     attributes.insert("subtype".to_string(), subtype.clone());
-                    attributes.insert("priority".to_string(), if idx % 4 == 0 { "critical" } else if idx % 4 == 1 { "high" } else if idx % 4 == 2 { "medium" } else { "low" }.to_string());
-                    attributes.insert("lifecycle".to_string(), if idx % 3 == 0 { "active" } else if idx % 3 == 1 { "development" } else { "review" }.to_string());
-                    
+                    attributes.insert(
+                        "priority".to_string(),
+                        if idx % 4 == 0 {
+                            "critical"
+                        } else if idx % 4 == 1 {
+                            "high"
+                        } else if idx % 4 == 2 {
+                            "medium"
+                        } else {
+                            "low"
+                        }
+                        .to_string(),
+                    );
+                    attributes.insert(
+                        "lifecycle".to_string(),
+                        if idx % 3 == 0 {
+                            "active"
+                        } else if idx % 3 == 1 {
+                            "development"
+                        } else {
+                            "review"
+                        }
+                        .to_string(),
+                    );
+
                     let aliases = vec![
                         format!("{} {}", domain, subtype),
                         format!("{} {}", subtype, category),
                         format!("{}-{}-{}", domain, subtype, category),
                     ];
-                    
+
                     self.create_entity(&name, &definition, category, aliases, attributes);
                     idx += 1;
                 }
             }
         }
-        
+
         // Fill remaining with variations including reasoning attributes
         while idx < total_count {
             let category_idx = idx % categories.len();
             let (category, subtypes) = &categories[category_idx];
             let domain = domains[idx % domains.len()];
             let subtype = &subtypes[idx % subtypes.len()];
-            
+
             let name = format!("{}_{}_{}", domain, subtype, idx);
             let definition = format!(
                 "Entity {} in the {} domain, categorized under {} with subtype {}. This entity supports organizational processes and enables effective operations. Key attributes include: operational efficiency impact ({}%), stakeholder involvement ({} parties), implementation complexity ({}), and strategic alignment score ({}/10). The entity integrates with related processes through defined interfaces and maintains traceability to business objectives.",
@@ -268,14 +522,23 @@ impl EntityGenerator {
                 ["low", "medium", "high", "critical"][idx % 4],
                 5 + (idx % 5)
             );
-            
+
             let mut attributes = HashMap::new();
             attributes.insert("domain".to_string(), domain.to_string());
             attributes.insert("index".to_string(), idx.to_string());
-            attributes.insert("efficiency_impact".to_string(), format!("{}%", 10 + (idx % 50)));
-            attributes.insert("complexity".to_string(), ["low", "medium", "high", "critical"][idx % 4].to_string());
-            attributes.insert("alignment_score".to_string(), format!("{}/10", 5 + (idx % 5)));
-            
+            attributes.insert(
+                "efficiency_impact".to_string(),
+                format!("{}%", 10 + (idx % 50)),
+            );
+            attributes.insert(
+                "complexity".to_string(),
+                ["low", "medium", "high", "critical"][idx % 4].to_string(),
+            );
+            attributes.insert(
+                "alignment_score".to_string(),
+                format!("{}/10", 5 + (idx % 5)),
+            );
+
             self.create_entity(&name, &definition, category, vec![], attributes);
             idx += 1;
         }
@@ -308,7 +571,7 @@ fn rand_weight() -> f32 {
 /// Validate entity dataset quality
 pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
     let entities = &dataset.entities;
-    
+
     // Calculate entity density
     let estimated_kb = estimate_dataset_size_kb(entities);
     let entity_density = if estimated_kb > 0.0 {
@@ -316,7 +579,7 @@ pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
     } else {
         0.0
     };
-    
+
     // Calculate unique ratio
     let mut normalized_set = HashSet::new();
     for entity in entities {
@@ -327,27 +590,23 @@ pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
     } else {
         1.0
     };
-    
+
     // Calculate link coverage
-    let entities_with_links = entities.iter()
-        .filter(|e| !e.links.is_empty())
-        .count();
+    let entities_with_links = entities.iter().filter(|e| !e.links.is_empty()).count();
     let link_coverage = if !entities.is_empty() {
         entities_with_links as f32 / entities.len() as f32
     } else {
         1.0
     };
-    
+
     // Noise ratio (entities with very short definitions)
-    let noisy_entities = entities.iter()
-        .filter(|e| e.definition.len() < 10)
-        .count();
+    let noisy_entities = entities.iter().filter(|e| e.definition.len() < 10).count();
     let noise_ratio = if !entities.is_empty() {
         noisy_entities as f32 / entities.len() as f32
     } else {
         0.0
     };
-    
+
     QualityMetrics {
         entity_density,
         unique_ratio,
@@ -361,7 +620,11 @@ pub fn validate_entity_dataset(dataset: &EntityJsonDataset) -> QualityMetrics {
 
 /// Generate bulk entity data, streaming to a JSONL file as TrainingExamples.
 /// Returns (examples_written, bytes_written).
-pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, seed: u64) -> (u64, u64) {
+pub fn generate_bulk_entities(
+    output_path: &std::path::Path,
+    target_bytes: u64,
+    seed: u64,
+) -> (u64, u64) {
     use crate::seed::bulk_generator::{
         expand_template, human_bytes, pick_idx, pick_str, seeded_rng, topics_for_domain,
         JsonlWriter, DOMAINS,
@@ -375,13 +638,35 @@ pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, 
     let mut count: u64 = 0;
 
     let entity_categories = [
-        "process", "concept", "artifact", "role", "metric",
-        "tool", "resource", "event", "domain", "policy",
-        "method", "attribute", "risk", "decision", "relationship",
+        "process",
+        "concept",
+        "artifact",
+        "role",
+        "metric",
+        "tool",
+        "resource",
+        "event",
+        "domain",
+        "policy",
+        "method",
+        "attribute",
+        "risk",
+        "decision",
+        "relationship",
     ];
 
-    let link_types = ["related_to", "part_of", "has_part", "prerequisite_for", "produces",
-                      "consumes", "measured_by", "governed_by", "implemented_by", "supports"];
+    let link_types = [
+        "related_to",
+        "part_of",
+        "has_part",
+        "prerequisite_for",
+        "produces",
+        "consumes",
+        "measured_by",
+        "governed_by",
+        "implemented_by",
+        "supports",
+    ];
 
     let definition_templates = [
         "{topic} is a core {category} in {domain} that governs how {detail_a} interacts with {detail_b}. It encompasses {num_a} distinct sub-components and operates across {num_b} organizational levels. Key metrics include efficiency ({num_c}%), reliability, and stakeholder satisfaction.",
@@ -426,11 +711,21 @@ pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, 
         let category = pick_str(&mut rng, &entity_categories);
 
         let q_pattern = pick_str(&mut rng, &question_patterns);
-        let question = q_pattern.replacen("{}", &format!("{}", topic), 1)
-            .replacen("{}", &format!("{} ({})", domain, category), 1);
+        let question = q_pattern.replacen("{}", &format!("{}", topic), 1).replacen(
+            "{}",
+            &format!("{} ({})", domain, category),
+            1,
+        );
 
         let def_template = pick_str(&mut rng, &definition_templates);
-        let article = if matches!(domain.chars().next(), Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U')) { "an" } else { "a" };
+        let article = if matches!(
+            domain.chars().next(),
+            Some('a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U')
+        ) {
+            "an"
+        } else {
+            "a"
+        };
         let definition = expand_template(&mut rng, def_template, domain, topic)
             .replace("{category}", category)
             .replace("a key", &format!("{} key", article));
@@ -450,11 +745,8 @@ pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, 
             definition, links_text, category, domain
         );
 
-        let entities_list: Vec<String> = vec![
-            topic.to_string(),
-            domain.to_string(),
-            category.to_string(),
-        ];
+        let entities_list: Vec<String> =
+            vec![topic.to_string(), domain.to_string(), category.to_string()];
 
         let example = TrainingExample {
             question,
@@ -477,7 +769,11 @@ pub fn generate_bulk_entities(output_path: &std::path::Path, target_bytes: u64, 
         count += 1;
 
         if count % 100_000 == 0 {
-            eprintln!("  entities: {} examples, {}", count, human_bytes(writer.bytes_written()));
+            eprintln!(
+                "  entities: {} examples, {}",
+                count,
+                human_bytes(writer.bytes_written())
+            );
         }
     }
 
@@ -492,7 +788,7 @@ mod tests {
     #[test]
     fn test_entity_generator_creates_entities() {
         let mut gen = EntityGenerator::new();
-        
+
         let e1 = gen.create_entity(
             "Approval Workflow",
             "A structured process for reviewing and authorizing requests",
@@ -500,11 +796,11 @@ mod tests {
             vec!["approval process".to_string()],
             HashMap::new(),
         );
-        
+
         assert_eq!(e1.name, "Approval Workflow");
         assert_eq!(e1.normalized, "approval workflow");
         assert!(e1.links.is_empty()); // No existing entities to link to
-        
+
         let e2 = gen.create_entity(
             "Document Review",
             "Process of examining documents for accuracy",
@@ -512,7 +808,7 @@ mod tests {
             vec!["review process".to_string()],
             HashMap::new(),
         );
-        
+
         // e2 should have a link to e1
         assert!(!e2.links.is_empty());
     }
@@ -520,7 +816,7 @@ mod tests {
     #[test]
     fn test_validate_entity_dataset() {
         let mut gen = EntityGenerator::new();
-        
+
         for i in 0..100 {
             gen.create_entity(
                 &format!("Entity {}", i),
@@ -530,10 +826,10 @@ mod tests {
                 HashMap::new(),
             );
         }
-        
+
         let dataset = gen.build("test_dataset");
         let metrics = validate_entity_dataset(&dataset);
-        
+
         assert!(metrics.unique_ratio >= 0.95);
         assert!(metrics.noise_ratio <= 0.05);
     }

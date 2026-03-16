@@ -469,7 +469,11 @@ impl Db {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
-    pub fn load_candidates_batch(&self, offset: usize, limit: usize) -> SqlResult<Vec<UnitCandidate>> {
+    pub fn load_candidates_batch(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> SqlResult<Vec<UnitCandidate>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, content, normalized, level, observation_count, utility_score, status,
@@ -478,8 +482,10 @@ impl Db {
              ORDER BY normalized, id
              LIMIT ?1 OFFSET ?2",
         )?;
-        let rows =
-            stmt.query_map(params![limit as i64, offset as i64], hydrate_candidate_from_row)?;
+        let rows = stmt.query_map(
+            params![limit as i64, offset as i64],
+            hydrate_candidate_from_row,
+        )?;
         Ok(rows.filter_map(Result::ok).collect())
     }
 

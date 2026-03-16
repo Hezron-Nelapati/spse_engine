@@ -365,13 +365,13 @@ impl Default for AdaptiveBehaviorConfig {
             "creative".to_string(),
             IntentAdaptiveProfile {
                 scoring: ScoringWeights {
-                    spatial: 0.08,
+                    spatial: 0.12,
                     context: 0.24,
                     sequence: 0.18,
                     transition: 0.08,
                     utility: 0.18,
                     confidence: 0.08,
-                    evidence: 0.06,
+                    evidence: 0.12,
                 },
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.22,
@@ -394,13 +394,13 @@ impl Default for AdaptiveBehaviorConfig {
             "brainstorm".to_string(),
             IntentAdaptiveProfile {
                 scoring: ScoringWeights {
-                    spatial: 0.06,
+                    spatial: 0.10,
                     context: 0.30,
                     sequence: 0.12,
-                    transition: 0.06,
+                    transition: 0.08,
                     utility: 0.22,
-                    confidence: 0.06,
-                    evidence: 0.04,
+                    confidence: 0.10,
+                    evidence: 0.08,
                 },
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.35,
@@ -2606,7 +2606,9 @@ impl EngineConfig {
             1.0,
         )?;
         if self.auto_inference.reasoning_loop.max_internal_steps == 0 {
-            return Err("auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string());
+            return Err(
+                "auto_inference.reasoning_loop.max_internal_steps must be >= 1".to_string(),
+            );
         }
         validate_range(
             "auto_inference.creative_spark.global_stochastic_floor",
@@ -2622,7 +2624,9 @@ impl EngineConfig {
         )?;
         validate_range(
             "auto_inference.creative_spark.anchor_protection_strictness",
-            self.auto_inference.creative_spark.anchor_protection_strictness,
+            self.auto_inference
+                .creative_spark
+                .anchor_protection_strictness,
             0.0,
             1.0,
         )?;
@@ -2651,7 +2655,9 @@ impl EngineConfig {
             1.0,
         )?;
         if self.auto_inference.dynamic_memory.base_memory_limit_mb == 0 {
-            return Err("auto_inference.dynamic_memory.base_memory_limit_mb must be >= 1".to_string());
+            return Err(
+                "auto_inference.dynamic_memory.base_memory_limit_mb must be >= 1".to_string(),
+            );
         }
         if self.auto_inference.dynamic_memory.max_memory_limit_mb
             < self.auto_inference.dynamic_memory.base_memory_limit_mb

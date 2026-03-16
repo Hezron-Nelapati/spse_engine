@@ -94,9 +94,24 @@ impl OutputDecoder {
 
         let output_lower = output.to_lowercase();
         let negation_patterns = [
-            "not ", "never ", "isn't ", "aren't ", "wasn't ", "weren't ", 
-            "doesn't ", "don't ", "didn't ", "won't ", "wouldn't ", "couldn't ",
-            "shouldn't ", "can't ", "cannot ", "impossible ", "false ", "incorrect ",
+            "not ",
+            "never ",
+            "isn't ",
+            "aren't ",
+            "wasn't ",
+            "weren't ",
+            "doesn't ",
+            "don't ",
+            "didn't ",
+            "won't ",
+            "wouldn't ",
+            "couldn't ",
+            "shouldn't ",
+            "can't ",
+            "cannot ",
+            "impossible ",
+            "false ",
+            "incorrect ",
         ];
 
         let mut corruption_score: f32 = 0.0;
@@ -104,14 +119,14 @@ impl OutputDecoder {
 
         for anchor in anchor_content {
             let anchor_lower = anchor.to_lowercase();
-            
+
             // Check for negation corruption: output negates anchor
             for negation in &negation_patterns {
                 if output_lower.contains(negation) {
                     // Check if the negated content overlaps with anchor
                     let negation_pos = output_lower.find(negation).unwrap_or(0);
                     let after_negation = &output_lower[negation_pos..];
-                    
+
                     if word_overlap(after_negation, &anchor_lower) > corruption_threshold {
                         corruption_score = corruption_score.max(0.7);
                         corruption_type = Some("negation_corruption".to_string());
@@ -222,14 +237,14 @@ fn finalize_answer(text: &str) -> String {
 fn jaccard_similarity(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
-    
+
     if words_a.is_empty() || words_b.is_empty() {
         return 0.0;
     }
-    
+
     let intersection = words_a.intersection(&words_b).count();
     let union = words_a.union(&words_b).count();
-    
+
     if union == 0 {
         0.0
     } else {
@@ -241,14 +256,14 @@ fn jaccard_similarity(a: &str, b: &str) -> f32 {
 fn word_overlap(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
-    
+
     if words_a.is_empty() || words_b.is_empty() {
         return 0.0;
     }
-    
+
     let intersection = words_a.intersection(&words_b).count();
     let min_len = words_a.len().min(words_b.len());
-    
+
     if min_len == 0 {
         0.0
     } else {
@@ -260,8 +275,14 @@ fn word_overlap(a: &str, b: &str) -> f32 {
 fn has_contradiction_pattern(output: &str, anchor: &str) -> bool {
     // Simple heuristic: check for "but", "however", "actually" patterns
     // that might indicate a correction or contradiction
-    let contradiction_markers = [" but ", " however ", " actually ", " in reality ", " the truth is "];
-    
+    let contradiction_markers = [
+        " but ",
+        " however ",
+        " actually ",
+        " in reality ",
+        " the truth is ",
+    ];
+
     for marker in &contradiction_markers {
         if output.contains(marker) {
             // Check if content after marker relates to anchor
@@ -273,6 +294,6 @@ fn has_contradiction_pattern(output: &str, anchor: &str) -> bool {
             }
         }
     }
-    
+
     false
 }

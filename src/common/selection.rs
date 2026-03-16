@@ -22,7 +22,8 @@ impl TopKSelector {
 
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-        indexed.into_iter()
+        indexed
+            .into_iter()
             .take(k)
             .filter_map(|(i, _)| items.get(i))
             .collect()
@@ -42,7 +43,8 @@ impl TopKSelector {
 
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-        indexed.into_iter()
+        indexed
+            .into_iter()
             .take(k)
             .filter_map(|(i, _)| items.get(i))
             .collect()
@@ -105,7 +107,9 @@ impl TopKSelector {
         } else {
             // Greedy: return highest scored
             items.iter().max_by(|a, b| {
-                score_fn(a).partial_cmp(&score_fn(b)).unwrap_or(Ordering::Equal)
+                score_fn(a)
+                    .partial_cmp(&score_fn(b))
+                    .unwrap_or(Ordering::Equal)
             })
         }
     }
@@ -116,9 +120,7 @@ impl TopKSelector {
             return vec![1.0 / scores.len().max(1) as f32; scores.len()];
         }
 
-        let exp_scores: Vec<f32> = scores.iter()
-            .map(|&s| (s / temperature).exp())
-            .collect();
+        let exp_scores: Vec<f32> = scores.iter().map(|&s| (s / temperature).exp()).collect();
         let sum: f32 = exp_scores.iter().sum();
 
         exp_scores.into_iter().map(|e| e / sum).collect()

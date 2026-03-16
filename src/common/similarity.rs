@@ -61,7 +61,9 @@ impl SimilarityUtils {
         let tokens_b: Vec<&str> = b_normalized.split_whitespace().collect();
 
         if tokens_a.len() == tokens_b.len() {
-            let all_match = tokens_a.iter().zip(tokens_b.iter())
+            let all_match = tokens_a
+                .iter()
+                .zip(tokens_b.iter())
                 .all(|(ta, tb)| ta == tb);
             if all_match {
                 return true;
@@ -106,7 +108,9 @@ impl SimilarityUtils {
 
         // Exact match
         if candidate_terms.len() == query_terms.len() {
-            let all_match = candidate_terms.iter().zip(query_terms.iter())
+            let all_match = candidate_terms
+                .iter()
+                .zip(query_terms.iter())
                 .all(|(c, q)| c.to_lowercase() == q.to_lowercase());
             if all_match {
                 return 0.85;
@@ -114,7 +118,9 @@ impl SimilarityUtils {
         }
 
         // Superset penalty (candidate has extra terms)
-        let query_in_candidate = query_terms.iter().all(|q| candidate.contains(&q.to_lowercase()));
+        let query_in_candidate = query_terms
+            .iter()
+            .all(|q| candidate.contains(&q.to_lowercase()));
         let candidate_has_extra = candidate_terms.len() > query_terms.len();
 
         if query_in_candidate && candidate_has_extra {
@@ -178,8 +184,14 @@ mod tests {
 
     #[test]
     fn test_semantically_equivalent() {
-        assert!(SimilarityUtils::semantically_equivalent("hello world", "hello world"));
-        assert!(!SimilarityUtils::semantically_equivalent("hello world", "hello there"));
+        assert!(SimilarityUtils::semantically_equivalent(
+            "hello world",
+            "hello world"
+        ));
+        assert!(!SimilarityUtils::semantically_equivalent(
+            "hello world",
+            "hello there"
+        ));
     }
 
     #[test]

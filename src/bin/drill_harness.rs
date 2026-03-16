@@ -14,14 +14,11 @@
 
 use std::time::Instant;
 
-use spse_engine::drill_lib::{
-    DrillMode, DrillCategory, DrillReport,
-    run_drill,
-};
+use spse_engine::drill_lib::{run_drill, DrillCategory, DrillMode, DrillReport};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    
+
     let mode = if args.contains(&"--all".to_string()) {
         "all"
     } else if args.contains(&"--list".to_string()) {
@@ -68,60 +65,77 @@ fn print_help() {
 fn list_drills() {
     println!("=== Available Drill Modes ===");
     println!();
-    
+
     println!("=== Input Layer Drills ===");
     for mode in &[DrillMode::Garbage, DrillMode::UnitActivation] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Spatial Layer Drills ===");
     for mode in &[DrillMode::Collisions, DrillMode::RoutingEscape] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Context Layer Drills ===");
     for mode in &[DrillMode::AnchorLoss, DrillMode::ContextMatrix] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Intent-Driven Input Drills ===");
-    for mode in &[DrillMode::IntentClassify, DrillMode::IntentBlend, 
-                   DrillMode::RetrievalGate, DrillMode::IntentMemoryGate] {
+    for mode in &[
+        DrillMode::IntentClassify,
+        DrillMode::IntentBlend,
+        DrillMode::RetrievalGate,
+        DrillMode::IntentMemoryGate,
+    ] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Safety Layer Drills ===");
     for mode in &[DrillMode::Poison, DrillMode::TrustHeuristics] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Memory Layer Drills ===");
-    for mode in &[DrillMode::Maintenance, DrillMode::Promotion, DrillMode::ChannelIsolation] {
+    for mode in &[
+        DrillMode::Maintenance,
+        DrillMode::Promotion,
+        DrillMode::ChannelIsolation,
+    ] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Intent-Driven Output Drills ===");
-    for mode in &[DrillMode::OutputDecode, DrillMode::CreativeDrift, DrillMode::IntentShaping] {
+    for mode in &[
+        DrillMode::OutputDecode,
+        DrillMode::CreativeDrift,
+        DrillMode::IntentShaping,
+    ] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Pollution Drills ===");
     for mode in &[DrillMode::PollutionCeiling, DrillMode::PollutionPurge] {
         println!("  {:?}", mode);
     }
-    
+
     println!();
     println!("=== Phase 5: Retrieval & Optimization Drills ===");
-    for mode in &[DrillMode::MultiEngineConsensus, DrillMode::MultiEngineDisagreement,
-                   DrillMode::MultiEngineUnavailable, DrillMode::StructuredParsing,
-                   DrillMode::ConfigSweepPareto, DrillMode::ConfigSweepNoOptimal] {
+    for mode in &[
+        DrillMode::MultiEngineConsensus,
+        DrillMode::MultiEngineDisagreement,
+        DrillMode::MultiEngineUnavailable,
+        DrillMode::StructuredParsing,
+        DrillMode::ConfigSweepPareto,
+        DrillMode::ConfigSweepNoOptimal,
+    ] {
         println!("  {:?}", mode);
     }
 }
@@ -129,7 +143,7 @@ fn list_drills() {
 fn run_all_drills() {
     println!("=== Running All Drills ===");
     println!();
-    
+
     let all_modes = vec![
         // Input Layer
         DrillMode::Garbage,
@@ -167,25 +181,25 @@ fn run_all_drills() {
         DrillMode::ConfigSweepPareto,
         DrillMode::ConfigSweepNoOptimal,
     ];
-    
+
     let mut report = DrillReport::default();
     let start = Instant::now();
-    
+
     for mode in all_modes {
         println!("Running {:?}...", mode);
         let result = run_drill(&mode, DrillCategory::HappyPath);
         report.add_result(result);
     }
-    
+
     report.total_duration_ms = start.elapsed().as_millis() as u64;
-    
+
     println!();
     println!("=== Drill Summary ===");
     println!("Total drills: {}", report.total_drills());
     println!("Passed: {}", report.passed());
     println!("Failed: {}", report.failed());
     println!("Duration: {}ms", report.total_duration_ms);
-    
+
     if report.failed() > 0 {
         println!();
         println!("=== Failed Drills ===");
@@ -200,10 +214,10 @@ fn run_all_drills() {
 
 fn run_specific_drill(mode_str: &str) {
     let mode = parse_drill_mode(mode_str);
-    
+
     println!("=== Running {:?} Drill ===", mode);
     println!();
-    
+
     // Run all categories for the specific mode
     let categories = [
         DrillCategory::HappyPath,
@@ -211,14 +225,14 @@ fn run_specific_drill(mode_str: &str) {
         DrillCategory::FailureMode,
         DrillCategory::Stress,
     ];
-    
+
     let mut passed = 0;
     let mut failed = 0;
-    
+
     for category in &categories {
         println!("Category: {:?}", category);
         let result = run_drill(&mode, category.clone());
-        
+
         if result.passed {
             println!("  ✓ PASSED: {}", result.message);
             passed += 1;
@@ -226,15 +240,15 @@ fn run_specific_drill(mode_str: &str) {
             println!("  ✗ FAILED: {}", result.message);
             failed += 1;
         }
-        
+
         if !result.details.is_empty() {
             println!("  Details: {}", result.details);
         }
         println!();
     }
-    
+
     println!("Summary: {} passed, {} failed", passed, failed);
-    
+
     if failed > 0 {
         std::process::exit(1);
     }
@@ -272,7 +286,9 @@ fn parse_drill_mode(s: &str) -> DrillMode {
         "PollutionPurge" | "pollution_purge" => DrillMode::PollutionPurge,
         // Phase 5: Retrieval & Optimization
         "MultiEngineConsensus" | "multi_engine_consensus" => DrillMode::MultiEngineConsensus,
-        "MultiEngineDisagreement" | "multi_engine_disagreement" => DrillMode::MultiEngineDisagreement,
+        "MultiEngineDisagreement" | "multi_engine_disagreement" => {
+            DrillMode::MultiEngineDisagreement
+        }
         "MultiEngineUnavailable" | "multi_engine_unavailable" => DrillMode::MultiEngineUnavailable,
         "StructuredParsing" | "structured_parsing" => DrillMode::StructuredParsing,
         "ConfigSweepPareto" | "config_sweep_pareto" => DrillMode::ConfigSweepPareto,

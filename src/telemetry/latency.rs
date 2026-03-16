@@ -208,9 +208,12 @@ impl LatencyMonitor {
         let p95_idx = ((95.0 / 100.0) * (all_latencies.len() - 1) as f64).round() as usize;
         let p99_idx = ((99.0 / 100.0) * (all_latencies.len() - 1) as f64).round() as usize;
 
-        self.global_p50.store(all_latencies[p50_idx], Ordering::Relaxed);
-        self.global_p95.store(all_latencies[p95_idx], Ordering::Relaxed);
-        self.global_p99.store(all_latencies[p99_idx], Ordering::Relaxed);
+        self.global_p50
+            .store(all_latencies[p50_idx], Ordering::Relaxed);
+        self.global_p95
+            .store(all_latencies[p95_idx], Ordering::Relaxed);
+        self.global_p99
+            .store(all_latencies[p99_idx], Ordering::Relaxed);
     }
 
     /// Get global p50 latency
@@ -380,7 +383,7 @@ mod tests {
         let monitor = LatencyMonitor::new(config);
 
         // Record some latencies
-        let alert1 = monitor.record(5, 50);  // Below threshold
+        let alert1 = monitor.record(5, 50); // Below threshold
         let alert2 = monitor.record(5, 150); // Above threshold
 
         assert!(!alert1);

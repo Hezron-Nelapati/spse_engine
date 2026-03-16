@@ -3,10 +3,10 @@
 //! ClassificationSignature is a CPU-efficient feature vector (<20 floats) that captures
 //! structural, punctuation, semantic, and derived features for text classification.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
 use postagger::PerceptronTagger;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Lightweight feature vector for CPU-efficient classification.
 /// Total: 78 floats (14 structural + 32 intent hash + 32 tone hash).
@@ -19,15 +19,15 @@ pub struct ClassificationSignature {
     pub sentence_entropy: f32,
     /// Normalized token count (0.0 - 1.0)
     pub token_count_norm: f32,
-    
+
     // Punctuation vector (normalized ratios)
     /// [question_mark_ratio, exclamation_ratio, period_ratio]
     pub punct_vector: [f32; 3],
-    
+
     // Semantic anchor (Layer 5 position from SemanticHasher)
     /// 3D spatial position for retrieval
     pub semantic_centroid: [f32; 3],
-    
+
     // Derived scores (lightweight calculation)
     /// Urgency signal (0.0 - 1.0)
     pub urgency_score: f32,
@@ -35,19 +35,19 @@ pub struct ClassificationSignature {
     pub formality_score: f32,
     /// Technical domain signal (0.0 - 1.0)
     pub technical_score: f32,
-    
+
     // Context indicators
     /// Encoded domain signal
     pub domain_hint: f32,
     /// Time-related signal
     pub temporal_cue: f32,
-    
+
     // POS-based intent hash (32 buckets)
     // Only verbs (VB*), question/wh-words (W*), and modals (MD) are hashed.
     // These POS tags carry the intent signal; nouns and function words are dropped.
     #[serde(default = "default_hash_32")]
     pub intent_hash: [f32; 32],
-    
+
     // POS-based tone hash (32 buckets)
     // Only adjectives (JJ*) and adverbs (RB*) are hashed.
     // These POS tags carry the tone/style signal.
@@ -83,13 +83,13 @@ impl ClassificationSignature {
         v.extend_from_slice(&self.tone_hash);
         v
     }
-    
+
     /// Compute signature from raw text using provided hasher.
     /// Runs in microseconds - no heavy NLP.
     pub fn compute(text: &str, hasher: &SemanticHasher) -> Self {
         let normalized = normalize_text(text);
         let tokens = tokenize(&normalized);
-        
+
         Self {
             byte_length_norm: normalize_byte_length(text.len()),
             sentence_entropy: compute_sentence_entropy(&normalized),
@@ -105,7 +105,7 @@ impl ClassificationSignature {
             tone_hash: compute_pos_tone_hash(&normalized),
         }
     }
-    
+
     /// Convert to classification feature vector (excluding centroid).
     /// Returns 11-element vector: structure (3) + punctuation (3) + derived (5).
     /// Centroid is used for spatial pre-filtering only, not similarity scoring.
@@ -124,7 +124,7 @@ impl ClassificationSignature {
             self.temporal_cue,
         ]
     }
-    
+
     /// Compute signature hash for deduplication.
     pub fn signature_hash(&self) -> u64 {
         let mut hash: u64 = 0;
@@ -133,7 +133,7 @@ impl ClassificationSignature {
         }
         hash
     }
-    
+
     /// Generate 8-character hex hash for pattern markers.
     pub fn signature_hash_8char(&self) -> String {
         format!("{:08x}", self.signature_hash() & 0xFFFFFFFF)
@@ -174,7 +174,7 @@ pub struct SemanticHasher {
 impl SemanticHasher {
     pub fn new() -> Self {
         let mut domain_anchors = HashMap::new();
-        
+
         // Domain-specific semantic anchors
         domain_anchors.insert("technology".to_string(), [0.7, 0.3, 0.5]);
         domain_anchors.insert("finance".to_string(), [0.3, 0.7, 0.4]);
@@ -184,19 +184,19 @@ impl SemanticHasher {
         domain_anchors.insert("governance".to_string(), [0.2, 0.8, 0.6]);
         domain_anchors.insert("marketing".to_string(), [0.8, 0.2, 0.4]);
         domain_anchors.insert("analytics".to_string(), [0.55, 0.55, 0.55]);
-        
+
         Self { domain_anchors }
     }
-    
+
     /// Hash text to 3D coordinate (microseconds).
     pub fn hash(&self, text: &str) -> [f32; 3] {
         let trigram_freq = self.compute_trigram_frequencies(text);
-        
+
         // Map to 3D using prime-based hashing
         let x = self.hash_dimension(&trigram_freq, 31);
         let y = self.hash_dimension(&trigram_freq, 37);
         let z = self.hash_dimension(&trigram_freq, 41);
-        
+
         // Apply domain anchor if detected
         if let Some(domain) = self.detect_domain(text) {
             if let Some(&anchor) = self.domain_anchors.get(&domain) {
@@ -208,17 +208,17 @@ impl SemanticHasher {
                 ];
             }
         }
-        
+
         [x, y, z]
     }
-    
+
     fn hash_dimension(&self, freq: &HashMap<String, f32>, prime: u32) -> f32 {
         let mut hash = 2166136261u32; // FNV offset basis
-        
+
         // Sort trigrams for deterministic output (HashMap order is random)
         let mut trigrams: Vec<_> = freq.iter().collect();
         trigrams.sort_by(|a, b| a.0.cmp(b.0));
-        
+
         // XOR-fold each trigram + its frequency into the hash state
         for (trigram, count) in &trigrams {
             for c in trigram.chars() {
@@ -229,24 +229,23 @@ impl SemanticHasher {
             hash ^= (**count * 65536.0) as u32;
             hash = hash.wrapping_mul(prime);
         }
-        
+
         hash as f32 / u32::MAX as f32
     }
-    
-    
+
     fn compute_trigram_frequencies(&self, text: &str) -> HashMap<String, f32> {
         let chars: Vec<char> = text.chars().collect();
         let mut freq = HashMap::new();
-        
+
         if chars.len() < 3 {
             return freq;
         }
-        
+
         for i in 0..(chars.len() - 2) {
-            let trigram: String = chars[i..i+3].iter().collect();
+            let trigram: String = chars[i..i + 3].iter().collect();
             *freq.entry(trigram).or_insert(0.0) += 1.0;
         }
-        
+
         // Normalize frequencies
         let total = freq.values().sum::<f32>();
         if total > 0.0 {
@@ -254,32 +253,111 @@ impl SemanticHasher {
                 *count /= total;
             }
         }
-        
+
         freq
     }
-    
+
     fn detect_domain(&self, text: &str) -> Option<String> {
         let lower = text.to_lowercase();
-        
+
         // Simple keyword-based domain detection
         let domain_keywords = [
-            ("technology", vec!["software", "api", "code", "system", "data", "algorithm", "infrastructure"]),
-            ("finance", vec!["budget", "investment", "financial", "portfolio", "compliance", "audit"]),
-            ("healthcare", vec!["patient", "clinical", "medical", "health", "treatment", "diagnosis"]),
-            ("research", vec!["study", "analysis", "hypothesis", "methodology", "findings", "research"]),
-            ("operations", vec!["process", "workflow", "efficiency", "operations", "logistics"]),
-            ("governance", vec!["policy", "regulation", "compliance", "governance", "standards"]),
-            ("marketing", vec!["campaign", "brand", "customer", "market", "engagement", "conversion"]),
-            ("analytics", vec!["metrics", "kpi", "dashboard", "analytics", "reporting", "insights"]),
+            (
+                "technology",
+                vec![
+                    "software",
+                    "api",
+                    "code",
+                    "system",
+                    "data",
+                    "algorithm",
+                    "infrastructure",
+                ],
+            ),
+            (
+                "finance",
+                vec![
+                    "budget",
+                    "investment",
+                    "financial",
+                    "portfolio",
+                    "compliance",
+                    "audit",
+                ],
+            ),
+            (
+                "healthcare",
+                vec![
+                    "patient",
+                    "clinical",
+                    "medical",
+                    "health",
+                    "treatment",
+                    "diagnosis",
+                ],
+            ),
+            (
+                "research",
+                vec![
+                    "study",
+                    "analysis",
+                    "hypothesis",
+                    "methodology",
+                    "findings",
+                    "research",
+                ],
+            ),
+            (
+                "operations",
+                vec![
+                    "process",
+                    "workflow",
+                    "efficiency",
+                    "operations",
+                    "logistics",
+                ],
+            ),
+            (
+                "governance",
+                vec![
+                    "policy",
+                    "regulation",
+                    "compliance",
+                    "governance",
+                    "standards",
+                ],
+            ),
+            (
+                "marketing",
+                vec![
+                    "campaign",
+                    "brand",
+                    "customer",
+                    "market",
+                    "engagement",
+                    "conversion",
+                ],
+            ),
+            (
+                "analytics",
+                vec![
+                    "metrics",
+                    "kpi",
+                    "dashboard",
+                    "analytics",
+                    "reporting",
+                    "insights",
+                ],
+            ),
         ];
-        
+
         for (domain, keywords) in domain_keywords {
             let matches = keywords.iter().filter(|k| lower.contains(*k)).count();
             if matches >= 2 {
                 return Some(domain.to_string());
             }
         }
-        
+
         None
     }
 }
@@ -290,7 +368,13 @@ impl SemanticHasher {
 fn normalize_text(text: &str) -> String {
     text.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -320,13 +404,13 @@ fn compute_sentence_entropy(text: &str) -> f32 {
     if tokens.is_empty() {
         return 0.0;
     }
-    
+
     // Count token frequencies
     let mut freq: HashMap<&str, u32> = HashMap::new();
     for token in &tokens {
         *freq.entry(token).or_insert(0) += 1;
     }
-    
+
     // Compute entropy
     let total = tokens.len() as f32;
     let mut entropy = 0.0f32;
@@ -336,7 +420,7 @@ fn compute_sentence_entropy(text: &str) -> f32 {
             entropy -= p * p.ln();
         }
     }
-    
+
     // Normalize by max entropy
     let max_entropy = (tokens.len() as f32).ln();
     if max_entropy > 0.0 {
@@ -352,11 +436,11 @@ fn compute_punct_vector(text: &str) -> [f32; 3] {
     if total == 0.0 {
         return [0.0; 3];
     }
-    
+
     let question = text.chars().filter(|&c| c == '?').count() as f32;
     let exclamation = text.chars().filter(|&c| c == '!').count() as f32;
     let period = text.chars().filter(|&c| c == '.').count() as f32;
-    
+
     [
         (question / total).min(1.0),
         (exclamation / total).min(1.0),
@@ -368,34 +452,65 @@ fn compute_punct_vector(text: &str) -> [f32; 3] {
 fn compute_urgency(text: &str) -> f32 {
     let lower = text.to_lowercase();
     let urgency_markers = [
-        "urgent", "asap", "immediately", "emergency", "critical",
-        "deadline", "overdue", "priority", "hurry", "quickly",
-        "now", "tonight", "today", "soon", "fast",
+        "urgent",
+        "asap",
+        "immediately",
+        "emergency",
+        "critical",
+        "deadline",
+        "overdue",
+        "priority",
+        "hurry",
+        "quickly",
+        "now",
+        "tonight",
+        "today",
+        "soon",
+        "fast",
     ];
-    
-    let matches = urgency_markers.iter().filter(|m| lower.contains(*m)).count();
+
+    let matches = urgency_markers
+        .iter()
+        .filter(|m| lower.contains(*m))
+        .count();
     (matches as f32 / 3.0).min(1.0)
 }
 
 /// Compute formality score from markers.
 fn compute_formality(text: &str) -> f32 {
     let lower = text.to_lowercase();
-    
+
     // Formal markers
     let formal_markers = [
-        "please", "kindly", "would you", "may i", "could you",
-        "sincerely", "respectfully", "dear", "regards", "formally",
+        "please",
+        "kindly",
+        "would you",
+        "may i",
+        "could you",
+        "sincerely",
+        "respectfully",
+        "dear",
+        "regards",
+        "formally",
     ];
-    
+
     // Casual markers
     let casual_markers = [
-        "hey", "hi there", "what's up", "cool", "awesome",
-        "thanks", "cheers", "lol", "ok", "yeah",
+        "hey",
+        "hi there",
+        "what's up",
+        "cool",
+        "awesome",
+        "thanks",
+        "cheers",
+        "lol",
+        "ok",
+        "yeah",
     ];
-    
+
     let formal_count = formal_markers.iter().filter(|m| lower.contains(*m)).count();
     let casual_count = casual_markers.iter().filter(|m| lower.contains(*m)).count();
-    
+
     // Base formality at 0.5, adjust by markers
     let score = 0.5 + (formal_count as f32 * 0.1) - (casual_count as f32 * 0.1);
     score.clamp(0.0, 1.0)
@@ -405,13 +520,32 @@ fn compute_formality(text: &str) -> f32 {
 fn compute_technical(text: &str) -> f32 {
     let lower = text.to_lowercase();
     let technical_markers = [
-        "api", "code", "function", "algorithm", "database", "server",
-        "implementation", "architecture", "debug", "error", "exception",
-        "variable", "method", "class", "interface", "protocol",
-        "configuration", "deployment", "infrastructure", "pipeline",
+        "api",
+        "code",
+        "function",
+        "algorithm",
+        "database",
+        "server",
+        "implementation",
+        "architecture",
+        "debug",
+        "error",
+        "exception",
+        "variable",
+        "method",
+        "class",
+        "interface",
+        "protocol",
+        "configuration",
+        "deployment",
+        "infrastructure",
+        "pipeline",
     ];
-    
-    let matches = technical_markers.iter().filter(|m| lower.contains(*m)).count();
+
+    let matches = technical_markers
+        .iter()
+        .filter(|m| lower.contains(*m))
+        .count();
     (matches as f32 / 4.0).min(1.0)
 }
 
@@ -420,10 +554,17 @@ fn compute_domain_hint(text: &str) -> f32 {
     // Returns a normalized score based on domain-specific vocabulary density
     let lower = text.to_lowercase();
     let domain_markers = [
-        "domain", "field", "industry", "sector", "vertical",
-        "business", "enterprise", "organization", "company",
+        "domain",
+        "field",
+        "industry",
+        "sector",
+        "vertical",
+        "business",
+        "enterprise",
+        "organization",
+        "company",
     ];
-    
+
     let matches = domain_markers.iter().filter(|m| lower.contains(*m)).count();
     (matches as f32 / 3.0).min(1.0)
 }
@@ -432,12 +573,30 @@ fn compute_domain_hint(text: &str) -> f32 {
 fn compute_temporal_cue(text: &str) -> f32 {
     let lower = text.to_lowercase();
     let temporal_markers = [
-        "now", "today", "tomorrow", "yesterday", "week", "month",
-        "year", "quarter", "annual", "monthly", "weekly", "daily",
-        "schedule", "deadline", "due", "when", "time", "date",
+        "now",
+        "today",
+        "tomorrow",
+        "yesterday",
+        "week",
+        "month",
+        "year",
+        "quarter",
+        "annual",
+        "monthly",
+        "weekly",
+        "daily",
+        "schedule",
+        "deadline",
+        "due",
+        "when",
+        "time",
+        "date",
     ];
-    
-    let matches = temporal_markers.iter().filter(|m| lower.contains(*m)).count();
+
+    let matches = temporal_markers
+        .iter()
+        .filter(|m| lower.contains(*m))
+        .count();
     (matches as f32 / 3.0).min(1.0)
 }
 
@@ -449,9 +608,11 @@ fn compute_temporal_cue(text: &str) -> f32 {
 /// Uses Penn Treebank tagset (NN, VB, JJ, RB, WP, MD, etc.).
 static POS_TAGGER: Lazy<Option<PerceptronTagger>> = Lazy::new(|| {
     // Try common paths relative to working directory
-    let paths = [
-        ("config/pos_tagger/weights.json", "config/pos_tagger/classes.txt", "config/pos_tagger/tags.json"),
-    ];
+    let paths = [(
+        "config/pos_tagger/weights.json",
+        "config/pos_tagger/classes.txt",
+        "config/pos_tagger/tags.json",
+    )];
     for (w, c, t) in &paths {
         if std::path::Path::new(w).exists() {
             return Some(PerceptronTagger::new(w, c, t));
@@ -468,7 +629,7 @@ fn is_intent_pos(tag: &str) -> bool {
         || tag.starts_with('W') // WP, WP$, WDT, WRB (question words)
         || tag == "MD"          // modals: can, could, should, would, will, might, must
         || tag == "UH"          // interjections: hello, goodbye, thanks, yes, no
-        || tag == "RP"          // particles: up, out, off (phrasal verb parts)
+        || tag == "RP" // particles: up, out, off (phrasal verb parts)
 }
 
 /// Check if a Penn Treebank POS tag belongs to the tone group.
@@ -481,15 +642,40 @@ fn is_tone_pos(tag: &str) -> bool {
 /// Check if a POS tag is a function word (carries no content signal).
 /// These are always excluded from hashing.
 fn is_function_pos(tag: &str) -> bool {
-    matches!(tag, "DT" | "IN" | "CC" | "TO" | "PRP" | "PRP$" | "EX" | "PDT"
-        | "," | "." | ":" | "(" | ")" | "``" | "''" | "#" | "$" | "SYM" | "LS")
+    matches!(
+        tag,
+        "DT" | "IN"
+            | "CC"
+            | "TO"
+            | "PRP"
+            | "PRP$"
+            | "EX"
+            | "PDT"
+            | ","
+            | "."
+            | ":"
+            | "("
+            | ")"
+            | "``"
+            | "''"
+            | "#"
+            | "$"
+            | "SYM"
+            | "LS"
+    )
 }
 
 /// Sanitize text for the POS tagger: keep only ASCII alphanumeric and spaces.
 /// The postagger crate panics on multi-byte Unicode characters.
 fn sanitize_for_pos(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == ' ' { c } else { ' ' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -522,15 +708,16 @@ fn hash_words_to_buckets(words: &[&str]) -> [f32; 32] {
 fn compute_pos_intent_hash(text: &str) -> [f32; 32] {
     if let Some(tagger) = POS_TAGGER.as_ref() {
         let safe = sanitize_for_pos(text);
-        if safe.is_empty() { return [0.0; 32]; }
-        let tags = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tagger.tag(&safe))) {
-            Ok(t) => t,
-            Err(_) => return [0.0; 32],
-        };
+        if safe.is_empty() {
+            return [0.0; 32];
+        }
+        let tags =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tagger.tag(&safe))) {
+                Ok(t) => t,
+                Err(_) => return [0.0; 32],
+            };
         // Separate content words from function words
-        let content_tags: Vec<_> = tags.iter()
-            .filter(|t| !is_function_pos(&t.tag))
-            .collect();
+        let content_tags: Vec<_> = tags.iter().filter(|t| !is_function_pos(&t.tag)).collect();
         let is_short = content_tags.len() <= 3;
         let mut intent_words: Vec<&str> = Vec::new();
         for (i, t) in content_tags.iter().enumerate() {
@@ -551,16 +738,18 @@ fn compute_pos_intent_hash(text: &str) -> [f32; 32] {
 fn compute_pos_tone_hash(text: &str) -> [f32; 32] {
     if let Some(tagger) = POS_TAGGER.as_ref() {
         let safe = sanitize_for_pos(text);
-        if safe.is_empty() { return [0.0; 32]; }
-        let tags = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tagger.tag(&safe))) {
-            Ok(t) => t,
-            Err(_) => return [0.0; 32],
-        };
-        let content_tags: Vec<_> = tags.iter()
-            .filter(|t| !is_function_pos(&t.tag))
-            .collect();
+        if safe.is_empty() {
+            return [0.0; 32];
+        }
+        let tags =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tagger.tag(&safe))) {
+                Ok(t) => t,
+                Err(_) => return [0.0; 32],
+            };
+        let content_tags: Vec<_> = tags.iter().filter(|t| !is_function_pos(&t.tag)).collect();
         let is_short = content_tags.len() <= 3;
-        let tone_words: Vec<&str> = content_tags.iter()
+        let tone_words: Vec<&str> = content_tags
+            .iter()
             .filter(|t| is_tone_pos(&t.tag) || is_short)
             .map(|t| &*t.word)
             .collect();
@@ -583,63 +772,68 @@ fn fnv1a_word(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_signature_compute() {
         let hasher = SemanticHasher::new();
         let sig = ClassificationSignature::compute("Hello, what is the weather today?", &hasher);
-        
+
         assert!(sig.punct_vector[0] > 0.0); // Has question mark
         assert!(sig.token_count_norm > 0.0);
         assert!(sig.temporal_cue > 0.0); // Has "today"
     }
-    
+
     #[test]
     fn test_semantic_hasher() {
         let hasher = SemanticHasher::new();
         let pos1 = hasher.hash("software api infrastructure");
         let pos2 = hasher.hash("budget investment portfolio");
-        
+
         // Different domains should have different positions
         assert_ne!(pos1, pos2);
     }
-    
+
     #[test]
     fn test_feature_vector_length() {
         let sig = ClassificationSignature::default();
         let vec = sig.to_feature_vector();
         assert_eq!(vec.len(), 78);
     }
-    
+
     #[test]
     fn test_urgency_detection() {
         assert!(compute_urgency("This is urgent, respond ASAP!") > 0.3);
         assert!(compute_urgency("Hello there") < 0.1);
     }
-    
+
     #[test]
     fn test_formality_detection() {
         assert!(compute_formality("Please kindly respond") > 0.6);
         assert!(compute_formality("Hey, what's up?") < 0.5);
     }
-    
+
     #[test]
     fn test_technical_detection() {
         assert!(compute_technical("The API function returns an error") > 0.3);
         assert!(compute_technical("Hello, how are you?") < 0.1);
     }
-    
+
     #[test]
     fn test_domain_anchor() {
         let hasher = SemanticHasher::new();
         let tech_pos = hasher.hash("software systems API infrastructure code");
         let neutral_pos = hasher.hash("the quick brown fox jumps over the lazy dog");
-        
+
         // Technology text should be detected as technology domain and blended with anchor
         // Verify positions are different (domain anchor applied vs not)
         let diff = (tech_pos[0] - neutral_pos[0]).abs()
             + (tech_pos[1] - neutral_pos[1]).abs()
             + (tech_pos[2] - neutral_pos[2]).abs();
-        assert!(diff > 0.01, "Domain anchor should shift position: tech={:?} neutral={:?}", tech_pos, neutral_pos);
+        assert!(
+            diff > 0.01,
+            "Domain anchor should shift position: tech={:?} neutral={:?}",
+            tech_pos,
+            neutral_pos
+        );
     }
 }

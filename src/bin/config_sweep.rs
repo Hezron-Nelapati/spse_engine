@@ -140,7 +140,10 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
-    println!("config_sweep: starting with {} iteration(s) per trial", iterations);
+    println!(
+        "config_sweep: starting with {} iteration(s) per trial",
+        iterations
+    );
 
     let dimensions = build_dimensions();
     let mut all_results: Vec<TrialResult> = Vec::new();
@@ -170,7 +173,11 @@ async fn main() {
             let result = run_trial(&config, iterations).await;
             println!(
                 "  {}={:.3}: confidence={:.3} keyword={:.3} overall={:.3}",
-                dim.name, value, result.avg_confidence, result.avg_keyword_score, result.overall_score
+                dim.name,
+                value,
+                result.avg_confidence,
+                result.avg_keyword_score,
+                result.overall_score
             );
 
             let entry = best_per_dimension
@@ -189,7 +196,12 @@ async fn main() {
     }
 
     // Generate report
-    let report = render_report(baseline_score, &all_results, &best_per_dimension, &dimensions);
+    let report = render_report(
+        baseline_score,
+        &all_results,
+        &best_per_dimension,
+        &dimensions,
+    );
     fs::create_dir_all("benchmarks").expect("create benchmarks dir");
     fs::write("benchmarks/config_sweep_report.md", &report).expect("write report");
 
@@ -244,7 +256,8 @@ async fn run_trial(config: &EngineConfig, iterations: usize) -> TrialResult {
     let avg_confidence = total_confidence / n;
     let avg_keyword_score = total_keyword / n;
     let retrieval_accuracy = retrieval_correct as f32 / n;
-    let overall_score = (0.40 * avg_keyword_score) + (0.30 * avg_confidence) + (0.30 * retrieval_accuracy);
+    let overall_score =
+        (0.40 * avg_keyword_score) + (0.30 * avg_confidence) + (0.30 * retrieval_accuracy);
 
     TrialResult {
         dimension: String::new(),
@@ -274,7 +287,10 @@ fn render_report(
         "Generated: {}\n\n",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     ));
-    report.push_str(&format!("Baseline overall score: **{:.3}**\n\n", baseline_score));
+    report.push_str(&format!(
+        "Baseline overall score: **{:.3}**\n\n",
+        baseline_score
+    ));
 
     report.push_str("## Optimal Values\n\n");
     report.push_str("| Config Parameter | Optimal Value | Score | Delta vs Baseline |\n");

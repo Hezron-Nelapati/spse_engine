@@ -7,11 +7,11 @@
 
 use crate::seed::bulk_generator::{
     self, expand_template, human_bytes, pick, pick_idx, pick_str, seeded_rng, topics_for_domain,
-    JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DOMAINS,
-    GREETING_VARIATIONS, GRATITUDE_VARIATIONS, FAREWELL_VARIATIONS,
+    JsonlWriter, ANSWER_BODIES, ANSWER_PREFIXES, DOMAINS, FAREWELL_VARIATIONS,
+    GRATITUDE_VARIATIONS, GREETING_VARIATIONS,
 };
 use crate::seed::TrainingExample;
-use crate::types::{IntentKind, MemoryChannel, ToneKind, ResolverMode};
+use crate::types::{IntentKind, MemoryChannel, ResolverMode, ToneKind};
 use rand::Rng;
 use std::path::Path;
 
@@ -226,30 +226,48 @@ const REWRITE_QUERIES: &[&str] = &[
 // ============================================================================
 
 const TONE_MAP: &[(ToneKind, &[&str])] = &[
-    (ToneKind::NeutralProfessional, &[
-        "", "", "", "", "",
-    ]),
-    (ToneKind::Technical, &[
-        "Technically speaking, ", "From an engineering perspective, ",
-        "In precise terms, ", "From a technical standpoint, ",
-        "Rigorously speaking, ",
-    ]),
-    (ToneKind::Casual, &[
-        "Hey — ", "So, ", "Quick question — ", "Just wondering — ", "BTW, ",
-    ]),
-    (ToneKind::Empathetic, &[
-        "I'd really appreciate help here. ", "This is important to me. ",
-        "I'm struggling with this one. ", "If you can help: ",
-        "I'd be grateful for insight. ",
-    ]),
-    (ToneKind::Direct, &[
-        "", "", "", "", "",
-    ]),
-    (ToneKind::Formal, &[
-        "If I may ask: ", "I would like to inquire. ",
-        "For your consideration: ", "Respectfully, ",
-        "I'd appreciate a thorough answer. ",
-    ]),
+    (ToneKind::NeutralProfessional, &["", "", "", "", ""]),
+    (
+        ToneKind::Technical,
+        &[
+            "Technically speaking, ",
+            "From an engineering perspective, ",
+            "In precise terms, ",
+            "From a technical standpoint, ",
+            "Rigorously speaking, ",
+        ],
+    ),
+    (
+        ToneKind::Casual,
+        &[
+            "Hey — ",
+            "So, ",
+            "Quick question — ",
+            "Just wondering — ",
+            "BTW, ",
+        ],
+    ),
+    (
+        ToneKind::Empathetic,
+        &[
+            "I'd really appreciate help here. ",
+            "This is important to me. ",
+            "I'm struggling with this one. ",
+            "If you can help: ",
+            "I'd be grateful for insight. ",
+        ],
+    ),
+    (ToneKind::Direct, &["", "", "", "", ""]),
+    (
+        ToneKind::Formal,
+        &[
+            "If I may ask: ",
+            "I would like to inquire. ",
+            "For your consideration: ",
+            "Respectfully, ",
+            "I'd appreciate a thorough answer. ",
+        ],
+    ),
 ];
 
 // ============================================================================
@@ -283,29 +301,49 @@ fn templates_for_intent(intent: IntentKind) -> &'static [&'static str] {
 
 fn resolver_for_intent(intent: IntentKind) -> ResolverMode {
     match intent {
-        IntentKind::Question | IntentKind::Verify | IntentKind::Extract
-        | IntentKind::Classify | IntentKind::Summarize => ResolverMode::Deterministic,
-        IntentKind::Brainstorm | IntentKind::Critique | IntentKind::Rewrite => ResolverMode::Exploratory,
+        IntentKind::Question
+        | IntentKind::Verify
+        | IntentKind::Extract
+        | IntentKind::Classify
+        | IntentKind::Summarize => ResolverMode::Deterministic,
+        IntentKind::Brainstorm | IntentKind::Critique | IntentKind::Rewrite => {
+            ResolverMode::Exploratory
+        }
         _ => ResolverMode::Balanced,
     }
 }
 
 /// Generate bulk classification pattern data, streaming to a JSONL file.
 /// Returns (examples_written, bytes_written).
-pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed: u64) -> (u64, u64) {
+pub fn generate_bulk_classification(
+    output_path: &Path,
+    target_bytes: u64,
+    seed: u64,
+) -> (u64, u64) {
     let mut rng = seeded_rng(seed);
     let mut writer = JsonlWriter::new(output_path).expect("create classification JSONL");
     let mut count: u64 = 0;
 
     let knowledge_intents = [
-        IntentKind::Question, IntentKind::Explain, IntentKind::Compare,
-        IntentKind::Analyze, IntentKind::Plan, IntentKind::Debug,
-        IntentKind::Verify, IntentKind::Summarize, IntentKind::Classify,
-        IntentKind::Recommend, IntentKind::Extract, IntentKind::Critique,
-        IntentKind::Brainstorm, IntentKind::Translate, IntentKind::Act,
-        IntentKind::Help, IntentKind::Clarify, IntentKind::Rewrite,
+        IntentKind::Question,
+        IntentKind::Explain,
+        IntentKind::Compare,
+        IntentKind::Analyze,
+        IntentKind::Plan,
+        IntentKind::Debug,
+        IntentKind::Verify,
+        IntentKind::Summarize,
+        IntentKind::Classify,
+        IntentKind::Recommend,
+        IntentKind::Extract,
+        IntentKind::Critique,
+        IntentKind::Brainstorm,
+        IntentKind::Translate,
+        IntentKind::Act,
+        IntentKind::Help,
+        IntentKind::Clarify,
+        IntentKind::Rewrite,
     ];
-
 
     // Phase 1: Knowledge-intent classification patterns (~92% of budget)
     let phase1_target = target_bytes * 92 / 100;
@@ -318,9 +356,7 @@ pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed:
 
         let templates = templates_for_intent(*intent);
         let template = pick_str(&mut rng, templates);
-        let base_question = template
-            .replacen("{}", topic, 1)
-            .replacen("{}", domain, 1);
+        let base_question = template.replacen("{}", topic, 1).replacen("{}", domain, 1);
 
         // Apply tone modifier with grammatical lowercase
         let (tone, tone_prefixes) = pick(&mut rng, TONE_MAP);
@@ -329,7 +365,8 @@ pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed:
             base_question.clone()
         } else {
             let mut chars = base_question.chars();
-            let lower_first: String = chars.next()
+            let lower_first: String = chars
+                .next()
                 .map(|c| c.to_lowercase().to_string())
                 .unwrap_or_default();
             format!("{}{}{}", tone_prefix, lower_first, chars.as_str())
@@ -366,7 +403,9 @@ pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed:
             training_options: Default::default(),
         };
 
-        writer.write_example(&example).expect("write classification");
+        writer
+            .write_example(&example)
+            .expect("write classification");
         count += 1;
 
         if count % 100_000 == 0 {
@@ -395,37 +434,64 @@ pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed:
         // Greetings with domain context
         let (gq, ga) = pick(&mut rng, GREETING_VARIATIONS);
         let greeting_q = format!("{} — I'd like to explore {} in {}.", gq, topic, domain);
-        let greeting_answer = format!("{} Let me help you with {} in {}. {}", ga, topic, domain, knowledge);
+        let greeting_answer = format!(
+            "{} Let me help you with {} in {}. {}",
+            ga, topic, domain, knowledge
+        );
         let example = TrainingExample::qa(&greeting_q, &greeting_answer)
             .with_intent(IntentKind::Greeting)
             .with_entities(vec![topic.to_string(), domain.to_string()])
-            .with_context(&format!("classification:Greeting:Casual:Balanced:{}", domain))
+            .with_context(&format!(
+                "classification:Greeting:Casual:Balanced:{}",
+                domain
+            ))
             .with_curriculum_score(130);
-        writer.write_example(&example).expect("write greeting class");
+        writer
+            .write_example(&example)
+            .expect("write greeting class");
         count += 1;
 
         // Gratitude with recap
         let (tq, _ta) = pick(&mut rng, GRATITUDE_VARIATIONS);
-        let gratitude_q = format!("{} — your explanation of {} in {} was clear.", tq, topic, domain);
+        let gratitude_q = format!(
+            "{} — your explanation of {} in {} was clear.",
+            tq, topic, domain
+        );
         let gratitude_answer = format!("You're welcome! To summarize what we covered about {} in {}: {} Feel free to ask more.", topic, domain, knowledge);
         let example = TrainingExample::qa(&gratitude_q, &gratitude_answer)
             .with_intent(IntentKind::Gratitude)
             .with_entities(vec![topic.to_string(), domain.to_string()])
-            .with_context(&format!("classification:Gratitude:Casual:Balanced:{}", domain))
+            .with_context(&format!(
+                "classification:Gratitude:Casual:Balanced:{}",
+                domain
+            ))
             .with_curriculum_score(130);
-        writer.write_example(&example).expect("write gratitude class");
+        writer
+            .write_example(&example)
+            .expect("write gratitude class");
         count += 1;
 
         // Farewell with summary
         let (fq, _fa) = pick(&mut rng, FAREWELL_VARIATIONS);
-        let farewell_q = format!("{} — that's all I needed about {} in {}.", fq, topic, domain);
-        let farewell_answer = format!("Goodbye! Here's a final recap on {} in {}: {} Have a great day!", topic, domain, knowledge);
+        let farewell_q = format!(
+            "{} — that's all I needed about {} in {}.",
+            fq, topic, domain
+        );
+        let farewell_answer = format!(
+            "Goodbye! Here's a final recap on {} in {}: {} Have a great day!",
+            topic, domain, knowledge
+        );
         let example = TrainingExample::qa(&farewell_q, &farewell_answer)
             .with_intent(IntentKind::Farewell)
             .with_entities(vec![topic.to_string(), domain.to_string()])
-            .with_context(&format!("classification:Farewell:Casual:Balanced:{}", domain))
+            .with_context(&format!(
+                "classification:Farewell:Casual:Balanced:{}",
+                domain
+            ))
             .with_curriculum_score(130);
-        writer.write_example(&example).expect("write farewell class");
+        writer
+            .write_example(&example)
+            .expect("write farewell class");
         count += 1;
     }
 
@@ -445,26 +511,40 @@ pub fn generate_bulk_classification(output_path: &Path, target_bytes: u64, seed:
             let example = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Continue)
                 .with_entities(vec![topic.to_string(), domain.to_string()])
-                .with_context(&format!("classification:Continue:NeutralProfessional:Balanced:{}", domain))
+                .with_context(&format!(
+                    "classification:Continue:NeutralProfessional:Balanced:{}",
+                    domain
+                ))
                 .with_curriculum_score(110);
-            writer.write_example(&example).expect("write continue class");
+            writer
+                .write_example(&example)
+                .expect("write continue class");
         } else if roll < 0.7 {
             let question = format!("Forget the previous {} discussion about {}.", domain, topic);
             let answer = format!("Previous context about {} in {} has been cleared. For reference, here is what was discussed: {} Starting fresh.", topic, domain, body);
             let example = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Forget)
                 .with_entities(vec![topic.to_string(), domain.to_string()])
-                .with_context(&format!("classification:Forget:Direct:Deterministic:{}", domain))
+                .with_context(&format!(
+                    "classification:Forget:Direct:Deterministic:{}",
+                    domain
+                ))
                 .with_curriculum_score(110);
             writer.write_example(&example).expect("write forget class");
         } else {
             let detail = pick_str(&mut rng, bulk_generator::DETAIL_POOLS);
-            let question = format!("What about {} and {} together in {}?", topic, detail, domain);
+            let question = format!(
+                "What about {} and {} together in {}?",
+                topic, detail, domain
+            );
             let answer = format!("That's an interesting but ambiguous question. Regarding {} in {}: {} Could you clarify what specific aspect you'd like to explore?", topic, domain, body);
             let example = TrainingExample::qa(&question, &answer)
                 .with_intent(IntentKind::Unknown)
                 .with_entities(vec![topic.to_string(), domain.to_string()])
-                .with_context(&format!("classification:Unknown:NeutralProfessional:Balanced:{}", domain))
+                .with_context(&format!(
+                    "classification:Unknown:NeutralProfessional:Balanced:{}",
+                    domain
+                ))
                 .with_curriculum_score(90);
             writer.write_example(&example).expect("write unknown class");
         }
@@ -482,12 +562,24 @@ mod tests {
     #[test]
     fn all_knowledge_intents_have_templates() {
         let intents = [
-            IntentKind::Question, IntentKind::Explain, IntentKind::Compare,
-            IntentKind::Analyze, IntentKind::Plan, IntentKind::Debug,
-            IntentKind::Verify, IntentKind::Summarize, IntentKind::Classify,
-            IntentKind::Recommend, IntentKind::Extract, IntentKind::Critique,
-            IntentKind::Brainstorm, IntentKind::Translate, IntentKind::Act,
-            IntentKind::Help, IntentKind::Clarify, IntentKind::Rewrite,
+            IntentKind::Question,
+            IntentKind::Explain,
+            IntentKind::Compare,
+            IntentKind::Analyze,
+            IntentKind::Plan,
+            IntentKind::Debug,
+            IntentKind::Verify,
+            IntentKind::Summarize,
+            IntentKind::Classify,
+            IntentKind::Recommend,
+            IntentKind::Extract,
+            IntentKind::Critique,
+            IntentKind::Brainstorm,
+            IntentKind::Translate,
+            IntentKind::Act,
+            IntentKind::Help,
+            IntentKind::Clarify,
+            IntentKind::Rewrite,
         ];
         for intent in intents {
             let t = templates_for_intent(intent);

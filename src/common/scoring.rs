@@ -46,12 +46,14 @@ impl ScoreUtils {
             return 0.0;
         }
         let mean = Self::mean(scores);
-        scores.iter()
+        scores
+            .iter()
             .map(|&s| {
                 let diff = s - mean;
                 diff * diff
             })
-            .sum::<f32>() / scores.len() as f32
+            .sum::<f32>()
+            / scores.len() as f32
     }
 
     /// Calculate standard deviation of scores
@@ -65,16 +67,19 @@ impl ScoreUtils {
             return vec![1.0 / scores.len().max(1) as f32; scores.len()];
         }
 
-        let exp_scores: Vec<f32> = scores.iter()
-            .map(|&s| (s / temperature).exp())
-            .collect();
+        let exp_scores: Vec<f32> = scores.iter().map(|&s| (s / temperature).exp()).collect();
         let sum: f32 = exp_scores.iter().sum();
 
         exp_scores.into_iter().map(|e| e / sum).collect()
     }
 
     /// Accumulate score score with per-keyword increment
-    pub fn accumulate_keyword_score(input: &str, keywords: &[&str], increment: f32, max: f32) -> f32 {
+    pub fn accumulate_keyword_score(
+        input: &str,
+        keywords: &[&str],
+        increment: f32,
+        max: f32,
+    ) -> f32 {
         let input_lower = input.to_lowercase();
         let mut score = 0.0;
 

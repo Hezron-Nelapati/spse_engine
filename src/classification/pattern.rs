@@ -3,8 +3,10 @@
 //! ClassificationPattern wraps a signature with labels (intent, tone, resolver mode)
 //! and learning metrics for Layer 18 feedback integration.
 
-use crate::types::{IntentKind, MemoryChannel, MemoryType, ResolverMode, ToneKind, Unit, UnitLevel};
 use crate::classification::ClassificationSignature;
+use crate::types::{
+    IntentKind, MemoryChannel, MemoryType, ResolverMode, ToneKind, Unit, UnitLevel,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -17,7 +19,7 @@ pub struct ClassificationPattern {
     pub unit_id: Uuid,
     /// Feature signature for similarity matching
     pub signature: ClassificationSignature,
-    
+
     // Labels from seed data
     /// Classified intent kind
     pub intent_kind: IntentKind,
@@ -25,7 +27,7 @@ pub struct ClassificationPattern {
     pub tone_kind: ToneKind,
     /// Resolver mode for this pattern
     pub resolver_mode: ResolverMode,
-    
+
     // Learning metrics (Layer 18 feedback)
     /// Number of successful predictions
     pub success_count: u64,
@@ -33,11 +35,11 @@ pub struct ClassificationPattern {
     pub failure_count: u64,
     /// Last reinforcement timestamp
     pub last_reinforced: DateTime<Utc>,
-    
+
     // Context
     /// Optional domain context
     pub domain: Option<String>,
-    
+
     /// Memory channels (always includes Intent)
     pub memory_channels: Vec<MemoryChannel>,
 }
@@ -64,7 +66,7 @@ impl ClassificationPattern {
             memory_channels: vec![MemoryChannel::Main, MemoryChannel::Intent],
         }
     }
-    
+
     /// Confidence derived from success/failure ratio.
     /// Returns 0.5 for patterns with no observations.
     pub fn confidence(&self) -> f32 {
@@ -74,7 +76,7 @@ impl ClassificationPattern {
         }
         (self.success_count as f32 / total as f32).clamp(0.1, 1.0)
     }
-    
+
     /// Convert to Unit for storage in MemoryStore.
     /// Uses distinct marker pattern to prevent Layer 2 merging with raw text units.
     ///
@@ -85,14 +87,13 @@ impl ClassificationPattern {
         let signature_hash = self.signature.signature_hash_8char();
         let marker = format!(
             "pattern:{:?}:{:?}:{}",
-            self.intent_kind,
-            self.tone_kind,
-            signature_hash
-        ).to_lowercase();
-        
+            self.intent_kind, self.tone_kind, signature_hash
+        )
+        .to_lowercase();
+
         // Serialize full signature to JSON for persistence
         let sig_json = serde_json::to_string(&self.signature).unwrap_or_default();
-        
+
         Unit {
             id: self.unit_id,
             content: marker,
@@ -102,7 +103,7 @@ impl ClassificationPattern {
             utility_score: self.confidence(),
             semantic_position: self.signature.semantic_centroid,
             anchor_status: self.success_count > 10, // Anchor after 10+ successes
-            memory_type: MemoryType::Core, // Classification patterns go to Core
+            memory_type: MemoryType::Core,          // Classification patterns go to Core
             memory_channels: self.memory_channels.clone(),
             confidence: self.confidence(),
             trust_score: self.confidence(), // Trust = confidence for patterns
@@ -110,30 +111,30 @@ impl ClassificationPattern {
             ..Unit::default()
         }
     }
-    
+
     /// Record a successful prediction (Layer 18 feedback).
     pub fn record_success(&mut self) {
         self.success_count += 1;
         self.last_reinforced = Utc::now();
     }
-    
+
     /// Record a failed prediction (Layer 18 feedback).
     pub fn record_failure(&mut self) {
         self.failure_count += 1;
         self.last_reinforced = Utc::now();
     }
-    
+
     /// Check if pattern is an anchor (high confidence, many successes).
     pub fn is_anchor(&self) -> bool {
         self.success_count > 10 && self.confidence() > 0.8
     }
-    
+
     /// Check if pattern should be pruned (low utility).
     pub fn should_prune(&self, threshold: f32) -> bool {
         let total = self.success_count + self.failure_count;
         total > 5 && self.confidence() < threshold
     }
-    
+
     /// Create from Unit (for loading from memory).
     pub fn from_unit(unit: &Unit) -> Option<Self> {
         // Parse marker format: pattern:<intent>:<tone>:<hash8>
@@ -141,17 +142,17 @@ impl ClassificationPattern {
         if parts.len() != 4 || parts[0] != "pattern" {
             return None;
         }
-        
+
         let intent_kind = parse_intent_kind(parts[1]);
         let tone_kind = parse_tone_kind(parts[2]);
-        
+
         // Deserialize full signature from normalized field (JSON), fallback to dummy
         let signature = serde_json::from_str::<ClassificationSignature>(&unit.normalized)
             .unwrap_or_else(|_| ClassificationSignature {
                 semantic_centroid: unit.semantic_position,
                 ..ClassificationSignature::default()
             });
-        
+
         Some(Self {
             unit_id: unit.id,
             signature,
@@ -231,12 +232,12 @@ pub fn parse_tone_kind(s: &str) -> ToneKind {
 mod tests {
     use super::*;
     use crate::classification::SemanticHasher;
-    
+
     #[test]
     fn test_pattern_creation() {
         let hasher = SemanticHasher::new();
         let sig = ClassificationSignature::compute("Hello there", &hasher);
-        
+
         let pattern = ClassificationPattern::new(
             sig,
             IntentKind::Greeting,
@@ -244,68 +245,68 @@ mod tests {
             ResolverMode::Balanced,
             Some("general".to_string()),
         );
-        
+
         assert_eq!(pattern.intent_kind, IntentKind::Greeting);
         assert_eq!(pattern.tone_kind, ToneKind::Casual);
         assert_eq!(pattern.confidence(), 0.5); // No observations yet
     }
-    
+
     #[test]
     fn test_pattern_to_unit_marker() {
         let pattern = ClassificationPattern::default();
         let unit = pattern.to_unit();
-        
+
         assert!(unit.content.starts_with("pattern:"));
         assert!(unit.content.contains("unknown")); // Default intent
         assert_eq!(unit.level, UnitLevel::Pattern);
     }
-    
+
     #[test]
     fn test_pattern_confidence() {
         let mut pattern = ClassificationPattern::default();
-        
+
         assert_eq!(pattern.confidence(), 0.5); // No observations
-        
+
         pattern.record_success();
         pattern.record_success();
         pattern.record_success();
-        
+
         assert_eq!(pattern.confidence(), 1.0); // 3/3 = 1.0
-        
+
         pattern.record_failure();
-        
+
         assert!((pattern.confidence() - 0.75).abs() < 0.01); // 3/4 = 0.75
     }
-    
+
     #[test]
     fn test_pattern_anchor_status() {
         let mut pattern = ClassificationPattern::default();
-        
+
         assert!(!pattern.is_anchor());
-        
+
         for _ in 0..15 {
             pattern.record_success();
         }
-        
+
         assert!(pattern.is_anchor());
     }
-    
+
     #[test]
     fn test_pattern_pruning() {
         let mut pattern = ClassificationPattern::default();
-        
+
         // Not enough observations
         assert!(!pattern.should_prune(0.3));
-        
+
         // Add some failures
         for _ in 0..10 {
             pattern.record_failure();
         }
-        
+
         // Should prune if confidence < 0.3
         assert!(pattern.should_prune(0.3));
     }
-    
+
     #[test]
     fn test_parse_intent_kind() {
         assert_eq!(parse_intent_kind("greeting"), IntentKind::Greeting);
@@ -314,7 +315,7 @@ mod tests {
         assert_eq!(parse_intent_kind("unknown"), IntentKind::Unknown);
         assert_eq!(parse_intent_kind("invalid"), IntentKind::Unknown);
     }
-    
+
     #[test]
     fn test_parse_tone_kind() {
         assert_eq!(parse_tone_kind("casual"), ToneKind::Casual);

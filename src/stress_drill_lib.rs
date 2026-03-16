@@ -41,7 +41,7 @@ impl Default for StressDrillConfig {
         } else {
             DEFAULT_CORPUS_SIZE_MB_CPU
         };
-        
+
         Self {
             corpus_size_mb,
             source_types: vec![
@@ -89,39 +89,39 @@ pub struct StressDrillResult {
 pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
     let mut result = StressDrillResult::default();
     let start = Instant::now();
-    
+
     // Create temp database
     let db_path = temp_db_path("stress_drill");
-    
+
     // Generate heterogeneous corpus
     let corpus = generate_heterogeneous_corpus(config);
     result.total_documents = corpus.documents.len();
-    
+
     // Initialize engine
     let engine_config = EngineConfig::load_default_file();
     let engine = Engine::new_with_config_and_db_path(engine_config.clone(), &db_path);
-    
+
     // Track latencies
     let mut latencies: Vec<f64> = Vec::new();
     let mut spike_count = 0u64;
-    
+
     // Create runtime for async processing
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-    
+
     // Process documents with interleaved queries
     for (idx, doc) in corpus.documents.iter().enumerate() {
         let doc_start = Instant::now();
-        
+
         // Ingest document
         let _ = rt.block_on(engine.process(&doc.content));
-        
+
         let doc_latency = doc_start.elapsed().as_millis() as f64;
         latencies.push(doc_latency);
-        
+
         if doc_latency > config.max_latency_spike_ms as f64 {
             spike_count += 1;
         }
-        
+
         // Interleave queries
         if idx % 10 == 0 {
             let query_start = Instant::now();
@@ -130,13 +130,13 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
             latencies.push(query_latency);
             result.total_queries += 1;
         }
-        
+
         // Simulate maintenance cycles
         if idx > 0 && idx % 1000 == 0 {
             result.snapshots_created += 1;
         }
     }
-    
+
     // Calculate latency statistics
     if !latencies.is_empty() {
         latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -146,7 +146,7 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
         result.latency.p99_ms = latencies.get(p99_idx).copied().unwrap_or(0.0);
         result.latency.spike_count = spike_count;
     }
-    
+
     // Check pollution via audit_pollution (public method)
     let pollution_findings = engine.audit_pollution(64);
     let polluted_count = pollution_findings.len();
@@ -156,21 +156,21 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
     } else {
         0.0
     };
-    
+
     // Verify snapshots
     result.snapshots_verified = result.snapshots_created;
     result.consistency_errors = 0;
-    
+
     result.duration_sec = start.elapsed().as_secs_f64();
     result.docs_per_sec = if result.duration_sec > 0.0 {
         result.total_documents as f64 / result.duration_sec
     } else {
         0.0
     };
-    
+
     // Determine pass/fail
     result.passed = true;
-    
+
     if result.pollution_ratio > config.pollution_ceiling_percent / 100.0 {
         result.passed = false;
         result.failures.push(format!(
@@ -179,7 +179,7 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
             config.pollution_ceiling_percent
         ));
     }
-    
+
     if result.latency.spike_count > 10 {
         result.passed = false;
         result.failures.push(format!(
@@ -187,7 +187,7 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
             result.latency.spike_count
         ));
     }
-    
+
     if result.consistency_errors > 0 {
         result.passed = false;
         result.failures.push(format!(
@@ -195,10 +195,10 @@ pub fn run_stress_drill(config: &StressDrillConfig) -> StressDrillResult {
             result.consistency_errors
         ));
     }
-    
+
     // Cleanup
     let _ = std::fs::remove_file(&db_path);
-    
+
     result
 }
 
@@ -220,7 +220,7 @@ pub fn generate_heterogeneous_corpus(config: &StressDrillConfig) -> Heterogeneou
     let target_bytes = config.corpus_size_mb * 1024 * 1024;
     let mut documents = Vec::new();
     let mut total_bytes = 0;
-    
+
     // Distribution: 30% HTML, 20% QA JSON, 15% Wikidata, 15% OpenAPI, 20% Common Crawl
     let distribution: HashMap<SourceTypeId, f32> = [
         (SourceTypeId::Html, 0.30),
@@ -228,33 +228,36 @@ pub fn generate_heterogeneous_corpus(config: &StressDrillConfig) -> Heterogeneou
         (SourceTypeId::WikidataTruthy, 0.15),
         (SourceTypeId::OpenApi, 0.15),
         (SourceTypeId::CommonCrawlWet, 0.20),
-    ].iter().cloned().collect();
-    
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     let mut doc_id = 0;
-    
+
     while total_bytes < target_bytes {
         for source_type in &config.source_types {
             let ratio = distribution.get(source_type).copied().unwrap_or(0.2);
             let _target_for_type = (target_bytes as f32 * ratio) as usize;
-            
+
             let content = generate_source_document(*source_type, doc_id);
             let bytes = content.len();
-            
+
             documents.push(HeterogeneousDocument {
                 content,
                 source_type: *source_type,
                 bytes,
             });
-            
+
             total_bytes += bytes;
             doc_id += 1;
-            
+
             if total_bytes >= target_bytes {
                 break;
             }
         }
     }
-    
+
     HeterogeneousCorpus {
         documents,
         total_bytes,

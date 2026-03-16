@@ -205,7 +205,8 @@ impl DynamicMemoryAllocator {
         }
 
         let buffer_size_kb = self.config.thought_buffer_size_kb;
-        self.current_usage_kb.fetch_sub(buffer_size_kb, Ordering::Relaxed);
+        self.current_usage_kb
+            .fetch_sub(buffer_size_kb, Ordering::Relaxed);
         self.buffer_count.fetch_sub(1, Ordering::Relaxed);
         self.total_deallocations.fetch_add(1, Ordering::Relaxed);
 
@@ -366,8 +367,8 @@ mod tests {
     fn test_dynamic_allocator_basic() {
         let config = DynamicMemoryConfig {
             enabled: true,
-            base_memory_limit_mb: 10,  // 10MB
-            max_memory_limit_mb: 20,   // 20MB
+            base_memory_limit_mb: 10, // 10MB
+            max_memory_limit_mb: 20,  // 20MB
             thought_buffer_size_kb: 64,
         };
 
@@ -411,8 +412,8 @@ mod tests {
     fn test_memory_limit_enforcement() {
         let config = DynamicMemoryConfig {
             enabled: true,
-            base_memory_limit_mb: 1,   // 1MB - very small
-            max_memory_limit_mb: 2,    // 2MB
+            base_memory_limit_mb: 1,     // 1MB - very small
+            max_memory_limit_mb: 2,      // 2MB
             thought_buffer_size_kb: 512, // 512KB per buffer
         };
 
@@ -432,9 +433,15 @@ mod tests {
         assert!(buf4.is_some());
 
         // Cleanup
-        if let Some(b) = buf1 { allocator.deallocate_thought_buffer(b); }
-        if let Some(b) = buf2 { allocator.deallocate_thought_buffer(b); }
-        if let Some(b) = buf4 { allocator.deallocate_thought_buffer(b); }
+        if let Some(b) = buf1 {
+            allocator.deallocate_thought_buffer(b);
+        }
+        if let Some(b) = buf2 {
+            allocator.deallocate_thought_buffer(b);
+        }
+        if let Some(b) = buf4 {
+            allocator.deallocate_thought_buffer(b);
+        }
     }
 
     #[test]

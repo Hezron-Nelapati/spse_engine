@@ -1,7 +1,7 @@
 use crate::config::ScoringWeights;
 use crate::types::{
-    ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate, SequenceState, Unit, UnitLevel,
-    text_fingerprint,
+    text_fingerprint, ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate,
+    SequenceState, Unit, UnitLevel,
 };
 use nalgebra::SVector;
 use rayon::prelude::*;
@@ -23,38 +23,54 @@ pub fn score_candidates_gpu_accelerated(
     {
         use crate::gpu::compute::candidate_scorer::score_candidates;
         let mut scored = score_candidates(candidates, context, sequence, merged, weights);
-        
+
         // Apply exact match bonus post-processing (GPU doesn't handle this)
         if let Some(query) = original_query {
             let query_terms: Vec<String> = if !context.summary.is_empty() {
-                context.summary
+                context
+                    .summary
                     .split_whitespace()
                     .take(10)
                     .map(|s| s.to_lowercase())
                     .collect()
             } else {
-                query.split_whitespace().take(10).map(|s| s.to_lowercase()).collect()
+                query
+                    .split_whitespace()
+                    .take(10)
+                    .map(|s| s.to_lowercase())
+                    .collect()
             };
-            
+
             for candidate in &mut scored {
-                let exact_bonus = exact_match_score(&candidate.content.to_lowercase(), &query_terms, intent)
-                    * level_multiplier(crate::types::UnitLevel::Word); // Use default level multiplier
+                let exact_bonus =
+                    exact_match_score(&candidate.content.to_lowercase(), &query_terms, intent)
+                        * level_multiplier(crate::types::UnitLevel::Word); // Use default level multiplier
                 candidate.score += exact_bonus;
             }
         }
-        
+
         // Sort by score descending
         scored.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
-        
+
         return scored;
     }
-    
+
     // CPU fallback when GPU feature is disabled
     #[cfg(not(feature = "gpu"))]
     {
-        CandidateScorer::score(candidates, context, sequence, merged, weights, intent, original_query)
+        CandidateScorer::score(
+            candidates,
+            context,
+            sequence,
+            merged,
+            weights,
+            intent,
+            original_query,
+        )
     }
 }
 
@@ -82,7 +98,7 @@ impl CandidateScorer {
             .iter()
             .map(|entity| entity.to_lowercase())
             .collect::<Vec<_>>();
-        
+
         // Pre-compute summary_lower once (use cached if available)
         let summary_lower = if !context.summary_lower.is_empty() {
             context.summary_lower.clone()
@@ -91,20 +107,29 @@ impl CandidateScorer {
         };
 
         // Extract query terms from summary_lower (already lowercase, no extra alloc)
-        let query_terms: Vec<String> = if !summary_lower.is_empty() && summary_lower != "no active context" {
-            summary_lower
-                .split_whitespace()
-                .take(10)
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            original_query
-                .map(|q| q.split_whitespace().take(10).map(|s| s.to_lowercase()).collect())
-                .unwrap_or_default()
-        };
+        let query_terms: Vec<String> =
+            if !summary_lower.is_empty() && summary_lower != "no active context" {
+                summary_lower
+                    .split_whitespace()
+                    .take(10)
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                original_query
+                    .map(|q| {
+                        q.split_whitespace()
+                            .take(10)
+                            .map(|s| s.to_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
 
         // Pre-compute evidence document lowercase strings once for all candidates
-        let evidence_lower: Vec<String> = merged.evidence.documents.iter()
+        let evidence_lower: Vec<String> = merged
+            .evidence
+            .documents
+            .iter()
             .map(|doc| doc.normalized_content.to_lowercase())
             .collect();
         let evidence_trust = merged.evidence.average_trust;
@@ -119,7 +144,11 @@ impl CandidateScorer {
         let cell_content_lower: Vec<String> = if !context.cell_content_lower.is_empty() {
             context.cell_content_lower.clone()
         } else {
-            context.cells.iter().map(|c| c.content.to_lowercase()).collect()
+            context
+                .cells
+                .iter()
+                .map(|c| c.content.to_lowercase())
+                .collect()
         };
 
         let score_one = |unit: &Unit| -> ScoredCandidate {
@@ -143,11 +172,20 @@ impl CandidateScorer {
             let level_multiplier = level_multiplier(unit.level);
 
             // Context match using pre-computed fingerprints (O(1) per cell instead of string cmp)
-            let context_fit = context_match_precomputed(&lowered, fp, cell_fingerprints, &cell_content_lower, &summary_lower) * level_multiplier;
+            let context_fit = context_match_precomputed(
+                &lowered,
+                fp,
+                cell_fingerprints,
+                &cell_content_lower,
+                &summary_lower,
+            ) * level_multiplier;
 
             let sequence_fit = if recent_unit_ids.contains(&unit.id) {
                 0.95 * level_multiplier
-            } else if task_entities.iter().any(|entity| lowered.contains(entity.as_str())) {
+            } else if task_entities
+                .iter()
+                .any(|entity| lowered.contains(entity.as_str()))
+            {
                 0.65 * level_multiplier
             } else {
                 0.25 * level_multiplier
@@ -158,11 +196,17 @@ impl CandidateScorer {
             let confidence_fit = ((unit.confidence + unit.trust_score) / 2.0).clamp(0.0, 1.0);
 
             // Evidence match using pre-computed lowercase strings
-            let evidence_support = evidence_match_precomputed(&lowered, &evidence_lower, evidence_trust, evidence_support_base) * level_multiplier;
+            let evidence_support = evidence_match_precomputed(
+                &lowered,
+                &evidence_lower,
+                evidence_trust,
+                evidence_support_base,
+            ) * level_multiplier;
 
             // Exact match bonus: prioritize candidates that exactly match query terms
             // This helps disambiguate "Donald Trump" from "Donald Trump Jr."
-            let exact_match_bonus = exact_match_score(&lowered, &query_terms, intent) * level_multiplier;
+            let exact_match_bonus =
+                exact_match_score(&lowered, &query_terms, intent) * level_multiplier;
 
             let breakdown = ScoreBreakdown {
                 spatial_fit,
@@ -183,7 +227,8 @@ impl CandidateScorer {
                 confidence_fit,
                 evidence_support,
             ]);
-            let score = weight_vector.dot(&feature_vector) + merged.freshness_boost + exact_match_bonus;
+            let score =
+                weight_vector.dot(&feature_vector) + merged.freshness_boost + exact_match_bonus;
 
             ScoredCandidate {
                 unit_id: unit.id,
@@ -309,16 +354,16 @@ fn exact_match_score(candidate: &str, query_terms: &[String], intent: Option<Int
     if query_terms.is_empty() {
         return 0.0;
     }
-    
+
     // Only apply for factual/question intents where exact matching matters
     let is_factual = matches!(
         intent,
         Some(IntentKind::Question) | Some(IntentKind::Verify) | Some(IntentKind::Extract)
     );
-    
+
     if !is_factual {
         return 0.0;
     }
-    
+
     crate::common::similarity::SimilarityUtils::exact_match_score(candidate, query_terms)
 }

@@ -4,29 +4,30 @@
 //! Falls back to CPU when GPU is unavailable.
 
 use std::sync::Arc;
-use wgpu::{Device, Queue, Buffer, BindGroupLayout, ComputePipeline, PipelineLayoutDescriptor, BindGroupLayoutDescriptor, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{
+    BindGroupLayout, BindGroupLayoutDescriptor, Buffer, ComputePipeline, Device,
+    PipelineLayoutDescriptor, Queue, ShaderModuleDescriptor, ShaderSource,
+};
 
-use crate::types::{IntentKind, ToneKind, ResolverMode, ClassificationResult, CalculationMethod};
-use crate::classification::{ClassificationSignature, ClassificationPattern};
+use crate::classification::{ClassificationPattern, ClassificationSignature};
 use crate::config::ClassificationConfig;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::is_gpu_available;
-use once_cell::sync::Lazy;
+use crate::types::{CalculationMethod, ClassificationResult, IntentKind, ResolverMode, ToneKind};
 use bytemuck::{Pod, Zeroable};
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
 /// Global cached GPU classification calculator (lazy initialized)
 static GPU_CLASSIFIER: Lazy<Option<Arc<GpuClassificationCalculator>>> = Lazy::new(|| {
-    crate::gpu::global_device().and_then(|gpu| {
-        match GpuClassificationCalculator::new(&gpu) {
-            Ok(calc) => {
-                log::info!("GPU classification calculator initialized");
-                Some(Arc::new(calc))
-            }
-            Err(e) => {
-                log::warn!("Failed to initialize GPU classification calculator: {}", e);
-                None
-            }
+    crate::gpu::global_device().and_then(|gpu| match GpuClassificationCalculator::new(&gpu) {
+        Ok(calc) => {
+            log::info!("GPU classification calculator initialized");
+            Some(Arc::new(calc))
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize GPU classification calculator: {}", e);
+            None
         }
     })
 });
@@ -74,11 +75,7 @@ impl From<&ClassificationSignature> for GpuSignature {
             semantic_centroid: sig.semantic_centroid,
             _pad0: 0.0,
             // Map derived scores
-            derived_scores: [
-                sig.urgency_score,
-                sig.formality_score,
-                sig.technical_score,
-            ],
+            derived_scores: [sig.urgency_score, sig.formality_score, sig.technical_score],
             _pad1: 0.0,
         }
     }
@@ -197,7 +194,7 @@ impl GpuClassificationCalculator {
         let device = gpu.device();
         let queue = gpu.queue();
         let workgroup_size = gpu.capabilities().preferred_workgroup_size.max(64);
-        
+
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("ClassificationBindGroupLayout"),
@@ -248,45 +245,51 @@ impl GpuClassificationCalculator {
                 },
             ],
         });
-        
+
         // Create similarity pipeline
         let similarity_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("ClassificationSimilarityShader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/classification_similarity.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                include_str!("../shaders/classification_similarity.wgsl").into(),
+            ),
         });
-        
-        let similarity_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ClassificationSimilarityPipeline"),
-            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some("ClassificationSimilarityLayout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            })),
-            module: &similarity_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        
+
+        let similarity_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("ClassificationSimilarityPipeline"),
+                layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                    label: Some("ClassificationSimilarityLayout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                })),
+                module: &similarity_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         // Create aggregation pipeline
         let aggregation_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("ClassificationAggregationShader"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/classification_aggregation.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                include_str!("../shaders/classification_aggregation.wgsl").into(),
+            ),
         });
-        
-        let aggregation_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ClassificationAggregationPipeline"),
-            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some("ClassificationAggregationLayout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            })),
-            module: &aggregation_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        
+
+        let aggregation_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("ClassificationAggregationPipeline"),
+                layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                    label: Some("ClassificationAggregationLayout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                })),
+                module: &aggregation_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -297,14 +300,16 @@ impl GpuClassificationCalculator {
             cached_buffers: std::sync::Mutex::new(HashMap::new()),
         })
     }
-    
+
     /// Get or create cached buffers for pattern count
     fn get_buffers(&self, pattern_count: usize) -> (Buffer, Buffer, Buffer, Buffer, Buffer) {
         // Round up to next power of 2 for better cache reuse
-        let bucket = pattern_count.next_power_of_two().min(MAX_PATTERNS_PER_DISPATCH);
-        
+        let bucket = pattern_count
+            .next_power_of_two()
+            .min(MAX_PATTERNS_PER_DISPATCH);
+
         let mut cache = self.cached_buffers.lock().unwrap();
-        
+
         if !cache.contains_key(&bucket) {
             // Create new buffers for this bucket
             let query_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -313,21 +318,21 @@ impl GpuClassificationCalculator {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            
+
             let patterns_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("PatternsBuffer"),
                 size: (std::mem::size_of::<GpuPattern>() * bucket) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            
+
             let results_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("ResultsBuffer"),
                 size: (std::mem::size_of::<GpuSimilarityResult>() * bucket) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-            
+
             let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("StagingBuffer"),
                 size: (std::mem::size_of::<GpuSimilarityResult>() * bucket) as u64,
@@ -341,16 +346,19 @@ impl GpuClassificationCalculator {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            
-            cache.insert(bucket, CachedBuffers {
-                query_buffer,
-                patterns_buffer,
-                results_buffer,
-                staging_buffer,
-                config_buffer,
-            });
+
+            cache.insert(
+                bucket,
+                CachedBuffers {
+                    query_buffer,
+                    patterns_buffer,
+                    results_buffer,
+                    staging_buffer,
+                    config_buffer,
+                },
+            );
         }
-        
+
         let cached = cache.get(&bucket).unwrap();
         (
             cached.query_buffer.clone(),
@@ -360,7 +368,7 @@ impl GpuClassificationCalculator {
             cached.config_buffer.clone(),
         )
     }
-    
+
     /// Calculate classification using GPU acceleration
     /// Returns None if GPU fails, caller should fall back to CPU
     pub fn calculate_gpu(
@@ -370,7 +378,7 @@ impl GpuClassificationCalculator {
         config: &ClassificationConfig,
     ) -> Option<ClassificationResult> {
         let start = std::time::Instant::now();
-        
+
         if patterns.is_empty() {
             return Some(ClassificationResult {
                 intent: IntentKind::Unknown,
@@ -381,12 +389,12 @@ impl GpuClassificationCalculator {
                 candidate_count: 0,
             });
         }
-        
+
         // Limit patterns to prevent buffer overflow
         let effective_count = patterns.len().min(MAX_PATTERNS_PER_DISPATCH);
         let patterns = &patterns[..effective_count];
         let pattern_count = effective_count as u32;
-        
+
         // Convert patterns to GPU format (pre-allocate)
         let mut gpu_patterns = Vec::with_capacity(effective_count);
         for p in patterns {
@@ -401,15 +409,17 @@ impl GpuClassificationCalculator {
                 _padding: [0; 2],
             });
         }
-        
+
         // Get cached buffers
-        let (query_buffer, patterns_buffer, results_buffer, staging_buffer, config_buffer) = 
+        let (query_buffer, patterns_buffer, results_buffer, staging_buffer, config_buffer) =
             self.get_buffers(effective_count);
-        
+
         // Write data
         let gpu_query = GpuSignature::from(query_sig);
-        self.queue.write_buffer(&query_buffer, 0, bytemuck::bytes_of(&gpu_query));
-        self.queue.write_buffer(&patterns_buffer, 0, bytemuck::cast_slice(&gpu_patterns));
+        self.queue
+            .write_buffer(&query_buffer, 0, bytemuck::bytes_of(&gpu_query));
+        self.queue
+            .write_buffer(&patterns_buffer, 0, bytemuck::cast_slice(&gpu_patterns));
 
         let gpu_config = GpuConfig {
             min_similarity_threshold: config.min_similarity_threshold,
@@ -419,8 +429,9 @@ impl GpuClassificationCalculator {
             pattern_count,
             _padding: [0; 3],
         };
-        self.queue.write_buffer(&config_buffer, 0, bytemuck::bytes_of(&gpu_config));
-        
+        self.queue
+            .write_buffer(&config_buffer, 0, bytemuck::bytes_of(&gpu_config));
+
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ClassificationBindGroup"),
@@ -444,12 +455,14 @@ impl GpuClassificationCalculator {
                 },
             ],
         });
-        
+
         // Dispatch compute
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ClassificationEncoder"),
-        });
-        
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ClassificationEncoder"),
+            });
+
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ClassificationSimilarityPass"),
@@ -457,11 +470,11 @@ impl GpuClassificationCalculator {
             });
             pass.set_pipeline(&self.similarity_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            
+
             let workgroups = (pattern_count + self.workgroup_size - 1) / self.workgroup_size;
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
-        
+
         // Copy results to staging
         encoder.copy_buffer_to_buffer(
             &results_buffer,
@@ -470,22 +483,23 @@ impl GpuClassificationCalculator {
             0,
             (std::mem::size_of::<GpuSimilarityResult>() * effective_count) as u64,
         );
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
-        
+
         // Read back results
         let results = futures::executor::block_on(async {
-            let slice = staging_buffer.slice(..(std::mem::size_of::<GpuSimilarityResult>() * effective_count) as u64);
+            let slice = staging_buffer
+                .slice(..(std::mem::size_of::<GpuSimilarityResult>() * effective_count) as u64);
             slice.map_async(wgpu::MapMode::Read, |_| ());
             self.device.poll(wgpu::Maintain::Wait);
-            
+
             let data = slice.get_mapped_range().to_vec();
             // slice is dropped here (Copy type, drop is no-op but scope ends)
             staging_buffer.unmap();
-            
+
             bytemuck::cast_slice::<u8, GpuSimilarityResult>(&data).to_vec()
         });
-        
+
         let elapsed = start.elapsed();
         log::debug!(
             "GPU classification: {} patterns in {:?} ({:.2} patterns/ms)",
@@ -493,12 +507,13 @@ impl GpuClassificationCalculator {
             elapsed,
             effective_count as f64 / elapsed.as_secs_f64() / 1000.0
         );
-        
+
         // Filter by threshold and aggregate
-        let scored: Vec<_> = results.into_iter()
+        let scored: Vec<_> = results
+            .into_iter()
             .filter(|r| r.final_score >= config.min_similarity_threshold)
             .collect();
-        
+
         if scored.is_empty() {
             return Some(ClassificationResult {
                 intent: IntentKind::Unknown,
@@ -509,12 +524,12 @@ impl GpuClassificationCalculator {
                 candidate_count: 0,
             });
         }
-        
+
         // Aggregate votes on CPU (small dataset, not worth GPU dispatch)
         let mut intent_scores = [0.0f32; 23];
         let mut tone_scores = [0.0f32; 8];
         let mut resolver_scores = [0.0f32; 3];
-        
+
         for result in &scored {
             if (result.intent_index as usize) < 23 {
                 intent_scores[result.intent_index as usize] += result.final_score;
@@ -526,33 +541,44 @@ impl GpuClassificationCalculator {
                 resolver_scores[result.resolver_index as usize] += result.final_score;
             }
         }
-        
+
         // Find best scores
-        let (best_intent, intent_score) = intent_scores.iter()
+        let (best_intent, intent_score) = intent_scores
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &s)| (i as u32, s))
             .unwrap_or((0, 0.0));
-        
-        let (best_tone, tone_score) = tone_scores.iter()
+
+        let (best_tone, tone_score) = tone_scores
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &s)| (i as u32, s))
             .unwrap_or((0, 0.0));
-        
-        let (best_resolver, _) = resolver_scores.iter()
+
+        let (best_resolver, _) = resolver_scores
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, &s)| (i as u32, s))
             .unwrap_or((1, 0.0));
-        
+
         // Normalize confidence as share of winning class in total votes
         let intent_total: f32 = intent_scores.iter().sum();
         let tone_total: f32 = tone_scores.iter().sum();
-        let intent_confidence = if intent_total > 0.0 { intent_score / intent_total } else { 0.0 };
-        let tone_confidence = if tone_total > 0.0 { tone_score / tone_total } else { 0.0 };
+        let intent_confidence = if intent_total > 0.0 {
+            intent_score / intent_total
+        } else {
+            0.0
+        };
+        let tone_confidence = if tone_total > 0.0 {
+            tone_score / tone_total
+        } else {
+            0.0
+        };
         let confidence = ((intent_confidence + tone_confidence) / 2.0).clamp(0.0, 1.0);
-        
+
         // Apply confidence-driven resolver override
         let final_resolver = if confidence < config.low_confidence_threshold {
             ResolverMode::Exploratory
@@ -565,7 +591,7 @@ impl GpuClassificationCalculator {
                 _ => ResolverMode::Exploratory,
             }
         };
-        
+
         Some(ClassificationResult {
             intent: intent_from_index(best_intent),
             tone: tone_from_index(best_tone),

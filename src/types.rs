@@ -178,13 +178,13 @@ pub enum TrainingSourceType {
 pub enum ReasoningType {
     #[default]
     General,
-    Mathematical,      // Step-by-step calculation (GSM8K style)
-    Logical,           // Deductive inference chains (ProofWriter style)
-    Explanatory,       // Why/how causal chains
-    Planning,          // Multi-step action sequences
-    Verification,      // Fact-checking with source tracing
-    Debugging,         // Error isolation and hypothesis testing
-    MultiHop,          // Multi-hop deduction across entities
+    Mathematical, // Step-by-step calculation (GSM8K style)
+    Logical,      // Deductive inference chains (ProofWriter style)
+    Explanatory,  // Why/how causal chains
+    Planning,     // Multi-step action sequences
+    Verification, // Fact-checking with source tracing
+    Debugging,    // Error isolation and hypothesis testing
+    MultiHop,     // Multi-hop deduction across entities
 }
 
 /// Type of individual reasoning step
@@ -192,12 +192,12 @@ pub enum ReasoningType {
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningStepType {
     #[default]
-    Premise,           // Starting fact or assumption
-    Inference,         // Deduced conclusion from premises
-    Calculation,       // Numeric or symbolic operation
-    Verification,      // Checking a claim against evidence
-    Hypothesis,        // Tentative explanation
-    Conclusion,        // Final answer or result
+    Premise, // Starting fact or assumption
+    Inference,    // Deduced conclusion from premises
+    Calculation,  // Numeric or symbolic operation
+    Verification, // Checking a claim against evidence
+    Hypothesis,   // Tentative explanation
+    Conclusion,   // Final answer or result
 }
 
 /// Single step in a reasoning trace
@@ -422,8 +422,16 @@ impl ContextMatrix {
     /// Populate pre-computed lowercase and fingerprint fields. Call after construction.
     pub fn precompute(&mut self) {
         self.summary_lower = self.summary.to_lowercase();
-        self.cell_content_lower = self.cells.iter().map(|c| c.content.to_lowercase()).collect();
-        self.cell_fingerprints = self.cell_content_lower.iter().map(|s| text_fingerprint(s)).collect();
+        self.cell_content_lower = self
+            .cells
+            .iter()
+            .map(|c| c.content.to_lowercase())
+            .collect();
+        self.cell_fingerprints = self
+            .cell_content_lower
+            .iter()
+            .map(|s| text_fingerprint(s))
+            .collect();
     }
 }
 
@@ -488,7 +496,6 @@ pub struct IntentProfile {
     pub scores: Vec<IntentScore>,
     pub reasons: Vec<String>,
 }
-
 
 /// Report on channel isolation validation for MemoryStore.
 /// Ensures that memory channels (Main, Intent, Reasoning) maintain proper isolation.

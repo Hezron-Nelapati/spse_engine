@@ -138,13 +138,16 @@ async fn run_scenario(engine: &Engine, scenario: &TestScenario) -> TestResult {
 
     // Extract Layer 9 decision from intent profile
     let fallback_mode = format!("{:?}", result.trace.intent_profile.fallback_mode);
-    let retrieval_triggered = result.used_retrieval || result.trace.intent_profile.fallback_mode == spse_engine::types::IntentFallbackMode::RetrieveUnknown;
+    let retrieval_triggered = result.used_retrieval
+        || result.trace.intent_profile.fallback_mode
+            == spse_engine::types::IntentFallbackMode::RetrieveUnknown;
 
     // Extract intent
     let intent_detected = format!("{:?}", result.trace.intent_profile.primary);
 
     // Check keywords
-    let keywords_found = check_keywords_in_response(&result.predicted_text, &scenario.expected_keywords);
+    let keywords_found =
+        check_keywords_in_response(&result.predicted_text, &scenario.expected_keywords);
 
     // Build details
     let mut details = HashMap::new();
@@ -193,9 +196,15 @@ async fn run_scenario(engine: &Engine, scenario: &TestScenario) -> TestResult {
                     IntentKind::Explain,
                 ]
                 .contains(&detected),
-                IntentKind::Verify => [IntentKind::Verify, IntentKind::Question].contains(&detected),
-                IntentKind::Compare => [IntentKind::Compare, IntentKind::Question].contains(&detected),
-                IntentKind::Explain => [IntentKind::Explain, IntentKind::Question].contains(&detected),
+                IntentKind::Verify => {
+                    [IntentKind::Verify, IntentKind::Question].contains(&detected)
+                }
+                IntentKind::Compare => {
+                    [IntentKind::Compare, IntentKind::Question].contains(&detected)
+                }
+                IntentKind::Explain => {
+                    [IntentKind::Explain, IntentKind::Question].contains(&detected)
+                }
                 _ => expected == detected,
             };
             if !compatible {
@@ -219,10 +228,7 @@ async fn run_scenario(engine: &Engine, scenario: &TestScenario) -> TestResult {
     }
 
     // Check keywords for non-empty expected lists
-    if !scenario.expected_keywords.is_empty()
-        && keywords_found.is_empty()
-        && retrieval_triggered
-    {
+    if !scenario.expected_keywords.is_empty() && keywords_found.is_empty() && retrieval_triggered {
         issues.push("No expected keywords found in response".to_string());
     }
 
@@ -249,7 +255,11 @@ async fn run_scenario(engine: &Engine, scenario: &TestScenario) -> TestResult {
     }
 }
 
-async fn run_harness(scenarios_path: &str, output_path: &str, entropy_threshold: f32) -> HarnessReport {
+async fn run_harness(
+    scenarios_path: &str,
+    output_path: &str,
+    entropy_threshold: f32,
+) -> HarnessReport {
     println!("Zero-Shot Test Harness for SPSE Engine");
     println!("======================================");
     println!();
@@ -289,11 +299,13 @@ async fn run_harness(scenarios_path: &str, output_path: &str, entropy_threshold:
     // Initialize category stats
     for scenario in &scenarios {
         let category = &scenario.category;
-        category_stats.entry(category.clone()).or_insert(CategoryStats {
-            total: 0,
-            passed: 0,
-            failed: 0,
-        });
+        category_stats
+            .entry(category.clone())
+            .or_insert(CategoryStats {
+                total: 0,
+                passed: 0,
+                failed: 0,
+            });
     }
 
     println!("Running tests...");
@@ -304,7 +316,13 @@ async fn run_harness(scenarios_path: &str, output_path: &str, entropy_threshold:
         let scenario_id = &scenario.id;
         let category = &scenario.category;
 
-        print!("[{}/{}] {} ({})... ", i + 1, total_tests, scenario_id, category);
+        print!(
+            "[{}/{}] {} ({})... ",
+            i + 1,
+            total_tests,
+            scenario_id,
+            category
+        );
 
         let result = run_scenario(&engine, scenario).await;
         results.push(result.clone());
@@ -423,7 +441,10 @@ async fn run_harness(scenarios_path: &str, output_path: &str, entropy_threshold:
         let _ = fs::create_dir_all(parent);
     }
 
-    match fs::write(output_path, serde_json::to_string_pretty(&report).unwrap_or_default()) {
+    match fs::write(
+        output_path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    ) {
         Ok(_) => println!("\nReport saved to: {}", output_path),
         Err(e) => eprintln!("\nError saving report: {}", e),
     }

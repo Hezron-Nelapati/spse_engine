@@ -12,25 +12,25 @@
 //!   --maintenance <SEC>    Maintenance interval in seconds (default: 60)
 //!   --max-latency <MS>     Max latency spike threshold (default: 500)
 
-use spse_engine::stress_drill_lib::{
-    StressDrillConfig,
-    run_stress_drill,
-};
+use spse_engine::stress_drill_lib::{run_stress_drill, StressDrillConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    
+
     let config = parse_args(&args);
-    
+
     println!("=== SPSE Engine Stress Drill ===");
     println!("Corpus size: {} MB", config.corpus_size_mb);
     println!("Query interval: {} ms", config.query_interval_ms);
-    println!("Maintenance interval: {} sec", config.maintenance_interval_sec);
+    println!(
+        "Maintenance interval: {} sec",
+        config.maintenance_interval_sec
+    );
     println!("Max latency spike: {} ms", config.max_latency_spike_ms);
     println!();
-    
+
     let result = run_stress_drill(&config);
-    
+
     println!();
     println!("=== Stress Drill Results ===");
     println!("Total documents: {}", result.total_documents);
@@ -38,25 +38,31 @@ fn main() {
     println!("Total duration: {:.2}s", result.duration_sec);
     println!("Throughput: {:.2} docs/sec", result.docs_per_sec);
     println!();
-    
+
     println!("=== Latency Report ===");
     println!("Avg latency: {:.2}ms", result.latency.avg_ms);
     println!("Max latency: {:.2}ms", result.latency.max_ms);
     println!("P99 latency: {:.2}ms", result.latency.p99_ms);
     println!("Spikes detected: {}", result.latency.spike_count);
     println!();
-    
+
     println!("=== Pollution Report ===");
     println!("Pollution ratio: {:.4}%", result.pollution_ratio * 100.0);
-    println!("Pollution ceiling: {:.2}%", config.pollution_ceiling_percent);
-    println!("Ceiling maintained: {}", result.pollution_ratio < config.pollution_ceiling_percent / 100.0);
+    println!(
+        "Pollution ceiling: {:.2}%",
+        config.pollution_ceiling_percent
+    );
+    println!(
+        "Ceiling maintained: {}",
+        result.pollution_ratio < config.pollution_ceiling_percent / 100.0
+    );
     println!();
-    
+
     println!("=== Snapshot Consistency ===");
     println!("Snapshots created: {}", result.snapshots_created);
     println!("Snapshots verified: {}", result.snapshots_verified);
     println!("Consistency errors: {}", result.consistency_errors);
-    
+
     if result.passed {
         println!();
         println!("✓ STRESS DRILL PASSED");
@@ -73,7 +79,7 @@ fn main() {
 
 fn parse_args(args: &[String]) -> StressDrillConfig {
     let mut config = StressDrillConfig::default();
-    
+
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -109,7 +115,7 @@ fn parse_args(args: &[String]) -> StressDrillConfig {
         }
         i += 1;
     }
-    
+
     config
 }
 
