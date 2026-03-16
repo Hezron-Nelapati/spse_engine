@@ -1,8 +1,8 @@
 # Structured Predictive Search (SPS) Architecture
 
-**Document Version:** 13.1  
+**Document Version:** 14.0  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements
 
 ---
 
@@ -495,6 +495,85 @@ Classification patterns stored here are queried via spatial grid for O(log N) re
 | **Confidence calibration** | Track prediction accuracy per confidence band (10 bins); apply Platt scaling to raw confidence | Ensures confidence=0.8 means 80% actual accuracy |
 | **Shared signature reuse** | Classification signature's `semantic_centroid` reused by Predictive System for initial spatial position; `urgency_score` and `temporal_cue` reused by Reasoning System for retrieval gating | Zero recomputation across systems |
 
+### 3.9 Semantic Anchor Probes
+
+**Problem:** The 78-float POS-based feature vector captures syntactic structure well but misses deep semantic nuance — sarcasm, irony, hypotheticals, and other complex communicative intents that share similar POS patterns with their literal counterparts.
+
+**Solution: Lightweight Semantic Probes.** Maintain a small set (~500) of **Semantic Anchor Units** — canonical phrases representing complex semantic concepts. During L1/L2 ingestion, perform fast fuzzy matching against these anchors and inject binary **Semantic Flags** into the feature vector.
+
+#### Semantic Anchor Registry
+
+```rust
+struct SemanticAnchorRegistry {
+    anchors: Vec<SemanticAnchor>,        // ~500 entries
+    fingerprint_index: HashMap<u64, Vec<usize>>,  // FNV hash → anchor indices
+}
+
+struct SemanticAnchor {
+    id: u16,                             // compact index
+    label: String,                       // "irony", "hypothetical", "sarcasm", etc.
+    probe_phrases: Vec<String>,          // canonical trigger phrases
+    probe_fingerprints: Vec<u64>,        // pre-computed FNV hashes
+    category: SemanticCategory,          // Rhetorical | Epistemic | Pragmatic | Emotional
+    weight: f32,                         // contribution to feature vector (default: 0.15)
+}
+
+enum SemanticCategory {
+    Rhetorical,    // irony, sarcasm, understatement, hyperbole
+    Epistemic,     // hypothetical, uncertain, conditional, speculative
+    Pragmatic,     // request, command, suggestion, permission
+    Emotional,     // frustration, excitement, disappointment, gratitude
+}
+```
+
+#### Matching Algorithm (L1/L2 Extension)
+
+Matching runs during L2 unit building — after rolling hash discovery, before hierarchy organization:
+
+```
+1. Compute FNV fingerprints for all discovered units (already available)
+2. For each unit fingerprint:
+   a. Check SemanticAnchorRegistry.fingerprint_index (O(1) hash lookup)
+   b. If hit: verify with normalized Levenshtein distance < anchor_fuzzy_threshold (0.25)
+   c. On confirmed match: set semantic_flags[anchor.category] = true
+3. Inject semantic_flags as additional feature dimensions in ClassificationSignature
+```
+
+**Performance:** The fingerprint index makes this O(n) in unit count with O(1) per lookup. No embedding model, no neural network — just pre-computed hash matching with Levenshtein verification for fuzzy tolerance.
+
+#### Feature Vector Extension
+
+The 78-float signature extends to **82 floats** (78 + 4 semantic category flags):
+
+| Category | Feature Index | Description |
+|----------|-------------|-------------|
+| Structural | 0–13 | Existing 14 structural features |
+| Intent Hash | 14–45 | Existing 32 intent hash buckets |
+| Tone Hash | 46–77 | Existing 32 tone hash buckets |
+| **Semantic Flags** | **78–81** | **4 binary flags: Rhetorical, Epistemic, Pragmatic, Emotional** |
+
+Existing centroid comparisons use the first 78 dimensions unchanged. The 4 semantic flags contribute via a separate weighted term:
+
+```
+score = w_existing × cosine(query[0:78], centroid[0:78])
+      + w_semantic × dot(query[78:82], centroid[78:82])
+```
+
+Config: `semantic_probe_weight` (default: 0.15), `anchor_fuzzy_threshold` (default: 0.25), `semantic_anchor_count` (default: 500).
+
+#### Anchor Seeding
+
+Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_anchors.yaml`). Categories:
+
+| Category | Example Anchors | Count |
+|----------|----------------|-------|
+| Rhetorical | "yeah right", "oh sure", "as if", "what a surprise" | ~120 |
+| Epistemic | "what if", "suppose that", "I wonder", "could it be" | ~130 |
+| Pragmatic | "would you mind", "please do", "you should", "let's" | ~130 |
+| Emotional | "I can't believe", "so frustrating", "this is amazing" | ~120 |
+
+New anchors can be learned during training when Classification consistently misclassifies a pattern — L18 feedback signals which phrases caused confusion, and the training sweep can propose new anchors.
+
 ---
 
 ## 4. Reasoning System
@@ -667,6 +746,54 @@ If the Classification System flagged a retrieval need, the Reasoning System exec
 3. **L13 (`reasoning/merge.rs`)** — Evidence merge. Conflict detection and agreement scoring between internal memory and web results. Trust-weighted merge using Source Reliability + Recency + Agreement. Config: `layer_13_evidence_merge`.
 
 If `local_documents` are provided (e.g., uploaded files), they are merged directly without L10/L11.
+
+#### 4.3.1 Micro-Validator (L13 Extension)
+
+**Problem:** Heuristic trust-weighted merging may accept logically inconsistent evidence when multiple sources agree on individually plausible but mutually contradictory claims (e.g., "Founded in 1998" from Source A, "Founded in 2001" from Source B, both trust=0.7).
+
+**Solution:** A lightweight logical consistency check that runs **after** the standard evidence merge but **before** candidates are finalized. Uses the existing `ReasoningTrace` structure — no new data types.
+
+```
+After L13 standard merge produces merged_candidates:
+
+1. NUMERICAL CONSISTENCY CHECK
+   Extract all numeric claims from merged candidates:
+     regex: (\d+\.?\d*)\s*(year|km|kg|USD|%|million|billion|...)
+   Group by entity + property (e.g., "Paris" + "population")
+   If group contains contradicting values (spread > numeric_contradiction_threshold):
+     → Flag lowest-trust candidate, reduce confidence by contradiction_penalty
+
+2. DATE ORDERING CHECK
+   Extract temporal claims from merged candidates:
+     regex: (founded|established|created|born|died)\s*(in|on)?\s*(\d{4})
+   Verify logical ordering (birth < death, founded < dissolved, etc.)
+   If ordering violated:
+     → Flag both candidates, add ReasoningStep with step_type=Verification
+
+3. ENTITY-PROPERTY CONTRADICTION CHECK
+   For each entity in merged candidates:
+     Collect all property assertions (e.g., "Paris is the capital of France")
+     If same property has conflicting values across candidates:
+       → Keep highest-trust assertion, penalize others
+
+4. OUTCOME
+   If any contradiction found AND no candidate exceeds contradiction_override_trust:
+     → Set confidence_penalty on contradicting candidates
+     → If all candidates contradicted: set needs_human_review = true
+       (response includes "I found conflicting information..." caveat)
+   Else:
+     → Pass through unchanged (zero overhead for consistent evidence)
+```
+
+**Config:**
+- `numeric_contradiction_threshold: f32` (default: 0.15) — relative spread before flagging
+- `contradiction_penalty: f32` (default: 0.30) — confidence reduction for contradicting candidates
+- `contradiction_override_trust: f32` (default: 0.90) — trust level that overrides contradiction check
+- `micro_validator_enabled: bool` (default: true) — can disable for latency-sensitive paths
+
+**Performance:** Only runs when retrieval was used (~10-15% of queries). Regex-based extraction is microsecond-level. No additional network calls.
+
+**Integration with ReasoningTrace:** Contradiction findings are recorded as `ReasoningStep` entries with `step_type: Verification`, making them visible in `ExplainTrace` for debugging.
 
 ### 4.4 Adaptive Calculated Search (L14)
 
@@ -841,7 +968,42 @@ After standard evidence merge (existing logic unchanged):
 
 Config: `edge_learn_rate` (default: 0.1) — scales how much trust translates to edge weight.
 
-This adds ~20 lines to the existing `merge()` function. No new files. Edges created this way are **Episodic** — they decay normally unless reinforced by subsequent use.
+This adds ~20 lines to the existing `merge()` function. No new files.
+
+#### Extension 2b: Probabilistic Edge Promotion (Edge Decay Calibration)
+
+**Problem:** Injecting edges from a single retrieval event may introduce noise if the retrieved snippet was slightly off-context. A one-off mention of "Paris → Texas" in a geography context shouldn't permanently pollute the graph.
+
+**Solution:** Edges injected from retrieval start with **Probationary** status — a new `EdgeStatus` between injection and standard Episodic. Probationary edges have a rapid decay rate and must be successfully traversed **twice** (once during injection, once during a subsequent user interaction) before graduating to Episodic.
+
+```
+Edge lifecycle:
+  1. INJECTION (L13 edge injection):
+     Create edge with status = Probationary
+     Set decay_rate = probationary_decay_rate (default: 3× normal)
+     Set traversal_count = 1 (counts the injection traversal)
+
+  2. FIRST SUBSEQUENT USE (L15 graph walk):
+     If Probationary edge is walked during a response:
+       traversal_count += 1
+       If traversal_count >= probationary_graduation_count (default: 2):
+         status → Episodic (standard decay rate applies)
+
+  3. DECAY (L21 maintenance):
+     Probationary edges decay at probationary_decay_rate
+     If weight < edge_min_weight before graduation:
+       Edge is pruned (noise eliminated)
+
+  4. NORMAL LIFECYCLE:
+     Once Episodic, standard decay/promotion rules apply
+     If used >= promotion_threshold times → Core (permanent)
+```
+
+**Config:**
+- `probationary_decay_rate: f32` (default: 3.0) — multiplier on normal edge decay for Probationary edges
+- `probationary_graduation_count: u32` (default: 2) — traversals needed to graduate to Episodic
+
+**Benefit:** Prevents graph clutter from one-off retrieval noise while allowing rapid learning of valid facts. A correct edge gets used again quickly (user asks follow-up) and graduates; a noisy edge decays within 1–2 maintenance cycles.
 
 #### Extension 3: Implicit Feedback Reinforcement (L18 — existing FeedbackController)
 
@@ -1481,6 +1643,116 @@ Well within Mac M4 Air's 8–16 GB. Leaves ample room for MemoryStore, Classific
 | **Temperature annealing** | During walk, start with higher temperature (more exploration) and anneal toward lower temperature as sequence progresses | Better first-word diversity with convergent tail |
 | **Process unit Z-confinement** | Process units (reasoning artifacts) confined to Z=-1.0 subspace; word nodes occupy Z≥0 | Prevents reasoning artifacts from interfering with word graph |
 
+### 5.9 Adaptive Dimensionality
+
+**Problem:** 3D spatial embedding may be insufficient for dense semantic clusters where many words share similar relationships but distinct meanings. When force-directed layout fails to converge (energy remains above `layout_convergence_threshold` after `max_layout_iterations`), nodes in crowded regions collide, degrading Tier 1 edge selection accuracy.
+
+**Solution:** Allow the spatial map to dynamically expand to **4D or 5D** for high-density clusters during maintenance cycles, while keeping the default 3D for the majority of the graph.
+
+#### Mechanism
+
+```
+During L21 maintenance → force-directed layout step:
+
+1. Run standard 3D attract/repel layout (existing logic)
+2. Compute layout_energy per grid cell:
+     energy(cell) = Σ |attract_force + repel_force| for all nodes in cell
+3. Identify HOT CELLS: cells where energy(cell) > adaptive_dim_energy_threshold
+     after max_layout_iterations
+
+4. For each hot cell:
+   a. Expand node positions from [f32; 3] → [f32; N] where N = current_dims + 1
+      New dimension initialized to small random perturbation ∈ [-0.1, 0.1]
+   b. Re-run layout for hot cell nodes only (local sub-graph)
+   c. If energy drops below threshold → keep expanded dimensions
+      Else if N < max_spatial_dims → try again with N+1
+      Else → accept best layout, flag cell for monitoring
+
+5. SPATIAL INDEX ADAPTATION:
+   SpatialGrid stores per-cell dimensionality
+   Distance calculations use min(dims_a, dims_b) shared dimensions
+     + small penalty for unshared dimensions
+   Nodes in 4D/5D cells still participate in global 3D queries
+     via projection onto first 3 axes
+```
+
+**Config:**
+- `adaptive_dim_enabled: bool` (default: false — opt-in)
+- `adaptive_dim_energy_threshold: f32` (default: 0.5) — per-cell energy above which expansion triggers
+- `max_spatial_dims: u8` (default: 5) — hard ceiling on dimensionality
+- `adaptive_dim_perturbation: f32` (default: 0.1) — initial noise for new dimension
+
+**Memory impact:** Most nodes stay 3D (12 bytes). Only hot-cell nodes expand to 4D (16 bytes) or 5D (20 bytes). Expected: <5% of nodes ever expand, adding ~1 MB for a 100K-node graph.
+
+**Backward compatibility:** All existing code that reads `position: [f32; 3]` continues to work by reading the first 3 elements. The extra dimensions are only used in intra-cell distance calculations within expanded cells.
+
+### 5.10 Anchor Locking Zones
+
+**Problem:** During force-directed layout updates, factual anchor nodes (numbers, dates, proper nouns) can drift into unrelated semantic clusters. This causes "1776" to drift near "seventeen" (correct) but then further toward "seven" (incorrect), corrupting factual associations over time.
+
+**Solution:** Define immutable **Semantic Zones** in the spatial grid. Nodes assigned to a zone are confined to that zone's coordinate bounds during all layout updates.
+
+#### Zone Definitions
+
+```rust
+struct SemanticZone {
+    id: ZoneId,
+    label: String,                      // "Numbers", "Dates", "ProperNouns", etc.
+    bounds: ZoneBounds,                 // axis-aligned bounding box in 3D+
+    node_filter: ZoneFilter,            // which nodes belong
+    lock_strength: f32,                 // 0.0 = advisory, 1.0 = hard lock
+    allow_internal_layout: bool,        // layout within zone bounds (default: true)
+}
+
+enum ZoneFilter {
+    NodeType(NodeType),                 // e.g., all Compound nodes
+    RegexMatch(String),                 // e.g., r"^\d+$" for numbers
+    AnchorOnly,                         // only is_anchor=true nodes
+    Custom(Vec<WordId>),                // explicit node list
+}
+
+struct ZoneBounds {
+    min: [f32; 3],                      // lower corner
+    max: [f32; 3],                      // upper corner
+}
+```
+
+#### Default Zones
+
+| Zone | Filter | Bounds (X, Y, Z) | Lock Strength |
+|------|--------|-------------------|---------------|
+| **Numbers** | `RegexMatch(r"^\d+\.?\d*$")` | (0.8, 0.8, 0.0) → (1.0, 1.0, 0.2) | 1.0 (hard) |
+| **Dates** | `RegexMatch(r"^\d{4}$") + temporal context` | (0.8, 0.6, 0.0) → (1.0, 0.8, 0.2) | 1.0 (hard) |
+| **Proper Nouns** | `NodeType(Compound) + NNP POS tag` | (0.0, 0.8, 0.0) → (0.4, 1.0, 0.4) | 0.8 (strong) |
+| **Function Words** | `NodeType(Function)` | (0.3, 0.3, 0.3) → (0.7, 0.7, 0.7) | 0.5 (moderate) |
+
+#### Enforcement During Layout
+
+```
+During force-directed layout (attract/repel):
+
+For each node position update:
+  new_pos = current_pos + delta  // standard attract/repel result
+
+  if node belongs to zone Z:
+    if Z.lock_strength == 1.0:
+      // Hard lock: clamp to zone bounds
+      new_pos = clamp(new_pos, Z.bounds.min, Z.bounds.max)
+    else:
+      // Soft lock: blend between free position and clamped position
+      clamped = clamp(new_pos, Z.bounds.min, Z.bounds.max)
+      new_pos = lerp(new_pos, clamped, Z.lock_strength)
+
+  apply new_pos
+```
+
+**Config:**
+- `anchor_locking_enabled: bool` (default: true)
+- `zone_definitions_path: String` (default: "config/semantic_zones.yaml")
+- Default zones loaded from YAML; custom zones can be added at runtime
+
+**Benefit:** Prevents factual drift while still allowing semantic clustering within zone boundaries. Numbers stay near numbers, dates stay near dates, but they can still form edges to content words outside their zone.
+
 ---
 
 ## 6. System Interaction & Engine Pipeline
@@ -1600,6 +1872,74 @@ pub struct ExplainTrace {
 }
 ```
 
+### 6.1 Structural Feedback Loop (Consistency Loop Upgrade)
+
+**Problem:** The existing cross-system consistency checks (§11.5) only adjust numeric thresholds — e.g., lower confidence floors, tweak scoring weights. They cannot evolve the **structure** of the Classification taxonomy itself. If the Predictive System consistently fails to find good paths for a broad Intent class (e.g., "Question" triggers Tier 3 pathfinding > 40% of the time), the root cause may be that the intent is too coarse-grained.
+
+**Solution:** Enable **structural feedback** from the Predictive System to the Classification System. When pathfinding performance degrades for a specific intent class, the system proposes **intent splitting** during the next training sweep.
+
+#### Tier 3 Overuse Tracker
+
+```rust
+struct Tier3OveruseTracker {
+    /// Per-intent counters: (tier3_count, total_count) over a rolling window
+    intent_tier3_rates: HashMap<IntentKind, (u64, u64)>,
+    /// Rolling window size
+    window_size: u64,                  // default: 1000 queries
+    /// Threshold: if tier3_rate > this for an intent, propose split
+    split_proposal_threshold: f32,     // default: 0.40
+}
+```
+
+Tracked during L15 graph walk — after each prediction step, record whether Tier 3 pathfinding was used, tagged by the current intent. Updated in the L18 feedback path.
+
+#### Intent Split Proposal
+
+When an intent's Tier 3 rate exceeds `split_proposal_threshold` over the rolling window:
+
+```
+1. DETECTION (L18 feedback, periodic check):
+   For each intent I:
+     tier3_rate = intent_tier3_rates[I].0 / intent_tier3_rates[I].1
+     if tier3_rate > split_proposal_threshold:
+       Generate IntentSplitProposal(I)
+
+2. ANALYSIS (during training sweep):
+   For proposed intent I:
+     Collect all queries classified as I from recent telemetry
+     Cluster queries by Word Graph context (k-means on context fingerprints, k=2..4)
+     If cluster separation > min_cluster_separation:
+       Propose split: I → I_subA, I_subB, ...
+       Label: use cluster centroid's dominant context words
+         e.g., "Question" → "FactSeekingQuestion", "OpinionSeekingQuestion"
+
+3. EXECUTION (training sweep, human-approved or auto if confidence > auto_split_confidence):
+   Create new IntentKind variants
+   Re-assign training examples to sub-intents based on cluster membership
+   Rebuild centroids for the new sub-intents
+   Old intent remains as a fallback for ambiguous cases
+
+4. VALIDATION:
+   After split, monitor tier3_rate for new sub-intents
+   If tier3_rate drops below threshold → split confirmed
+   If tier3_rate unchanged → revert split, log for human review
+```
+
+**Config:**
+- `structural_feedback_enabled: bool` (default: false — opt-in, requires training sweep)
+- `split_proposal_threshold: f32` (default: 0.40) — Tier 3 overuse rate triggering split proposal
+- `min_cluster_separation: f32` (default: 0.30) — minimum cosine distance between proposed sub-intent clusters
+- `auto_split_confidence: f32` (default: 0.85) — confidence above which splits are auto-applied
+- `split_window_size: u64` (default: 1000) — rolling window for Tier 3 tracking
+
+**Safeguards:**
+- Maximum 4 sub-intents per split (prevents over-fragmentation)
+- Splits are reversible — if validation fails, revert within 2 training sweeps
+- Human review required unless `auto_split_confidence` exceeded
+- Total intent count capped at `max_intent_count` (default: 48) to prevent explosion
+
+**Benefit:** The system's classification taxonomy evolves based on real performance bottlenecks. Broad intents that cause poor Predictive performance are automatically refined, improving graph walk quality without manual taxonomy engineering.
+
 ---
 
 ## 7. Core Data Structures
@@ -1656,6 +1996,7 @@ pub struct WordEdge {
     pub context_tags: SmallVec<[u64; 4]>,  // polysemy disambiguation
     pub frequency: u32,                    // times traversed
     pub last_reinforced: u32,              // epoch counter for decay
+    pub status: EdgeStatus,                // Probationary | Episodic | Core (§4.9)
 }
 
 pub struct Highway {
@@ -1691,6 +2032,9 @@ pub struct Highway {
 | `TrainingPhaseKind` | DryRun, Bootstrap, Validation, Expansion, Lifelong | Cross-cutting |
 | `TrainingSourceType` | 14 types (Url, Document, Dataset, etc.) | Cross-cutting |
 | `JobState` | Queued, Processing, Completed, Failed | Cross-cutting |
+| `EdgeStatus` | Probationary, Episodic, Core | Predictive |
+| `SemanticCategory` | Rhetorical, Epistemic, Pragmatic, Emotional | Classification |
+| `ZoneFilter` | NodeType, RegexMatch, AnchorOnly, Custom | Predictive |
 
 ### ReasoningTrace
 
@@ -1773,6 +2117,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `query` | `layer_10_query_builder` | `QueryBuilderConfig` |
 | `trust` | `layer_19_trust_heuristics` | `TrustConfig` |
 | `classification` | `classification` | `ClassificationConfig` |
+| `semantic_probes` | `classification.semantic_probes` | `SemanticProbeConfig` (weight, fuzzy_threshold, anchor_count) |
 
 **Reasoning System:**
 
@@ -1781,6 +2126,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `retrieval` | `layer_9_retrieval_gating` | `RetrievalThresholds` |
 | `retrieval_io` | `layer_11_retrieval` | `RetrievalIoConfig` |
 | `evidence_merge` | `layer_13_evidence_merge` | `EvidenceMergeConfig` (includes `edge_learn_rate` for on-the-fly injection) |
+| `micro_validator` | `layer_13_evidence_merge.micro_validator` | `MicroValidatorConfig` (contradiction thresholds, enabled flag) |
 | `scoring` | `layer_14_candidate_scoring` | `ScoringWeights` |
 | `adaptive_behavior` | `adaptive_behavior` | `AdaptiveBehaviorConfig` |
 | `governance` | `layer_21_memory_governance` | `GovernanceConfig` |
@@ -1794,7 +2140,9 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
 | `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
-| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold) |
+| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, probationary_decay_rate, probationary_graduation_count) |
+| `adaptive_dims` | `layer_5_semantic_map.adaptive_dims` | `AdaptiveDimsConfig` (enabled, energy_threshold, max_dims, perturbation) |
+| `anchor_locking` | `layer_5_semantic_map.anchor_locking` | `AnchorLockingConfig` (enabled, zone_definitions_path) |
 
 **Cross-Cutting:**
 
@@ -1809,6 +2157,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `gpu` | `gpu` | `GpuConfig` |
 | `multi_engine` | `multi_engine` | `MultiEngineConfig` |
 | `config_sweep` | `config_sweep` | `ConfigSweepConfig` |
+| `structural_feedback` | `structural_feedback` | `StructuralFeedbackConfig` (split thresholds, window size, max intents) |
 
 ### Key Thresholds Reference
 
@@ -2774,6 +3123,16 @@ spse_engine/
 | **Edge Injection** | On-the-fly creation of Word Graph edges from retrieved evidence during L13 merge | Reasoning / Predictive |
 | **Implicit Accept** | When user continues conversation naturally after a response, interpreted as positive feedback | Reasoning |
 | **Runtime Learning** | On-the-fly edge injection + implicit feedback reinforcement — no separate training needed | Cross-cutting |
+| **Semantic Anchor** | Canonical phrase representing a complex semantic concept (irony, hypothetical, etc.) used for lightweight probe matching | Classification |
+| **Semantic Probe** | Fast FNV-hash + fuzzy match against ~500 Semantic Anchors during L1/L2, producing 4 binary flags | Classification |
+| **Micro-Validator** | Lightweight logical consistency check in L13 that detects numerical, temporal, and entity-property contradictions | Reasoning |
+| **Probationary Edge** | Newly injected edge from retrieval with rapid decay; must be traversed twice to graduate to Episodic | Predictive |
+| **Adaptive Dimensionality** | Dynamic expansion from 3D to 4D/5D for crowded spatial grid cells where layout energy fails to converge | Predictive |
+| **Semantic Zone** | Immutable coordinate region in spatial grid confining factual anchors (Numbers, Dates, Proper Nouns) from drifting | Predictive |
+| **Anchor Locking** | Zone-based position clamping during force-directed layout — hard lock (1.0) or soft blend (0.5–0.8) | Predictive |
+| **Structural Feedback** | Cross-system signal from Predictive → Classification proposing intent splits when Tier 3 overuse detected | Cross-cutting |
+| **Intent Split** | Dividing a broad IntentKind into finer sub-categories based on Word Graph performance data | Classification |
+| **Tier 3 Overuse** | When >40% of predictions for an intent require on-the-fly pathfinding, signaling the intent is too coarse | Predictive / Cross-cutting |
 
 ### Appendix B: Three-System Quick Reference
 
@@ -2796,6 +3155,12 @@ spse_engine/
 | How do we ensure systems agree? | Cross-cutting | §11.5: Consistency loop with 4 rules + asymmetric correction |
 | How does the system learn on-the-fly? | Reasoning + Predictive | §4.9: Cold-start detection → retrieval → L13 edge injection → L18 implicit feedback |
 | What are the product flow scenarios? | All | §4.10: Flows A–G covering direct answer, reasoning, retrieval, cold start, social, retry, multi-turn |
+| How do we detect sarcasm/irony? | Classification | §3.9: Semantic Anchor Probes — ~500 anchors, FNV hash match, 4 semantic flags |
+| How do we prevent contradictory evidence? | Reasoning | §4.3.1: Micro-Validator — numeric, date ordering, entity-property checks in L13 |
+| How do we handle dense semantic clusters? | Predictive | §5.9: Adaptive Dimensionality — expand crowded cells to 4D/5D |
+| How do we prevent factual node drift? | Predictive | §5.10: Anchor Locking Zones — Numbers, Dates, Proper Nouns confined to coordinate regions |
+| How does noisy edge injection get filtered? | Predictive | §4.9 Ext 2b: Probationary edges decay 3× faster, must be traversed twice to survive |
+| How does the taxonomy evolve? | Cross-cutting | §6.1: Structural Feedback — Tier 3 overuse triggers intent split proposals |
 
 ### Appendix C: References
 

@@ -19,8 +19,9 @@
 9. [Phase 8: Training Sweep Harness](#9-phase-8-training-sweep-harness)
 10. [Phase 9: Integration Testing](#10-phase-9-integration-testing)
 11. [Phase 10: On-the-fly Learning](#11-phase-10-on-the-fly-learning)
-12. [Config Changes Summary](#12-config-changes-summary)
-13. [File Manifest](#13-file-manifest)
+12. [Phase 11: Hardening Improvements](#12-phase-11-hardening-improvements)
+13. [Config Changes Summary](#13-config-changes-summary)
+14. [File Manifest](#14-file-manifest)
 
 ---
 
@@ -42,6 +43,12 @@ Phase 7 (Efficiency) → can start after Phase 2
 Phase 8 (Sweep Harness) → depends on Phases 2, 3, 4
 Phase 9 (Integration Tests) → depends on all phases
 Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Evidence Merge)
+Phase 11 (Hardening Improvements) → depends on Phases 2, 4, 5, 10
+  ├── 11A (Semantic Probes) → depends on Phase 2 (Classification)
+  ├── 11B (Micro-Validator) → depends on Phase 3 (Evidence Merge)
+  ├── 11C (Adaptive Dims + Anchor Locking) → depends on Phase 4 (Word Graph)
+  ├── 11D (Probationary Edges) → depends on Phase 10 (On-the-fly Learning)
+  └── 11E (Structural Feedback) → depends on Phase 5 (Consistency)
 ```
 
 ### Estimated Effort
@@ -58,7 +65,8 @@ Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Ev
 | 8. Sweep Harness | 1 | 1 | ~400 | P1 |
 | 9. Integration Tests | 1 | 1 | ~600 | P1 |
 | 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
-| **Total** | **12** | **~23** | **~7620** | |
+| 11. Hardening Improvements | 3 | 8 | ~900 | P2 |
+| **Total** | **15** | **~28** | **~8520** | |
 
 ---
 
@@ -1887,7 +1895,385 @@ self.feedback_controller.track_walked_edges(walked_edges);
 
 ---
 
-## 12. Config Changes Summary
+## 12. Phase 11: Hardening Improvements
+
+Five targeted improvements to harden Classification accuracy, Reasoning consistency, Predictive stability, on-the-fly learning quality, and cross-system evolution. See Architecture §3.9, §4.3.1, §5.9, §5.10, §4.9 Ext 2b, §6.1.
+
+### Task 11A: Semantic Anchor Probes (`src/classification/signature.rs` + new file)
+
+**Objective:** Extend the 78-float Classification signature to 82 floats by adding 4 binary Semantic Category flags (Rhetorical, Epistemic, Pragmatic, Emotional) matched via FNV hash probe against ~500 Semantic Anchors.
+
+#### Step 1: Semantic Anchor Registry (`src/classification/semantic_anchors.rs`) — NEW FILE
+
+```rust
+// src/classification/semantic_anchors.rs — NEW FILE
+
+pub struct SemanticAnchorRegistry {
+    anchors: Vec<SemanticAnchor>,
+    fingerprint_index: HashMap<u64, Vec<usize>>,
+}
+
+pub struct SemanticAnchor {
+    pub id: u16,
+    pub label: String,
+    pub probe_phrases: Vec<String>,
+    pub probe_fingerprints: Vec<u64>,
+    pub category: SemanticCategory,
+    pub weight: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SemanticCategory {
+    Rhetorical,
+    Epistemic,
+    Pragmatic,
+    Emotional,
+}
+
+impl SemanticAnchorRegistry {
+    pub fn load_from_yaml(path: &str) -> Result<Self, ...> { ... }
+    pub fn probe(&self, unit_fingerprints: &[u64]) -> [bool; 4] { ... }
+}
+```
+
+**Files created:** `src/classification/semantic_anchors.rs`
+**Files modified:** `src/classification/mod.rs` (add `pub mod semantic_anchors;`)
+
+#### Step 2: Extend ClassificationSignature (`src/classification/signature.rs`)
+
+Add 4 semantic flag dimensions (indices 78–81) to the signature computation:
+
+```rust
+// After existing 78-float computation:
+let semantic_flags = self.semantic_registry.probe(&unit_fingerprints);
+signature.features[78] = if semantic_flags[0] { 1.0 } else { 0.0 }; // Rhetorical
+signature.features[79] = if semantic_flags[1] { 1.0 } else { 0.0 }; // Epistemic
+signature.features[80] = if semantic_flags[2] { 1.0 } else { 0.0 }; // Pragmatic
+signature.features[81] = if semantic_flags[3] { 1.0 } else { 0.0 }; // Emotional
+```
+
+**Files modified:** `src/classification/signature.rs`
+
+#### Step 3: Update ClassificationCalculator (`src/classification/calculator.rs`)
+
+Extend centroid comparison to include semantic probe weight:
+
+```rust
+let existing_score = weighted_cosine(&query[0..78], &centroid[0..78], existing_weights);
+let semantic_score = dot(&query[78..82], &centroid[78..82]);
+let final_score = (1.0 - config.semantic_probe_weight) * existing_score
+                + config.semantic_probe_weight * semantic_score;
+```
+
+**Files modified:** `src/classification/calculator.rs`
+
+#### Step 4: Seed Anchor YAML (`config/semantic_anchors.yaml`) — NEW FILE
+
+Create initial ~500 anchor definitions across 4 categories.
+
+**Files created:** `config/semantic_anchors.yaml`
+
+#### Step 5: Config additions
+
+```yaml
+classification:
+  semantic_probes:
+    enabled: true
+    semantic_probe_weight: 0.15
+    anchor_fuzzy_threshold: 0.25
+    semantic_anchor_count: 500
+    anchor_file: "config/semantic_anchors.yaml"
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `semantic_probe_detects_sarcasm_flags_rhetorical`
+- `semantic_probe_detects_hypothetical_flags_epistemic`
+- `signature_82_float_backward_compatible_with_78`
+- `calculator_uses_semantic_weight_in_scoring`
+
+---
+
+### Task 11B: Micro-Validator for Logical Consistency (`src/reasoning/merge.rs`)
+
+**Objective:** Add a lightweight post-merge validation step in L13 that detects numerical contradictions, date ordering violations, and entity-property conflicts before candidates are finalized.
+
+#### Step 1: Add MicroValidator to merge.rs
+
+```rust
+// Add to src/reasoning/merge.rs
+
+pub struct MicroValidatorResult {
+    pub contradictions_found: u32,
+    pub penalized_candidates: Vec<Uuid>,
+    pub verification_steps: Vec<ReasoningStep>,
+    pub needs_human_review: bool,
+}
+
+impl EvidenceMerger {
+    pub fn validate_consistency(
+        &self,
+        merged_candidates: &mut Vec<ScoredCandidate>,
+        config: &MicroValidatorConfig,
+    ) -> MicroValidatorResult {
+        let mut result = MicroValidatorResult::default();
+        if !config.micro_validator_enabled { return result; }
+
+        // 1. Numeric contradiction check
+        self.check_numeric_contradictions(merged_candidates, config, &mut result);
+        // 2. Date ordering check
+        self.check_date_ordering(merged_candidates, config, &mut result);
+        // 3. Entity-property contradiction check
+        self.check_entity_property(merged_candidates, config, &mut result);
+
+        result
+    }
+}
+```
+
+**Files modified:** `src/reasoning/merge.rs`
+
+#### Step 2: Wire into evidence merge pipeline
+
+After `EvidenceMerger::merge()` returns, call `validate_consistency()` before passing candidates to L14. Add verification steps to `ReasoningTrace`.
+
+**Files modified:** `src/engine.rs`
+
+#### Step 3: Config additions
+
+```yaml
+layer_13_evidence_merge:
+  micro_validator:
+    enabled: true
+    numeric_contradiction_threshold: 0.15
+    contradiction_penalty: 0.30
+    contradiction_override_trust: 0.90
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `micro_validator_detects_numeric_contradiction`
+- `micro_validator_detects_date_ordering_violation`
+- `micro_validator_detects_entity_property_conflict`
+- `micro_validator_skipped_when_disabled`
+- `high_trust_source_overrides_contradiction`
+
+---
+
+### Task 11C: Adaptive Dimensionality + Anchor Locking Zones (`src/spatial_index.rs`)
+
+**Objective:** Allow spatial grid cells to expand to 4D/5D when layout energy fails to converge, and confine factual anchor nodes to immutable Semantic Zones.
+
+#### Step 1: Adaptive Dimensionality (`src/spatial_index.rs`)
+
+```rust
+// Add to src/spatial_index.rs
+
+pub struct CellDimensionality {
+    pub cell_id: usize,
+    pub dims: u8,                       // 3, 4, or 5
+    pub energy: f32,                    // last layout energy
+}
+
+impl SpatialGrid {
+    pub fn expand_hot_cells(
+        &mut self,
+        config: &AdaptiveDimsConfig,
+    ) -> Vec<CellDimensionality> {
+        if !config.adaptive_dim_enabled { return vec![]; }
+        // Identify cells where energy > threshold after layout
+        // Expand positions, re-run local layout, keep if energy drops
+        ...
+    }
+}
+```
+
+**Files modified:** `src/spatial_index.rs`
+
+#### Step 2: Semantic Zones + Anchor Locking (`src/spatial_index.rs` + new file)
+
+```rust
+// src/classification/semantic_zones.rs — NEW FILE
+
+pub struct SemanticZone {
+    pub id: ZoneId,
+    pub label: String,
+    pub bounds: ZoneBounds,
+    pub node_filter: ZoneFilter,
+    pub lock_strength: f32,
+    pub allow_internal_layout: bool,
+}
+
+pub struct ZoneManager {
+    zones: Vec<SemanticZone>,
+}
+
+impl ZoneManager {
+    pub fn load_from_yaml(path: &str) -> Result<Self, ...> { ... }
+    pub fn clamp_position(&self, node: &WordNode, new_pos: &mut [f32]) { ... }
+}
+```
+
+**Files created:** `src/classification/semantic_zones.rs`
+**Files modified:** `src/classification/mod.rs` (add `pub mod semantic_zones;`)
+
+#### Step 3: Wire zone enforcement into force-directed layout
+
+During position updates in `spatial_index.rs`, after computing attract/repel delta, call `ZoneManager::clamp_position()` to enforce zone bounds.
+
+**Files modified:** `src/spatial_index.rs`
+
+#### Step 4: Config + zone definitions
+
+```yaml
+layer_5_semantic_map:
+  adaptive_dims:
+    enabled: false
+    energy_threshold: 0.5
+    max_spatial_dims: 5
+    perturbation: 0.1
+  anchor_locking:
+    enabled: true
+    zone_definitions_path: "config/semantic_zones.yaml"
+```
+
+**Files created:** `config/semantic_zones.yaml`
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `hot_cell_expands_to_4d_when_energy_high`
+- `expanded_cell_projects_to_3d_for_global_queries`
+- `number_node_clamped_to_numbers_zone`
+- `proper_noun_soft_locked_to_zone`
+- `function_word_moderate_lock_allows_some_drift`
+- `zone_enforcement_applied_during_layout`
+
+---
+
+### Task 11D: Probabilistic Edge Promotion (`src/predictive/router.rs`)
+
+**Objective:** Add `EdgeStatus` (Probationary → Episodic → Core) lifecycle to WordEdge. Probationary edges decay 3× faster and must be traversed twice to graduate.
+
+#### Step 1: Add EdgeStatus to types
+
+```rust
+// Add to src/types.rs
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum EdgeStatus {
+    Probationary,   // Just injected from retrieval
+    Episodic,       // Graduated, standard decay
+    Core,           // Permanent, no decay
+}
+```
+
+**Files modified:** `src/types.rs`
+
+#### Step 2: Update WordEdge in router.rs
+
+Add `status: EdgeStatus` and `traversal_count: u32` fields to `WordEdge`. Update `create_or_strengthen_edge()` to set `status = Probationary` when called from L13 edge injection.
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 3: Update L15 graph walk
+
+When a Probationary edge is walked, increment `traversal_count`. If `traversal_count >= probationary_graduation_count`, promote to Episodic.
+
+**Files modified:** `src/engine.rs` (L15 walk logic)
+
+#### Step 4: Update L21 maintenance decay
+
+Probationary edges decay at `probationary_decay_rate` (3× normal). Pruned if weight drops below `edge_min_weight` before graduation.
+
+**Files modified:** `src/predictive/router.rs` (maintenance/decay logic)
+
+#### Step 5: Config additions
+
+```yaml
+layer_5_semantic_map:
+  runtime_learning:
+    probationary_decay_rate: 3.0
+    probationary_graduation_count: 2
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `injected_edge_starts_as_probationary`
+- `probationary_edge_graduates_after_two_traversals`
+- `probationary_edge_decays_3x_faster`
+- `probationary_edge_pruned_if_not_reused`
+- `graduated_edge_follows_normal_decay`
+
+---
+
+### Task 11E: Structural Feedback Loop (`src/reasoning/feedback.rs` + `src/engine.rs`)
+
+**Objective:** Track Tier 3 pathfinding overuse per intent class. When an intent's Tier 3 rate exceeds 40%, propose splitting it into finer sub-categories during the next training sweep.
+
+#### Step 1: Tier 3 Overuse Tracker
+
+```rust
+// Add to src/reasoning/feedback.rs
+
+pub struct Tier3OveruseTracker {
+    intent_tier3_rates: HashMap<IntentKind, (u64, u64)>,
+    window_size: u64,
+    split_proposal_threshold: f32,
+}
+
+pub struct IntentSplitProposal {
+    pub intent: IntentKind,
+    pub tier3_rate: f32,
+    pub sample_count: u64,
+    pub proposed_at: DateTime<Utc>,
+}
+
+impl Tier3OveruseTracker {
+    pub fn record(&mut self, intent: IntentKind, used_tier3: bool) { ... }
+    pub fn check_proposals(&self) -> Vec<IntentSplitProposal> { ... }
+}
+```
+
+**Files modified:** `src/reasoning/feedback.rs`
+
+#### Step 2: Wire tracker into L15/L18
+
+After each L15 graph walk step, record whether Tier 3 was used via `Tier3OveruseTracker::record()`. In L18 feedback, periodically call `check_proposals()` and log proposals to telemetry.
+
+**Files modified:** `src/engine.rs`
+
+#### Step 3: Training sweep integration
+
+During `training_sweep`, check for pending `IntentSplitProposal`s. If found and `structural_feedback_enabled`, cluster recent queries for the proposed intent and generate split candidates.
+
+**Files modified:** `src/training/pipeline.rs`
+
+#### Step 4: Config additions
+
+```yaml
+structural_feedback:
+  enabled: false
+  split_proposal_threshold: 0.40
+  min_cluster_separation: 0.30
+  auto_split_confidence: 0.85
+  split_window_size: 1000
+  max_intent_count: 48
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `tier3_tracker_records_and_computes_rates`
+- `split_proposed_when_tier3_rate_exceeds_threshold`
+- `no_proposal_when_rate_below_threshold`
+- `max_intent_count_prevents_over_splitting`
+- `split_proposal_logged_to_telemetry`
+
+---
+
+## 13. Config Changes Summary
 
 All new config fields with their defaults:
 
@@ -1924,12 +2310,35 @@ All new config fields with their defaults:
 | | `implicit_reinforce_delta` | `f32` | 0.05 | Edge weight boost on implicit accept |
 | | `correction_penalty` | `f32` | 0.15 | Edge weight penalty on explicit correction |
 | | `promotion_threshold` | `u32` | 5 | Uses before Episodic edge promotes to Core |
+| | `probationary_decay_rate` | `f32` | 3.0 | Decay multiplier for Probationary edges |
+| | `probationary_graduation_count` | `u32` | 2 | Traversals needed to graduate to Episodic |
+| `classification.semantic_probes` | `enabled` | `bool` | true | Enable semantic anchor probing |
+| | `semantic_probe_weight` | `f32` | 0.15 | Weight of semantic flags in scoring |
+| | `anchor_fuzzy_threshold` | `f32` | 0.25 | Levenshtein threshold for fuzzy match |
+| | `semantic_anchor_count` | `u32` | 500 | Number of semantic anchors |
+| | `anchor_file` | `String` | "config/semantic_anchors.yaml" | Path to anchor definitions |
+| `layer_13_evidence_merge.micro_validator` | `enabled` | `bool` | true | Enable micro-validator |
+| | `numeric_contradiction_threshold` | `f32` | 0.15 | Relative spread before flagging |
+| | `contradiction_penalty` | `f32` | 0.30 | Confidence reduction for contradictions |
+| | `contradiction_override_trust` | `f32` | 0.90 | Trust level that overrides check |
+| `layer_5_semantic_map.adaptive_dims` | `enabled` | `bool` | false | Enable adaptive dimensionality |
+| | `energy_threshold` | `f32` | 0.5 | Per-cell energy to trigger expansion |
+| | `max_spatial_dims` | `u8` | 5 | Hard ceiling on dimensions |
+| | `perturbation` | `f32` | 0.1 | Initial noise for new dimension |
+| `layer_5_semantic_map.anchor_locking` | `enabled` | `bool` | true | Enable anchor zone locking |
+| | `zone_definitions_path` | `String` | "config/semantic_zones.yaml" | Path to zone definitions |
+| `structural_feedback` | `enabled` | `bool` | false | Enable structural feedback loop |
+| | `split_proposal_threshold` | `f32` | 0.40 | Tier 3 rate triggering split proposal |
+| | `min_cluster_separation` | `f32` | 0.30 | Min cosine distance between sub-intents |
+| | `auto_split_confidence` | `f32` | 0.85 | Confidence for auto-applying splits |
+| | `split_window_size` | `u64` | 1000 | Rolling window for Tier 3 tracking |
+| | `max_intent_count` | `u32` | 48 | Max total intent variants |
 
 ---
 
-## 13. File Manifest
+## 14. File Manifest
 
-### New Files (12)
+### New Files (15)
 
 | File | Phase | Purpose |
 |------|-------|---------|
@@ -1943,28 +2352,34 @@ All new config fields with their defaults:
 | `src/bin/training_sweep.rs` | 8 | Per-system training sweep binary |
 | `tests/training_integration.rs` | 9 | End-to-end training integration tests |
 | `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` | — | This document |
+| `src/classification/semantic_anchors.rs` | 11A | Semantic Anchor Registry + probe matching |
+| `config/semantic_anchors.yaml` | 11A | ~500 semantic anchor definitions |
+| `src/classification/semantic_zones.rs` | 11C | Semantic Zone definitions + ZoneManager |
+| `config/semantic_zones.yaml` | 11C | Default zone coordinate definitions |
 
-### Modified Files (~20)
+### Modified Files (~28)
 
 | File | Phase | Changes |
 |------|-------|---------|
-| `src/types.rs` | 1 | Add loss types, SystemTrainingReport |
+| `src/types.rs` | 1, 11D | Add loss types, SystemTrainingReport, EdgeStatus enum |
 | `src/seed/mod.rs` | 1 | Extend TrainingExample, add new module exports |
-| `src/config/mod.rs` | 1, 10 | Add SystemTrainingConfig, sub-configs, RuntimeLearningConfig |
-| `config/config.yaml` | 1, 10 | Add system_training section + runtime_learning section |
+| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig |
+| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback sections |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
 | `src/classification/trainer.rs` | 2 | Full rewrite: centroid + sweep + calibration |
-| `src/classification/calculator.rs` | 2, 7 | Add evaluate_loss(), two-phase, calibration |
-| `src/classification/signature.rs` | 7 | Add POS tag LRU cache |
-| `src/engine.rs` | 2, 3, 4, 5, 7, 10 | Add train_*() methods, reasoning cache, short-circuit, real generate_thought_unit, wire on-the-fly learning |
+| `src/classification/calculator.rs` | 2, 7, 11A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring |
+| `src/classification/signature.rs` | 7, 11A | Add POS tag LRU cache, extend to 82-float with semantic flags |
+| `src/classification/mod.rs` | 11A, 11C | Add semantic_anchors, semantic_zones module exports |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, Tier 3 tracking |
 | `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
 | `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
 | `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
-| `src/spatial_index.rs` | 4, 7 | Add update_position(), batch_update_positions(), neighbor cache |
-| `src/training/pipeline.rs` | 3 | Wire train_reasoning() |
+| `src/spatial_index.rs` | 4, 7, 11C | Add update_position(), batch_update_positions(), neighbor cache, adaptive dims, zone enforcement |
+| `src/training/pipeline.rs` | 3, 11E | Wire train_reasoning(), structural feedback split proposals |
 | `src/classification/intent.rs` | 10 | Add cold-start detection to assess() |
-| `src/reasoning/merge.rs` | 10 | Add edge injection after evidence merge |
-| `src/reasoning/feedback.rs` | 5, 10 | Wire consistency corrections + implicit feedback reinforcement |
+| `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator |
+| `src/reasoning/feedback.rs` | 5, 10, 11E | Wire consistency corrections, implicit feedback, Tier3OveruseTracker |
+| `src/predictive/router.rs` | 11D | Add EdgeStatus lifecycle, probationary decay logic |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
 
 ### Execution Order (Critical Path)
@@ -1977,6 +2392,10 @@ Week 4: Phase 4 (Predictive Training)
 Week 5: Phase 5 (Consistency) + Phase 7 (Efficiency — can parallelize)
 Week 6: Phase 8 (Sweep Harness) + Phase 9 (Integration Tests)
 Week 7: Phase 10 (On-the-fly Learning) — lightweight, can overlap with Week 6
+Week 8: Phase 11 (Hardening Improvements) — sub-tasks can parallelize:
+         11A (Semantic Probes) + 11B (Micro-Validator) + 11D (Probationary Edges)
+         11C (Adaptive Dims + Anchor Locking)
+         11E (Structural Feedback) — last, depends on 11D for Tier 3 tracking
 ```
 
 ### Verification Commands
@@ -1990,6 +2409,9 @@ cargo test --lib --no-default-features -- classification::trainer
 cargo test --lib --no-default-features -- reasoning::decomposer
 cargo test --lib --no-default-features -- predictive::walk_trainer
 cargo test --lib --no-default-features -- reasoning::consistency
+cargo test --lib --no-default-features -- classification::semantic_anchors
+cargo test --lib --no-default-features -- classification::semantic_zones
+cargo test --lib --no-default-features -- reasoning::merge::micro_validator
 
 # Integration tests (after all phases)
 cargo test --test training_integration --no-default-features
