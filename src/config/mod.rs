@@ -365,13 +365,13 @@ impl Default for AdaptiveBehaviorConfig {
             "creative".to_string(),
             IntentAdaptiveProfile {
                 scoring: ScoringWeights {
-                    spatial: 0.08,
+                    spatial: 0.12,
                     context: 0.24,
                     sequence: 0.18,
                     transition: 0.08,
                     utility: 0.18,
                     confidence: 0.08,
-                    evidence: 0.06,
+                    evidence: 0.12,
                 },
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.22,
@@ -394,13 +394,13 @@ impl Default for AdaptiveBehaviorConfig {
             "brainstorm".to_string(),
             IntentAdaptiveProfile {
                 scoring: ScoringWeights {
-                    spatial: 0.06,
+                    spatial: 0.10,
                     context: 0.30,
                     sequence: 0.12,
-                    transition: 0.06,
+                    transition: 0.08,
                     utility: 0.22,
-                    confidence: 0.06,
-                    evidence: 0.04,
+                    confidence: 0.10,
+                    evidence: 0.08,
                 },
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.35,

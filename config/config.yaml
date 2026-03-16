@@ -205,13 +205,13 @@ adaptive_behavior:
         mode: "balanced"
     creative:
       scoring:
-        w_spatial: 0.08
+        w_spatial: 0.12
         w_context: 0.24
         w_sequence: 0.18
         w_transition: 0.08
         w_utility: 0.18
         w_confidence: 0.08
-        w_evidence: 0.06
+        w_evidence: 0.12
       escape:
         stochastic_jump_prob: 0.22
         beam_width: 6
@@ -226,13 +226,13 @@ adaptive_behavior:
         anchor_trust_threshold: 0.80
     brainstorm:
       scoring:
-        w_spatial: 0.06
+        w_spatial: 0.10
         w_context: 0.30
         w_sequence: 0.12
-        w_transition: 0.06
+        w_transition: 0.08
         w_utility: 0.22
-        w_confidence: 0.06
-        w_evidence: 0.04
+        w_confidence: 0.10
+        w_evidence: 0.08
       escape:
         stochastic_jump_prob: 0.35
         beam_width: 10
