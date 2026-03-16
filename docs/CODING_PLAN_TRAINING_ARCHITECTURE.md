@@ -43,12 +43,14 @@ Phase 7 (Efficiency) → can start after Phase 2
 Phase 8 (Sweep Harness) → depends on Phases 2, 3, 4
 Phase 9 (Integration Tests) → depends on all phases
 Phase 10 (On-the-fly Learning) → depends on Phase 4 (Word Graph) + Phase 3 (Evidence Merge)
-Phase 11 (Hardening Improvements) → depends on Phases 2, 4, 5, 10
+Phase 11 (Hardening + Robustness) → depends on Phases 2, 4, 5, 10
   ├── 11A (Semantic Probes) → depends on Phase 2 (Classification)
-  ├── 11B (Micro-Validator) → depends on Phase 3 (Evidence Merge)
+  ├── 11B (Micro-Validator + Lazy Gating) → depends on Phase 3 (Evidence Merge)
   ├── 11C (Adaptive Dims + Anchor Locking) → depends on Phase 4 (Word Graph)
-  ├── 11D (Probationary Edges) → depends on Phase 10 (On-the-fly Learning)
-  └── 11E (Structural Feedback) → depends on Phase 5 (Consistency)
+  ├── 11D (TTG Lease Edges) → depends on Phase 10 (On-the-fly Learning)
+  ├── 11E (Structural Feedback + Hysteresis) → depends on Phase 5 (Consistency)
+  ├── 11F (POS Blending) → depends on Phase 4 (Word Graph, SemanticHasher)
+  └── 11G (Hub Management) → depends on Phase 4 (Word Graph) + 11D (EdgeStatus)
 ```
 
 ### Estimated Effort
@@ -65,8 +67,8 @@ Phase 11 (Hardening Improvements) → depends on Phases 2, 4, 5, 10
 | 8. Sweep Harness | 1 | 1 | ~400 | P1 |
 | 9. Integration Tests | 1 | 1 | ~600 | P1 |
 | 10. On-the-fly Learning | 0 | 3 | ~120 | P1 |
-| 11. Hardening Improvements | 3 | 8 | ~900 | P2 |
-| **Total** | **15** | **~28** | **~8520** | |
+| 11. Hardening + Robustness | 4 | 10 | ~1400 | P0–P2 |
+| **Total** | **16** | **~30** | **~9020** | |
 
 ---
 
@@ -1997,9 +1999,25 @@ classification:
 
 ### Task 11B: Micro-Validator for Logical Consistency (`src/reasoning/merge.rs`)
 
-**Objective:** Add a lightweight post-merge validation step in L13 that detects numerical contradictions, date ordering violations, and entity-property conflicts before candidates are finalized.
+**Objective:** Add a lightweight post-merge validation step in L13 that detects numerical contradictions, date ordering violations, and entity-property conflicts before candidates are finalized. Includes **lazy gating** (skip validation when candidates are unambiguous and high-trust) and **L12 pre-extraction** (MetadataSummary) to avoid regex on the critical path.
 
-#### Step 1: Add MicroValidator to merge.rs
+#### Step 1: Add MetadataSummary to L12 normalization (`src/reasoning/retrieval.rs`)
+
+```rust
+// Add to src/reasoning/retrieval.rs (L12 normalization output)
+
+pub struct MetadataSummary {
+    pub numbers: Vec<(String, f64, String)>,      // (entity, value, unit)
+    pub dates: Vec<(String, String, u16)>,         // (entity, relation, year)
+    pub properties: Vec<(String, String, String)>, // (entity, property, value)
+}
+```
+
+When L12 normalizes HTML/JSON/PDF, run regex extraction **once** and attach `MetadataSummary` to the retrieval result. This moves the expensive work out of the scoring hot path.
+
+**Files modified:** `src/reasoning/retrieval.rs`
+
+#### Step 2: Add MicroValidator with lazy gating to merge.rs
 
 ```rust
 // Add to src/reasoning/merge.rs
@@ -2009,23 +2027,35 @@ pub struct MicroValidatorResult {
     pub penalized_candidates: Vec<Uuid>,
     pub verification_steps: Vec<ReasoningStep>,
     pub needs_human_review: bool,
+    pub skipped_reason: Option<String>,  // "clear_winner", "high_trust", "disabled"
 }
 
 impl EvidenceMerger {
     pub fn validate_consistency(
         &self,
         merged_candidates: &mut Vec<ScoredCandidate>,
+        metadata: &[MetadataSummary],
         config: &MicroValidatorConfig,
     ) -> MicroValidatorResult {
         let mut result = MicroValidatorResult::default();
         if !config.micro_validator_enabled { return result; }
 
-        // 1. Numeric contradiction check
-        self.check_numeric_contradictions(merged_candidates, config, &mut result);
-        // 2. Date ordering check
-        self.check_date_ordering(merged_candidates, config, &mut result);
-        // 3. Entity-property contradiction check
-        self.check_entity_property(merged_candidates, config, &mut result);
+        // LAZY GATING: skip if clear winner with high-trust sources
+        if config.lazy_validation_enabled {
+            let score_gap = merged_candidates[0].score - merged_candidates.get(1)
+                .map_or(0.0, |c| c.score);
+            let all_high_trust = merged_candidates.iter()
+                .all(|c| c.source_trust >= config.validation_trust_floor);
+            if score_gap > config.ambiguity_margin && all_high_trust {
+                result.skipped_reason = Some("clear_winner".into());
+                return result;
+            }
+        }
+
+        // Read from pre-computed MetadataSummary (NOT raw text regex)
+        self.check_numeric_contradictions(metadata, merged_candidates, config, &mut result);
+        self.check_date_ordering(metadata, merged_candidates, config, &mut result);
+        self.check_entity_property(metadata, merged_candidates, config, &mut result);
 
         result
     }
@@ -2034,13 +2064,13 @@ impl EvidenceMerger {
 
 **Files modified:** `src/reasoning/merge.rs`
 
-#### Step 2: Wire into evidence merge pipeline
+#### Step 3: Wire into evidence merge pipeline
 
 After `EvidenceMerger::merge()` returns, call `validate_consistency()` before passing candidates to L14. Add verification steps to `ReasoningTrace`.
 
 **Files modified:** `src/engine.rs`
 
-#### Step 3: Config additions
+#### Step 4: Config additions
 
 ```yaml
 layer_13_evidence_merge:
@@ -2049,6 +2079,9 @@ layer_13_evidence_merge:
     numeric_contradiction_threshold: 0.15
     contradiction_penalty: 0.30
     contradiction_override_trust: 0.90
+    lazy_validation_enabled: true
+    ambiguity_margin: 0.05
+    validation_trust_floor: 0.50
 ```
 
 **Files modified:** `src/config/mod.rs`, `config/config.yaml`
@@ -2059,6 +2092,9 @@ layer_13_evidence_merge:
 - `micro_validator_detects_entity_property_conflict`
 - `micro_validator_skipped_when_disabled`
 - `high_trust_source_overrides_contradiction`
+- `lazy_gating_skips_clear_winner_high_trust`
+- `lazy_gating_triggers_on_ambiguous_candidates`
+- `metadata_summary_extracted_during_l12_normalization`
 
 ---
 
@@ -2152,9 +2188,11 @@ layer_5_semantic_map:
 
 ---
 
-### Task 11D: Probabilistic Edge Promotion (`src/predictive/router.rs`)
+### Task 11D: Probabilistic Edge Promotion with TTG Lease (`src/predictive/router.rs`)
 
-**Objective:** Add `EdgeStatus` (Probationary → Episodic → Core) lifecycle to WordEdge. Probationary edges decay 3× faster and must be traversed twice to graduate.
+**Objective:** Add `EdgeStatus` (Probationary → Episodic → Core) lifecycle to WordEdge. Instead of rapid decay (which causes race conditions with L21 maintenance in concurrent environments), use a **Time-To-Graduation (TTG) lease** — Probationary edges are immune to decay during a configurable lease window, then either graduate or are immediately purged.
+
+**Race condition addressed:** In multi-user or parallel-training scenarios, an edge injected by User A could be pruned by the L21 maintenance worker (running on a 30s cycle) before User A's next turn can traverse it. The TTG lease guarantees survival during the originating session.
 
 #### Step 1: Add EdgeStatus to types
 
@@ -2162,7 +2200,7 @@ layer_5_semantic_map:
 // Add to src/types.rs
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EdgeStatus {
-    Probationary,   // Just injected from retrieval
+    Probationary,   // Just injected from retrieval, under TTG lease
     Episodic,       // Graduated, standard decay
     Core,           // Permanent, no decay
 }
@@ -2172,19 +2210,46 @@ pub enum EdgeStatus {
 
 #### Step 2: Update WordEdge in router.rs
 
-Add `status: EdgeStatus` and `traversal_count: u32` fields to `WordEdge`. Update `create_or_strengthen_edge()` to set `status = Probationary` when called from L13 edge injection.
+Add `status: EdgeStatus`, `traversal_count: u32`, and `lease_expires_at: Option<u64>` fields to `WordEdge`. Update `create_or_strengthen_edge()`:
+- When called from L13 edge injection: set `status = Probationary`, `lease_expires_at = Some(now_epoch_secs + ttg_lease_duration_secs)`
+- When called from training: set `status = Episodic`, `lease_expires_at = None`
 
 **Files modified:** `src/predictive/router.rs`
 
 #### Step 3: Update L15 graph walk
 
-When a Probationary edge is walked, increment `traversal_count`. If `traversal_count >= probationary_graduation_count`, promote to Episodic.
+When a Probationary edge is walked, increment `traversal_count`. If `traversal_count >= probationary_graduation_count`:
+- Promote `status → Episodic`
+- Clear `lease_expires_at = None`
 
 **Files modified:** `src/engine.rs` (L15 walk logic)
 
-#### Step 4: Update L21 maintenance decay
+#### Step 4: Update L21 maintenance — TTG lease enforcement
 
-Probationary edges decay at `probationary_decay_rate` (3× normal). Pruned if weight drops below `edge_min_weight` before graduation.
+Replace rapid decay with lease-based lifecycle:
+```rust
+// In L21 maintenance cycle:
+for edge in edges.iter_mut() {
+    match edge.status {
+        EdgeStatus::Probationary => {
+            if let Some(expires) = edge.lease_expires_at {
+                if now_epoch_secs < expires {
+                    continue; // IMMUNE: skip decay entirely during lease
+                }
+                // Lease expired
+                if edge.traversal_count >= config.probationary_graduation_count {
+                    edge.status = EdgeStatus::Episodic; // late graduation
+                    edge.lease_expires_at = None;
+                } else {
+                    edges_to_purge.push(edge.id); // IMMEDIATE PURGE
+                }
+            }
+        }
+        EdgeStatus::Episodic => { /* standard decay */ }
+        EdgeStatus::Core => { /* no decay */ }
+    }
+}
+```
 
 **Files modified:** `src/predictive/router.rs` (maintenance/decay logic)
 
@@ -2193,34 +2258,45 @@ Probationary edges decay at `probationary_decay_rate` (3× normal). Pruned if we
 ```yaml
 layer_5_semantic_map:
   runtime_learning:
-    probationary_decay_rate: 3.0
+    ttg_lease_duration_secs: 300
     probationary_graduation_count: 2
 ```
 
 **Files modified:** `src/config/mod.rs`, `config/config.yaml`
 
 **Tests:**
-- `injected_edge_starts_as_probationary`
+- `injected_edge_starts_as_probationary_with_lease`
+- `probationary_edge_immune_to_decay_during_lease`
 - `probationary_edge_graduates_after_two_traversals`
-- `probationary_edge_decays_3x_faster`
-- `probationary_edge_pruned_if_not_reused`
+- `expired_lease_purges_ungraduated_edge`
+- `expired_lease_graduates_edge_with_enough_traversals`
 - `graduated_edge_follows_normal_decay`
+- `concurrent_maintenance_does_not_prune_leased_edge`
 
 ---
 
-### Task 11E: Structural Feedback Loop (`src/reasoning/feedback.rs` + `src/engine.rs`)
+### Task 11E: Structural Feedback Loop with Anti-Thrashing (`src/reasoning/feedback.rs` + `src/engine.rs`)
 
-**Objective:** Track Tier 3 pathfinding overuse per intent class. When an intent's Tier 3 rate exceeds 40%, propose splitting it into finer sub-categories during the next training sweep.
+**Objective:** Track Tier 3 pathfinding overuse per intent class. When an intent's Tier 3 rate exceeds 40% for N consecutive windows, propose splitting. Includes **hysteresis bands** (20%–40% dead zone), **min-viability windows** (freeze after split), and **data inheritance** (warm-start sub-centroids) to prevent taxonomy thrashing.
 
-#### Step 1: Tier 3 Overuse Tracker
+#### Step 1: Tier 3 Overuse Tracker with Hysteresis
 
 ```rust
 // Add to src/reasoning/feedback.rs
 
 pub struct Tier3OveruseTracker {
     intent_tier3_rates: HashMap<IntentKind, (u64, u64)>,
+    /// Consecutive windows above split threshold per intent
+    consecutive_above: HashMap<IntentKind, u32>,
+    /// Consecutive windows below merge threshold per intent
+    consecutive_below: HashMap<IntentKind, u32>,
+    /// Freeze: sub-intents created after this sweep cannot be merged
+    viability_freeze: HashMap<IntentKind, u32>,  // intent → freeze_until_sweep
     window_size: u64,
-    split_proposal_threshold: f32,
+    split_proposal_threshold: f32,     // default: 0.40
+    merge_proposal_threshold: f32,     // default: 0.20 (hysteresis gap)
+    consecutive_windows_required: u32, // default: 3
+    min_viability_sweeps: u32,         // default: 3
 }
 
 pub struct IntentSplitProposal {
@@ -2230,9 +2306,21 @@ pub struct IntentSplitProposal {
     pub proposed_at: DateTime<Utc>,
 }
 
+pub struct IntentMergeProposal {
+    pub sub_intents: Vec<IntentKind>,
+    pub parent_intent: IntentKind,
+    pub tier3_rate: f32,
+}
+
 impl Tier3OveruseTracker {
     pub fn record(&mut self, intent: IntentKind, used_tier3: bool) { ... }
-    pub fn check_proposals(&self) -> Vec<IntentSplitProposal> { ... }
+    pub fn check_split_proposals(&self) -> Vec<IntentSplitProposal> { ... }
+    pub fn check_merge_proposals(&self, current_sweep: u32) -> Vec<IntentMergeProposal> {
+        // Only propose merge if:
+        // 1. consecutive_below >= consecutive_windows_required
+        // 2. viability_freeze[intent] <= current_sweep (freeze expired)
+        ...
+    }
 }
 ```
 
@@ -2240,13 +2328,27 @@ impl Tier3OveruseTracker {
 
 #### Step 2: Wire tracker into L15/L18
 
-After each L15 graph walk step, record whether Tier 3 was used via `Tier3OveruseTracker::record()`. In L18 feedback, periodically call `check_proposals()` and log proposals to telemetry.
+After each L15 graph walk step, record whether Tier 3 was used via `Tier3OveruseTracker::record()`. In L18 feedback, periodically call `check_split_proposals()` and `check_merge_proposals()`, log to telemetry.
 
 **Files modified:** `src/engine.rs`
 
-#### Step 3: Training sweep integration
+#### Step 3: Training sweep integration with data inheritance
 
-During `training_sweep`, check for pending `IntentSplitProposal`s. If found and `structural_feedback_enabled`, cluster recent queries for the proposed intent and generate split candidates.
+During `training_sweep`, check for pending proposals:
+
+```rust
+// Split execution with data inheritance:
+for proposal in split_proposals {
+    let parent_centroid = get_centroid(proposal.intent);
+    let clusters = k_means_cluster(recent_queries[proposal.intent], k=2..4);
+    for (i, cluster) in clusters.iter().enumerate() {
+        let sub_centroid = parent_centroid + cluster.offset; // NOT zero-init
+        create_sub_intent(proposal.intent, i, sub_centroid);
+    }
+    // Set viability freeze
+    tracker.viability_freeze.insert(proposal.intent, current_sweep + min_viability_sweeps);
+}
+```
 
 **Files modified:** `src/training/pipeline.rs`
 
@@ -2256,20 +2358,219 @@ During `training_sweep`, check for pending `IntentSplitProposal`s. If found and 
 structural_feedback:
   enabled: false
   split_proposal_threshold: 0.40
+  merge_proposal_threshold: 0.20
   min_cluster_separation: 0.30
   auto_split_confidence: 0.85
   split_window_size: 1000
   max_intent_count: 48
+  consecutive_windows_required: 3
+  min_viability_sweeps: 3
 ```
 
 **Files modified:** `src/config/mod.rs`, `config/config.yaml`
 
 **Tests:**
 - `tier3_tracker_records_and_computes_rates`
-- `split_proposed_when_tier3_rate_exceeds_threshold`
-- `no_proposal_when_rate_below_threshold`
+- `split_proposed_when_tier3_rate_exceeds_threshold_for_n_windows`
+- `no_proposal_in_hysteresis_dead_zone`
+- `merge_proposed_when_below_merge_threshold_for_n_windows`
+- `viability_freeze_prevents_premature_merge`
+- `data_inheritance_warm_starts_sub_centroids`
 - `max_intent_count_prevents_over_splitting`
 - `split_proposal_logged_to_telemetry`
+- `single_window_spike_does_not_trigger_split`
+
+---
+
+### Task 11F: POS-Weighted Perturbation for SemanticHasher (`src/predictive/router.rs`)
+
+**Objective:** Update the `SemanticHasher` initialization to use POS-based cluster offsets and context-seeded perturbation, reducing polysemy spatial collision at node creation time. See Architecture §5.2 "Domain-Anchor Blending".
+
+#### Step 1: Define POS Cluster Centroids (`config/pos_clusters.yaml`) — NEW FILE
+
+```yaml
+# config/pos_clusters.yaml
+clusters:
+  Noun:     [0.7, 0.8, 0.3]  # Object Cluster
+  Verb:     [0.3, 0.3, 0.7]  # Action Cluster
+  Adjective: [0.5, 0.5, 0.5] # Modifier Cluster
+  Adverb:   [0.5, 0.5, 0.5]  # Modifier Cluster
+  Function: [0.5, 0.5, 0.5]  # Center (no offset)
+```
+
+**Files created:** `config/pos_clusters.yaml`
+
+#### Step 2: Update SemanticHasher in router.rs
+
+Modify `hash_to_3d()` (or equivalent) to accept POS tag and optional sentence neighbors:
+
+```rust
+impl SemanticHasher {
+    pub fn hash_to_3d_blended(
+        &self,
+        word: &str,
+        pos_tag: Option<&str>,
+        neighbors: Option<(&str, &str)>,
+        config: &PosClusterConfig,
+    ) -> [f32; 3] {
+        let base = self.hash_to_3d(word);
+
+        // POS-based offset
+        let offset = match pos_tag {
+            Some(tag) => self.pos_cluster_offset(tag, config.pos_offset_strength),
+            None => [0.0; 3],
+        };
+
+        // Context-seeded perturbation
+        let perturbation = match neighbors {
+            Some((n1, n2)) => {
+                let ctx = self.hash_to_3d(&format!("{}{}", n1, n2));
+                [ctx[0] * config.context_seed_strength,
+                 ctx[1] * config.context_seed_strength,
+                 ctx[2] * config.context_seed_strength]
+            }
+            None => [0.0; 3],
+        };
+
+        [base[0] + offset[0] + perturbation[0],
+         base[1] + offset[1] + perturbation[1],
+         base[2] + offset[2] + perturbation[2]]
+    }
+}
+```
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 3: Wire into vocabulary bootstrap and runtime growth
+
+- Dictionary pre-population (Phase 1): calls `hash_to_3d_blended(word, Some(pos_tag), None, config)` — POS offset only, no context
+- Runtime growth (Phase 3): calls `hash_to_3d_blended(word, Some(pos_tag), Some((n1, n2)), config)` — full blending
+
+**Files modified:** `src/predictive/router.rs`, `src/engine.rs`
+
+#### Step 4: Config additions
+
+```yaml
+layer_5_semantic_map:
+  pos_clusters:
+    pos_offset_strength: 0.05
+    context_seed_strength: 0.10
+    clusters_path: "config/pos_clusters.yaml"
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `blended_hash_differs_from_pure_fnv`
+- `noun_offset_shifts_toward_object_cluster`
+- `same_word_different_context_gets_different_position`
+- `function_words_get_no_pos_offset`
+- `dictionary_prepop_uses_pos_only_blend`
+- `runtime_growth_uses_full_context_blend`
+
+---
+
+### Task 11G: Function Word Hub Management (`src/predictive/router.rs`)
+
+**Objective:** Prevent Function-word hub saturation by enforcing edge caps with recency-aware aging, adding semantic domain gating on hub edges during Tier 3 pathfinding, and promoting high-connectivity Content words to secondary hub status. See Architecture §5.11.
+
+#### Step 1: Edge caps with recency-aware aging
+
+Add hub pruning logic to L21 maintenance in `router.rs`:
+
+```rust
+impl WordGraph {
+    pub fn prune_hub_edges(&mut self, config: &HubManagementConfig) {
+        for hub in self.nodes.values_mut().filter(|n| n.node_type == NodeType::Function) {
+            let edge_count = self.edges_from(hub.id).count();
+            if edge_count <= config.max_edges_per_hub as usize { continue; }
+
+            let mut edges: Vec<_> = self.edges_from(hub.id).collect();
+            edges.sort_by(|a, b| {
+                let score_a = a.weight * recency_factor(a.last_reinforced);
+                let score_b = b.weight * recency_factor(b.last_reinforced);
+                score_a.partial_cmp(&score_b).unwrap()
+            });
+
+            // Prune lowest-scoring edges, keeping min_hub_edges
+            // NEVER prune edges to other Function words
+            let to_prune = edge_count - config.max_edges_per_hub as usize;
+            let mut pruned = 0;
+            for edge in &edges {
+                if pruned >= to_prune { break; }
+                let target = self.node(edge.to);
+                if target.node_type == NodeType::Function { continue; }
+                self.remove_edge(edge.from, edge.to);
+                pruned += 1;
+            }
+        }
+    }
+}
+```
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 2: Domain tagging on edges
+
+Add `domain_tags: SmallVec<[u64; 2]>` field to `WordEdge`. During edge creation/reinforcement, derive domain tags from the target node's context tags. Store as hashed fingerprints.
+
+**Files modified:** `src/predictive/router.rs`
+
+#### Step 3: Semantic gating during Tier 3 A*
+
+In the L15 graph walk, when expanding a Function-word hub during A* pathfinding:
+- Retrieve current context domain from Classification + Reasoning
+- Filter `hub.edges.filter(|e| e.domain_tags.intersects(current_domain))`
+- Only score filtered edges (reduces candidate set ~85%)
+
+**Files modified:** `src/engine.rs` (L15 walk logic)
+
+#### Step 4: Secondary hub promotion
+
+During L21 maintenance, check Content nodes for promotion:
+
+```rust
+for node in self.nodes.values_mut() {
+    if node.node_type != NodeType::Content { continue; }
+    let edge_count = self.edges_from(node.id).count();
+    if edge_count > config.secondary_hub_threshold as usize
+        && node.frequency > config.secondary_hub_min_frequency {
+        node.is_secondary_hub = true;
+    } else {
+        node.is_secondary_hub = false; // can be demoted
+    }
+}
+```
+
+In L15 A* pathfinding, use `secondary_hub_priority` (default: 0.7) as heuristic weight for secondary hubs, vs 1.0 for primary Function-word hubs and 0.3 for regular nodes.
+
+**Files modified:** `src/predictive/router.rs`, `src/engine.rs`
+
+#### Step 5: Config additions
+
+```yaml
+layer_5_semantic_map:
+  hub_management:
+    max_edges_per_hub: 2000
+    min_hub_edges: 500
+    hub_prune_threshold: 0.05
+    hub_domain_gating_enabled: true
+    secondary_hub_threshold: 200
+    secondary_hub_min_frequency: 1000
+    secondary_hub_priority: 0.7
+```
+
+**Files modified:** `src/config/mod.rs`, `config/config.yaml`
+
+**Tests:**
+- `hub_edges_pruned_when_exceeding_max`
+- `inter_function_word_edges_never_pruned`
+- `domain_gating_filters_irrelevant_hub_edges`
+- `domain_gated_astar_reduces_candidate_set`
+- `content_node_promoted_to_secondary_hub`
+- `secondary_hub_demoted_when_below_threshold`
+- `astar_uses_secondary_hub_priority`
+- `min_hub_edges_floor_respected`
 
 ---
 
@@ -2310,7 +2611,7 @@ All new config fields with their defaults:
 | | `implicit_reinforce_delta` | `f32` | 0.05 | Edge weight boost on implicit accept |
 | | `correction_penalty` | `f32` | 0.15 | Edge weight penalty on explicit correction |
 | | `promotion_threshold` | `u32` | 5 | Uses before Episodic edge promotes to Core |
-| | `probationary_decay_rate` | `f32` | 3.0 | Decay multiplier for Probationary edges |
+| | `ttg_lease_duration_secs` | `u64` | 300 | TTG lease duration (5 min) for Probationary edges |
 | | `probationary_graduation_count` | `u32` | 2 | Traversals needed to graduate to Episodic |
 | `classification.semantic_probes` | `enabled` | `bool` | true | Enable semantic anchor probing |
 | | `semantic_probe_weight` | `f32` | 0.15 | Weight of semantic flags in scoring |
@@ -2321,24 +2622,40 @@ All new config fields with their defaults:
 | | `numeric_contradiction_threshold` | `f32` | 0.15 | Relative spread before flagging |
 | | `contradiction_penalty` | `f32` | 0.30 | Confidence reduction for contradictions |
 | | `contradiction_override_trust` | `f32` | 0.90 | Trust level that overrides check |
+| | `lazy_validation_enabled` | `bool` | true | Skip validation for clear winners |
+| | `ambiguity_margin` | `f32` | 0.05 | Score gap below which validation triggers |
+| | `validation_trust_floor` | `f32` | 0.50 | Source trust below which validation always triggers |
 | `layer_5_semantic_map.adaptive_dims` | `enabled` | `bool` | false | Enable adaptive dimensionality |
 | | `energy_threshold` | `f32` | 0.5 | Per-cell energy to trigger expansion |
 | | `max_spatial_dims` | `u8` | 5 | Hard ceiling on dimensions |
 | | `perturbation` | `f32` | 0.1 | Initial noise for new dimension |
 | `layer_5_semantic_map.anchor_locking` | `enabled` | `bool` | true | Enable anchor zone locking |
 | | `zone_definitions_path` | `String` | "config/semantic_zones.yaml" | Path to zone definitions |
+| `layer_5_semantic_map.pos_clusters` | `pos_offset_strength` | `f32` | 0.05 | POS-based cluster offset magnitude |
+| | `context_seed_strength` | `f32` | 0.10 | Context-seeded perturbation magnitude |
+| | `clusters_path` | `String` | "config/pos_clusters.yaml" | Path to POS cluster centroids |
+| `layer_5_semantic_map.hub_management` | `max_edges_per_hub` | `u32` | 2000 | Hard cap on Function-word hub edges |
+| | `min_hub_edges` | `u32` | 500 | Floor to maintain routing viability |
+| | `hub_prune_threshold` | `f32` | 0.05 | Composite score below which edges pruned |
+| | `hub_domain_gating_enabled` | `bool` | true | Enable domain-based edge masking |
+| | `secondary_hub_threshold` | `u32` | 200 | Edge count for secondary hub promotion |
+| | `secondary_hub_min_frequency` | `u32` | 1000 | Min traversal frequency for secondary hub |
+| | `secondary_hub_priority` | `f32` | 0.7 | A* priority weight for secondary hubs |
 | `structural_feedback` | `enabled` | `bool` | false | Enable structural feedback loop |
 | | `split_proposal_threshold` | `f32` | 0.40 | Tier 3 rate triggering split proposal |
+| | `merge_proposal_threshold` | `f32` | 0.20 | Tier 3 rate below which merge proposed |
 | | `min_cluster_separation` | `f32` | 0.30 | Min cosine distance between sub-intents |
 | | `auto_split_confidence` | `f32` | 0.85 | Confidence for auto-applying splits |
 | | `split_window_size` | `u64` | 1000 | Rolling window for Tier 3 tracking |
 | | `max_intent_count` | `u32` | 48 | Max total intent variants |
+| | `consecutive_windows_required` | `u32` | 3 | Windows above/below threshold before action |
+| | `min_viability_sweeps` | `u32` | 3 | Freeze period after split (training sweeps) |
 
 ---
 
 ## 14. File Manifest
 
-### New Files (15)
+### New Files (16)
 
 | File | Phase | Purpose |
 |------|-------|---------|
@@ -2356,30 +2673,32 @@ All new config fields with their defaults:
 | `config/semantic_anchors.yaml` | 11A | ~500 semantic anchor definitions |
 | `src/classification/semantic_zones.rs` | 11C | Semantic Zone definitions + ZoneManager |
 | `config/semantic_zones.yaml` | 11C | Default zone coordinate definitions |
+| `config/pos_clusters.yaml` | 11F | POS cluster centroids for domain-anchor blending |
 
-### Modified Files (~28)
+### Modified Files (~30)
 
 | File | Phase | Changes |
 |------|-------|---------|
 | `src/types.rs` | 1, 11D | Add loss types, SystemTrainingReport, EdgeStatus enum |
 | `src/seed/mod.rs` | 1 | Extend TrainingExample, add new module exports |
-| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig |
-| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback sections |
+| `src/config/mod.rs` | 1, 10, 11 | Add SystemTrainingConfig, RuntimeLearningConfig, SemanticProbeConfig, MicroValidatorConfig, AdaptiveDimsConfig, AnchorLockingConfig, StructuralFeedbackConfig, PosClusterConfig, HubManagementConfig |
+| `config/config.yaml` | 1, 10, 11 | Add system_training, runtime_learning, semantic_probes, micro_validator, adaptive_dims, anchor_locking, structural_feedback, pos_clusters, hub_management sections |
 | `src/memory/store.rs` | 1 | Add set/update centroid methods |
 | `src/classification/trainer.rs` | 2 | Full rewrite: centroid + sweep + calibration |
 | `src/classification/calculator.rs` | 2, 7, 11A | Add evaluate_loss(), two-phase, calibration, semantic probe scoring |
 | `src/classification/signature.rs` | 7, 11A | Add POS tag LRU cache, extend to 82-float with semantic flags |
 | `src/classification/mod.rs` | 11A, 11C | Add semantic_anchors, semantic_zones module exports |
-| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, Tier 3 tracking |
+| `src/engine.rs` | 2, 3, 4, 5, 7, 10, 11B, 11D, 11E, 11F, 11G | Add train_*() methods, reasoning cache, short-circuit, wire on-the-fly learning, micro-validator, TTG lease, Tier 3 tracking, hub domain gating |
 | `src/reasoning/mod.rs` | 3, 5 | Add decomposer, consistency module exports |
 | `src/predictive/mod.rs` | 4 | Add walk_trainer module export |
 | `src/reasoning/search.rs` | 3, 7 | Add evaluate_mrr(), delta_rescore_evidence() |
 | `src/spatial_index.rs` | 4, 7, 11C | Add update_position(), batch_update_positions(), neighbor cache, adaptive dims, zone enforcement |
-| `src/training/pipeline.rs` | 3, 11E | Wire train_reasoning(), structural feedback split proposals |
+| `src/training/pipeline.rs` | 3, 11E | Wire train_reasoning(), structural feedback split/merge proposals with data inheritance |
 | `src/classification/intent.rs` | 10 | Add cold-start detection to assess() |
-| `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator |
-| `src/reasoning/feedback.rs` | 5, 10, 11E | Wire consistency corrections, implicit feedback, Tier3OveruseTracker |
-| `src/predictive/router.rs` | 11D | Add EdgeStatus lifecycle, probationary decay logic |
+| `src/reasoning/retrieval.rs` | 11B | Add MetadataSummary extraction during L12 normalization |
+| `src/reasoning/merge.rs` | 10, 11B | Add edge injection after evidence merge, micro-validator with lazy gating |
+| `src/reasoning/feedback.rs` | 5, 10, 11E | Wire consistency corrections, implicit feedback, Tier3OveruseTracker with hysteresis |
+| `src/predictive/router.rs` | 11D, 11F, 11G | Add EdgeStatus + TTG lease lifecycle, POS-weighted blending, hub edge caps + domain tagging + secondary hub promotion |
 | `Cargo.toml` | 7, 8 | Add lru dependency, training_sweep binary |
 
 ### Execution Order (Critical Path)
@@ -2392,10 +2711,10 @@ Week 4: Phase 4 (Predictive Training)
 Week 5: Phase 5 (Consistency) + Phase 7 (Efficiency — can parallelize)
 Week 6: Phase 8 (Sweep Harness) + Phase 9 (Integration Tests)
 Week 7: Phase 10 (On-the-fly Learning) — lightweight, can overlap with Week 6
-Week 8: Phase 11 (Hardening Improvements) — sub-tasks can parallelize:
-         11A (Semantic Probes) + 11B (Micro-Validator) + 11D (Probationary Edges)
-         11C (Adaptive Dims + Anchor Locking)
-         11E (Structural Feedback) — last, depends on 11D for Tier 3 tracking
+Week 8: Phase 11 (Hardening + Robustness) — sub-tasks can parallelize:
+         11A (Semantic Probes) + 11B (Micro-Validator + Lazy Gating) + 11F (POS Blending)
+         11C (Adaptive Dims + Anchor Locking) + 11G (Hub Management)
+         11D (TTG Lease Edges) + 11E (Structural Feedback + Hysteresis) — last
 ```
 
 ### Verification Commands
@@ -2412,6 +2731,8 @@ cargo test --lib --no-default-features -- reasoning::consistency
 cargo test --lib --no-default-features -- classification::semantic_anchors
 cargo test --lib --no-default-features -- classification::semantic_zones
 cargo test --lib --no-default-features -- reasoning::merge::micro_validator
+cargo test --lib --no-default-features -- predictive::router::semantic_hasher
+cargo test --lib --no-default-features -- predictive::router::hub_management
 
 # Integration tests (after all phases)
 cargo test --test training_integration --no-default-features

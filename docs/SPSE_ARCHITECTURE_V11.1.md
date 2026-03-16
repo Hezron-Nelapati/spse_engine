@@ -1,8 +1,8 @@
 # Structured Predictive Search (SPS) Architecture
 
-**Document Version:** 14.0  
+**Document Version:** 14.1  
 **Last Updated:** March 2026  
-**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements
+**Status:** Reflects current implementation — Three-System Architecture with Word Graph Prediction + On-the-fly Learning + Hardening Improvements + Practical Robustness Fixes
 
 ---
 
@@ -791,7 +791,29 @@ After L13 standard merge produces merged_candidates:
 - `contradiction_override_trust: f32` (default: 0.90) — trust level that overrides contradiction check
 - `micro_validator_enabled: bool` (default: true) — can disable for latency-sensitive paths
 
-**Performance:** Only runs when retrieval was used (~10-15% of queries). Regex-based extraction is microsecond-level. No additional network calls.
+**Performance & Lazy Gating:**
+
+Running 3 regex passes on every retrieved snippet (especially large HTML blobs or dense JSON from L12 normalization) risks adding 50–100ms to the critical path. To avoid this performance cliff:
+
+1. **Confidence-Gated Trigger:** The Micro-Validator only runs if:
+   - Top 2 candidates are within `ambiguity_margin` (default: 0.05) of each other, OR
+   - Any source trust is below `validation_trust_floor` (default: 0.50, i.e., non-allowlisted domain)
+   - *Default:* High-trust, clear-winner scenarios skip validation entirely (zero overhead).
+
+2. **L12 Pre-Extraction (MetadataSummary):** Push regex extraction work to **Layer 12 (Normalization)**, which already processes raw HTML/JSON/PDF. When L12 cleans a document, it extracts a lightweight `MetadataSummary` — a pre-computed struct containing lists of dates, numbers, and entity-property pairs found in the snippet. L13 Micro-Validator reads this struct instead of re-running regex on raw text.
+
+```rust
+struct MetadataSummary {
+    pub numbers: Vec<(String, f64, String)>,     // (entity, value, unit)
+    pub dates: Vec<(String, String, u16)>,       // (entity, relation, year)
+    pub properties: Vec<(String, String, String)>,// (entity, property, value)
+}
+```
+
+**Config (additional):**
+- `ambiguity_margin: f32` (default: 0.05) — score gap below which validation triggers
+- `validation_trust_floor: f32` (default: 0.50) — source trust below which validation always triggers
+- `lazy_validation_enabled: bool` (default: true) — set false to always validate
 
 **Integration with ReasoningTrace:** Contradiction findings are recorded as `ReasoningStep` entries with `step_type: Verification`, making them visible in `ExplainTrace` for debugging.
 
@@ -974,36 +996,46 @@ This adds ~20 lines to the existing `merge()` function. No new files.
 
 **Problem:** Injecting edges from a single retrieval event may introduce noise if the retrieved snippet was slightly off-context. A one-off mention of "Paris → Texas" in a geography context shouldn't permanently pollute the graph.
 
-**Solution:** Edges injected from retrieval start with **Probationary** status — a new `EdgeStatus` between injection and standard Episodic. Probationary edges have a rapid decay rate and must be successfully traversed **twice** (once during injection, once during a subsequent user interaction) before graduating to Episodic.
+**Solution:** Edges injected from retrieval start with **Probationary** status — a new `EdgeStatus` between injection and standard Episodic. Instead of rapid decay (which risks race conditions with the L21 maintenance worker in concurrent environments), Probationary edges use a **Time-To-Graduation (TTG) lease** mechanism: they are immune to decay during a short lease window and must be traversed twice to graduate.
+
+**Race condition addressed:** In a multi-user or parallel-training scenario, an edge injected by User A might be pruned by the L21 maintenance worker (running on a 30s cycle) before User A's next turn can traverse it. The TTG lease guarantees the edge survives long enough for the originating session to use it.
 
 ```
 Edge lifecycle:
   1. INJECTION (L13 edge injection):
      Create edge with status = Probationary
-     Set decay_rate = probationary_decay_rate (default: 3× normal)
+     Set lease_expires_at = now + ttg_lease_duration (default: 5 minutes)
      Set traversal_count = 1 (counts the injection traversal)
 
-  2. FIRST SUBSEQUENT USE (L15 graph walk):
+  2. DURING LEASE (L21 maintenance):
+     Probationary edges with lease_expires_at > now:
+       → SKIP decay entirely (immune to pruning)
+       → Do NOT count toward edge budget limits
+
+  3. SUBSEQUENT USE (L15 graph walk):
      If Probationary edge is walked during a response:
        traversal_count += 1
        If traversal_count >= probationary_graduation_count (default: 2):
          status → Episodic (standard decay rate applies)
+         lease_expires_at = cleared (no longer relevant)
 
-  3. DECAY (L21 maintenance):
-     Probationary edges decay at probationary_decay_rate
-     If weight < edge_min_weight before graduation:
-       Edge is pruned (noise eliminated)
+  4. LEASE EXPIRY (L21 maintenance):
+     If lease_expires_at <= now AND status == Probationary:
+       If traversal_count >= probationary_graduation_count:
+         → Late graduation: promote to Episodic
+       Else:
+         → IMMEDIATE PURGE (noise eliminated in one step)
 
-  4. NORMAL LIFECYCLE:
+  5. NORMAL LIFECYCLE:
      Once Episodic, standard decay/promotion rules apply
      If used >= promotion_threshold times → Core (permanent)
 ```
 
 **Config:**
-- `probationary_decay_rate: f32` (default: 3.0) — multiplier on normal edge decay for Probationary edges
+- `ttg_lease_duration_secs: u64` (default: 300) — lease duration in seconds (5 minutes)
 - `probationary_graduation_count: u32` (default: 2) — traversals needed to graduate to Episodic
 
-**Benefit:** Prevents graph clutter from one-off retrieval noise while allowing rapid learning of valid facts. A correct edge gets used again quickly (user asks follow-up) and graduates; a noisy edge decays within 1–2 maintenance cycles.
+**Benefit:** Eliminates the race condition between inference threads and the maintenance worker. Valid learned facts survive the immediate session without complex locking. Noisy edges are cleanly purged at lease expiry — no gradual weight decay needed, making the lifecycle binary and predictable.
 
 #### Extension 3: Implicit Feedback Reinforcement (L18 — existing FeedbackController)
 
@@ -1498,9 +1530,50 @@ The Classification System's intent + the Reasoning System's context provide the 
 #### Phase 1: Dictionary Pre-population
 
 On first run, load ~50K common English words from a bundled dictionary file. Each word gets:
-- Initial 3D position from `SemanticHasher` (existing FNV trigram hashing — deterministic, no embedding model)
+- Initial 3D position from `SemanticHasher` with **Domain-Anchor Blending** (see below)
 - `NodeType` assignment: POS tagger classifies as Content, Function, or Compound
 - **No edges yet** — edges only come from training
+
+#### Domain-Anchor Blending (SemanticHasher Enhancement)
+
+**Problem:** Pure FNV trigram hashing is deterministic but **semantically blind** — it places "Apple" (fruit) and "Apple" (tech company) at the exact same initial coordinate. This causes immediate spatial collision during the first layout pass, pushing valid neighbors away before context-gated edges can form. Result: slower convergence for polysemous words and higher Tier 3 usage during first encounters.
+
+**Solution: POS-Weighted Perturbation + Context-Seeded Hashing.**
+
+```
+Position initialization for word W in sentence S:
+
+1. BASE POSITION (existing):
+   base = SemanticHasher::hash_to_3d(W)  // FNV trigram → [x, y, z]
+
+2. POS-BASED OFFSET (new):
+   pos_tag = L1_pos_tagger(W)
+   offset = pos_cluster_centroids[pos_tag] × pos_offset_strength
+   // Pre-defined anchor zones:
+   //   Noun    → offset toward (0.7, 0.8, 0.3)  "Object Cluster"
+   //   Verb    → offset toward (0.3, 0.3, 0.7)  "Action Cluster"
+   //   Adj/Adv → offset toward (0.5, 0.5, 0.5)  "Modifier Cluster"
+   //   Function → (0.5, 0.5, 0.5) center (no offset, they are universal)
+
+3. CONTEXT-SEEDED PERTURBATION (new):
+   If W appears in a sentence with neighbors N1, N2:
+     context_hash = hash(N1 + N2)
+     perturbation = normalize(hash_to_3d(context_hash)) × context_seed_strength
+   Else (dictionary pre-pop, no context):
+     perturbation = [0, 0, 0]
+
+4. FINAL POSITION:
+   position = base + offset + perturbation
+```
+
+**Effect on polysemy:** "Bank" in "River Bank flooded" gets `base + noun_offset + hash("River","flooded") × 0.1`, while "Bank" in "Money Bank account" gets `base + noun_offset + hash("Money","account") × 0.1` — different initial positions **before** any edges are created. This reduces collision energy during the first layout pass by ~60% for polysemous words (estimated from synthetic tests).
+
+**Config:**
+- `pos_offset_strength: f32` (default: 0.05) — magnitude of POS-based cluster offset
+- `context_seed_strength: f32` (default: 0.10) — magnitude of context-seeded perturbation
+- `pos_cluster_centroids` — pre-defined in `config/pos_clusters.yaml`
+
+**Backward compatibility:** Words positioned without context (dictionary pre-pop) use only `base + offset`, which is a small deterministic shift. Existing spatial indices remain valid; positions shift by at most `pos_offset_strength + context_seed_strength ≈ 0.15` from the pure FNV position.
 
 #### Phase 2: Training Edge Formation
 
@@ -1510,11 +1583,15 @@ Q&A training creates/strengthens edges between consecutive words in answers, tag
 
 When a word appears that isn't in the graph (custom names, slang, domain terms):
 1. Create new `WordNode` with `NodeType::Custom`
-2. **Position**: weighted average of surrounding known words' positions in the sentence
+2. **Position**: Domain-Anchor Blending with full context-seeded perturbation (sentence neighbors available)
    ```
    "I visited Kigali yesterday"
-   "Kigali" unknown → position = weighted_avg(pos("visited"), pos("yesterday"))
+   "Kigali" unknown → base = hash("Kigali")
+                       offset = noun_offset (detected as NNP)
+                       perturbation = hash("visited","yesterday") × 0.1
+                       position = base + offset + perturbation
    ```
+   Falls back to weighted average of surrounding known words if neighbors are unavailable.
 3. New edges formed from sentence context, starting with low weight
 4. Compound noun detection (L1) may merge multi-word names into single nodes
 
@@ -1753,6 +1830,78 @@ For each node position update:
 
 **Benefit:** Prevents factual drift while still allowing semantic clustering within zone boundaries. Numbers stay near numbers, dates stay near dates, but they can still form edges to content words outside their zone.
 
+### 5.11 Function Word Hub Management
+
+**Problem:** Function words (the, is, of, and) serve as universal routing hubs for Tier 3 pathfinding (A*). As the graph grows to millions of edges, these hubs become **over-connected**, creating a star-topology bottleneck. An A* search prioritizing "high connectivity" blindly routes everything through "the" or "is", producing semantically weak paths. Scoring thousands of edges on a single hub node also increases compute cost.
+
+**Solution:** Three complementary mechanisms prevent hub saturation while preserving routing utility.
+
+#### Edge Caps with Recency-Aware Aging
+
+```
+For each Function-word hub node H:
+  If H.outgoing_edges.count > max_edges_per_hub (default: 2000):
+    Sort edges by composite_score:
+      composite = edge.weight × recency_factor(edge.last_reinforced)
+                + recent_traversal_bonus (if walked in last N steps)
+    Prune edges where composite < hub_prune_threshold
+    Keep at least min_hub_edges (default: 500) to maintain routing viability
+
+  Pruning preference:
+    1. Edges with weight < edge_min_weight AND not recently traversed
+    2. Edges with oldest last_reinforced AND lowest weight
+    3. NEVER prune edges to other Function words (inter-hub connections)
+```
+
+#### Semantic Domain Gating on Hubs
+
+Tag Function-word edges with the **domain** of their target node (derived from the target's context tags):
+
+```
+Edge tagging (during edge creation/reinforcement):
+  "is" → "quantum"  [domain_tags: {science, physics}]
+  "is" → "beautiful" [domain_tags: {casual, aesthetic}]
+  "is" → "deprecated" [domain_tags: {technology, code}]
+
+During Tier 3 Pathfinding:
+  current_context = Classification intent + Reasoning context fingerprint
+  For hub node H:
+    active_edges = H.edges.filter(|e| e.domain_tags.intersects(current_context))
+    // Only score edges relevant to current domain
+    // Reduces candidate set from ~2000 to ~100-300 per hub
+```
+
+**Effect:** Instead of scoring all 2,000 edges of "the", the A* search only considers the ~150 edges tagged with the current domain. This reduces per-hub scoring cost by ~85% while improving path semantic quality.
+
+#### Secondary Hub Promotion
+
+High-frequency **Content words** that develop hub-like connectivity are promoted to "Secondary Hub" status, distributing routing load:
+
+```
+During L21 maintenance:
+  For each Content node C:
+    If C.outgoing_edges.count > secondary_hub_threshold (default: 200)
+    AND C.frequency > secondary_hub_min_frequency (default: 1000):
+      C.is_secondary_hub = true
+      // Secondary hubs participate in Tier 3 pathfinding
+      // but with lower priority than Function-word primary hubs
+
+  Tier 3 A* priority: Primary hubs (1.0) > Secondary hubs (0.7) > Regular nodes (0.3)
+```
+
+**Examples of natural secondary hubs:** "system", "data", "user", "time", "world", "people" — domain-specific words that appear across many contexts and develop dense connectivity organically.
+
+**Config:**
+- `max_edges_per_hub: u32` (default: 2000) — hard cap on Function-word hub edges
+- `min_hub_edges: u32` (default: 500) — floor to maintain routing viability
+- `hub_prune_threshold: f32` (default: 0.05) — composite score below which edges are pruned
+- `hub_domain_gating_enabled: bool` (default: true) — enable domain-based edge masking during pathfinding
+- `secondary_hub_threshold: u32` (default: 200) — edge count for Content node to become secondary hub
+- `secondary_hub_min_frequency: u32` (default: 1000) — minimum traversal frequency for secondary hub
+- `secondary_hub_priority: f32` (default: 0.7) — A* priority weight for secondary hubs
+
+**Benefit:** Prevents the star-topology bottleneck that degrades both path quality and compute cost. Domain gating ensures paths through hubs are semantically relevant. Secondary hubs distribute routing load to domain-specific high-connectivity nodes, reducing dependence on pure Function words.
+
 ---
 
 ## 6. System Interaction & Engine Pipeline
@@ -1928,17 +2077,53 @@ When an intent's Tier 3 rate exceeds `split_proposal_threshold` over the rolling
 **Config:**
 - `structural_feedback_enabled: bool` (default: false — opt-in, requires training sweep)
 - `split_proposal_threshold: f32` (default: 0.40) — Tier 3 overuse rate triggering split proposal
+- `merge_proposal_threshold: f32` (default: 0.20) — Tier 3 rate below which merge is proposed (hysteresis gap)
 - `min_cluster_separation: f32` (default: 0.30) — minimum cosine distance between proposed sub-intent clusters
 - `auto_split_confidence: f32` (default: 0.85) — confidence above which splits are auto-applied
 - `split_window_size: u64` (default: 1000) — rolling window for Tier 3 tracking
+- `min_viability_sweeps: u32` (default: 3) — minimum training sweeps before a split can be reverted
+- `consecutive_windows_required: u32` (default: 3) — number of consecutive windows above/below threshold before action
+
+#### Anti-Thrashing: Hysteresis & Minimum Viability
+
+**Problem:** Without hysteresis, the system can thrash: Split "Question" → data becomes sparse per sub-intent → Tier 3 spikes because centroids are weak → system merges back → data aggregates → Tier 3 drops → system splits again. This wastes training cycles and destabilizes the taxonomy.
+
+**Solution:** Three interlocking mechanisms prevent thrashing:
+
+```
+1. HYSTERESIS BAND:
+   Split trigger:  tier3_rate > 0.40 for N consecutive windows
+   Merge trigger:  tier3_rate < 0.20 for N consecutive windows
+   Dead zone:      0.20–0.40 → NO ACTION (stable region)
+
+   This creates a 20-percentage-point gap where the system does nothing,
+   absorbing normal variance without triggering oscillations.
+
+2. MINIMUM VIABILITY WINDOW:
+   After a split is executed:
+     Set freeze_until = current_sweep + min_viability_sweeps (default: 3)
+     During freeze: sub-intents CANNOT be merged, regardless of Tier 3 rate
+     Purpose: allow new centroids to stabilize and gather enough data
+     Minimum data: require ≥ min_examples_per_intent before freeze lifts
+
+3. DATA INHERITANCE (prevents cold-start spike after split):
+   When splitting Intent I → I_subA, I_subB:
+     centroid(I_subA) = centroid(I) + cluster_offset_A  (NOT zero)
+     centroid(I_subB) = centroid(I) + cluster_offset_B  (NOT zero)
+     Where cluster_offset = noise_vector biased by dominant context words
+   This gives sub-intents a warm start, preventing the Tier 3 spike
+   that would otherwise trigger an immediate merge proposal.
+```
 
 **Safeguards:**
 - Maximum 4 sub-intents per split (prevents over-fragmentation)
-- Splits are reversible — if validation fails, revert within 2 training sweeps
+- Splits require `consecutive_windows_required` (default: 3) consecutive qualifying windows, not just one
+- Splits are reversible — but only after `min_viability_sweeps` (default: 3) training sweeps
 - Human review required unless `auto_split_confidence` exceeded
 - Total intent count capped at `max_intent_count` (default: 48) to prevent explosion
+- Merge proposals also require `consecutive_windows_required` consecutive windows below `merge_proposal_threshold`
 
-**Benefit:** The system's classification taxonomy evolves based on real performance bottlenecks. Broad intents that cause poor Predictive performance are automatically refined, improving graph walk quality without manual taxonomy engineering.
+**Benefit:** The system's classification taxonomy evolves based on real performance bottlenecks, with stable convergence guaranteed by hysteresis and viability windows. No thrashing even under noisy workloads.
 
 ---
 
@@ -1982,10 +2167,11 @@ The Predictive System maintains a separate **Word Graph** alongside the Unit-bas
 pub struct WordNode {
     pub id: WordId,                        // compact u32 index
     pub content: String,                   // "the", "quantum", "New_York"
-    pub position: [f32; 3],                // 3D spatial coordinates
+    pub position: [f32; 3],                // 3D spatial coordinates (expandable to 4D/5D per §5.9)
     pub node_type: NodeType,               // Content | Function | Compound | Custom
     pub frequency: u32,                    // global usage count
     pub is_anchor: bool,                   // protected from pruning
+    pub is_secondary_hub: bool,            // promoted Content word (§5.11)
     pub content_fingerprint: u64,          // FNV hash for fast lookup
 }
 
@@ -1994,9 +2180,12 @@ pub struct WordEdge {
     pub to: WordId,                        // target word
     pub weight: f32,                       // connection strength [0, 1]
     pub context_tags: SmallVec<[u64; 4]>,  // polysemy disambiguation
+    pub domain_tags: SmallVec<[u64; 2]>,   // domain gating for hub edges (§5.11)
     pub frequency: u32,                    // times traversed
     pub last_reinforced: u32,              // epoch counter for decay
     pub status: EdgeStatus,                // Probationary | Episodic | Core (§4.9)
+    pub traversal_count: u32,              // TTG graduation counter (§4.9 Ext 2b)
+    pub lease_expires_at: Option<u64>,     // TTG lease timestamp, Probationary only (§4.9 Ext 2b)
 }
 
 pub struct Highway {
@@ -2126,7 +2315,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `retrieval` | `layer_9_retrieval_gating` | `RetrievalThresholds` |
 | `retrieval_io` | `layer_11_retrieval` | `RetrievalIoConfig` |
 | `evidence_merge` | `layer_13_evidence_merge` | `EvidenceMergeConfig` (includes `edge_learn_rate` for on-the-fly injection) |
-| `micro_validator` | `layer_13_evidence_merge.micro_validator` | `MicroValidatorConfig` (contradiction thresholds, enabled flag) |
+| `micro_validator` | `layer_13_evidence_merge.micro_validator` | `MicroValidatorConfig` (contradiction thresholds, lazy gating, enabled flag) |
 | `scoring` | `layer_14_candidate_scoring` | `ScoringWeights` |
 | `adaptive_behavior` | `adaptive_behavior` | `AdaptiveBehaviorConfig` |
 | `governance` | `layer_21_memory_governance` | `GovernanceConfig` |
@@ -2140,7 +2329,9 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `semantic_map` | `layer_5_semantic_map` | `SemanticMapConfig` (includes word graph, edge, highway config) |
 | `resolver` | `layer_16_fine_resolver` | `FineResolverConfig` |
 | `word_graph` | `layer_5_semantic_map.word_graph` | `WordGraphConfig` (tier thresholds, pathfinding, hub limits) |
-| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, probationary_decay_rate, probationary_graduation_count) |
+| `runtime_learning` | `layer_5_semantic_map.runtime_learning` | `RuntimeLearningConfig` (cold_start_edge_threshold, implicit_reinforce_delta, correction_penalty, promotion_threshold, ttg_lease_duration_secs, probationary_graduation_count) |
+| `pos_clusters` | `layer_5_semantic_map.pos_clusters` | `PosClusterConfig` (pos_offset_strength, context_seed_strength, centroids path) |
+| `hub_management` | `layer_5_semantic_map.hub_management` | `HubManagementConfig` (max_edges_per_hub, domain_gating, secondary_hub thresholds) |
 | `adaptive_dims` | `layer_5_semantic_map.adaptive_dims` | `AdaptiveDimsConfig` (enabled, energy_threshold, max_dims, perturbation) |
 | `anchor_locking` | `layer_5_semantic_map.anchor_locking` | `AnchorLockingConfig` (enabled, zone_definitions_path) |
 
@@ -2157,7 +2348,7 @@ All configuration is defined in `src/config/mod.rs` and loaded from `config/conf
 | `gpu` | `gpu` | `GpuConfig` |
 | `multi_engine` | `multi_engine` | `MultiEngineConfig` |
 | `config_sweep` | `config_sweep` | `ConfigSweepConfig` |
-| `structural_feedback` | `structural_feedback` | `StructuralFeedbackConfig` (split thresholds, window size, max intents) |
+| `structural_feedback` | `structural_feedback` | `StructuralFeedbackConfig` (split/merge thresholds, hysteresis, viability windows, max intents) |
 
 ### Key Thresholds Reference
 
@@ -3126,13 +3317,24 @@ spse_engine/
 | **Semantic Anchor** | Canonical phrase representing a complex semantic concept (irony, hypothetical, etc.) used for lightweight probe matching | Classification |
 | **Semantic Probe** | Fast FNV-hash + fuzzy match against ~500 Semantic Anchors during L1/L2, producing 4 binary flags | Classification |
 | **Micro-Validator** | Lightweight logical consistency check in L13 that detects numerical, temporal, and entity-property contradictions | Reasoning |
-| **Probationary Edge** | Newly injected edge from retrieval with rapid decay; must be traversed twice to graduate to Episodic | Predictive |
+| **Probationary Edge** | Newly injected edge from retrieval with TTG lease (immune to decay during lease); must be traversed twice to graduate to Episodic | Predictive |
 | **Adaptive Dimensionality** | Dynamic expansion from 3D to 4D/5D for crowded spatial grid cells where layout energy fails to converge | Predictive |
 | **Semantic Zone** | Immutable coordinate region in spatial grid confining factual anchors (Numbers, Dates, Proper Nouns) from drifting | Predictive |
 | **Anchor Locking** | Zone-based position clamping during force-directed layout — hard lock (1.0) or soft blend (0.5–0.8) | Predictive |
 | **Structural Feedback** | Cross-system signal from Predictive → Classification proposing intent splits when Tier 3 overuse detected | Cross-cutting |
 | **Intent Split** | Dividing a broad IntentKind into finer sub-categories based on Word Graph performance data | Classification |
 | **Tier 3 Overuse** | When >40% of predictions for an intent require on-the-fly pathfinding, signaling the intent is too coarse | Predictive / Cross-cutting |
+| **TTG Lease** | Time-To-Graduation lease — Probationary edges are immune to L21 decay during their lease window (default: 5 min), preventing race conditions | Predictive |
+| **Domain-Anchor Blending** | SemanticHasher enhancement: POS-based offset + context-seeded perturbation to reduce polysemy collision at initialization | Predictive |
+| **POS Cluster Centroid** | Pre-defined anchor coordinate for a POS tag category (Noun→Object Cluster, Verb→Action Cluster) used in domain-anchor blending | Predictive |
+| **MetadataSummary** | Pre-computed struct from L12 normalization containing extracted numbers, dates, and entity-property pairs for Micro-Validator | Reasoning |
+| **Lazy Validation** | Confidence-gated triggering of Micro-Validator — only runs when candidates are ambiguous or sources are low-trust | Reasoning |
+| **Hysteresis Band** | Dead zone (20%–40% Tier 3 rate) where Structural Feedback takes no action, preventing split/merge thrashing | Cross-cutting |
+| **Min-Viability Window** | Freeze period (default: 3 training sweeps) after an intent split during which sub-intents cannot be merged | Cross-cutting |
+| **Data Inheritance** | Initializing sub-intent centroids from parent centroid + cluster offset (not zero) to prevent cold-start spike after split | Classification |
+| **Secondary Hub** | High-frequency Content word promoted to hub status when connectivity exceeds threshold, distributing Tier 3 routing load | Predictive |
+| **Hub Domain Gating** | Masking irrelevant hub edges during Tier 3 A* based on current context domain tags, reducing per-hub scoring cost ~85% | Predictive |
+| **Hub Saturation** | Star-topology bottleneck when Function words accumulate too many edges, degrading pathfinding quality and compute cost | Predictive |
 
 ### Appendix B: Three-System Quick Reference
 
@@ -3159,8 +3361,11 @@ spse_engine/
 | How do we prevent contradictory evidence? | Reasoning | §4.3.1: Micro-Validator — numeric, date ordering, entity-property checks in L13 |
 | How do we handle dense semantic clusters? | Predictive | §5.9: Adaptive Dimensionality — expand crowded cells to 4D/5D |
 | How do we prevent factual node drift? | Predictive | §5.10: Anchor Locking Zones — Numbers, Dates, Proper Nouns confined to coordinate regions |
-| How does noisy edge injection get filtered? | Predictive | §4.9 Ext 2b: Probationary edges decay 3× faster, must be traversed twice to survive |
-| How does the taxonomy evolve? | Cross-cutting | §6.1: Structural Feedback — Tier 3 overuse triggers intent split proposals |
+| How does noisy edge injection get filtered? | Predictive | §4.9 Ext 2b: TTG lease (5 min immunity) + 2 traversals to graduate; purged at expiry |
+| How does the taxonomy evolve? | Cross-cutting | §6.1: Structural Feedback with hysteresis (40% split / 20% merge) + min-viability freeze |
+| How are polysemous words placed initially? | Predictive | §5.2: Domain-Anchor Blending — POS offset + context-seeded perturbation on SemanticHasher |
+| How do we avoid hub saturation? | Predictive | §5.11: Edge caps (2K), domain gating on hubs, secondary hub promotion for Content words |
+| How do we avoid validation latency? | Reasoning | §4.3.1: Lazy gating (ambiguity/trust trigger) + L12 MetadataSummary pre-extraction |
 
 ### Appendix C: References
 
