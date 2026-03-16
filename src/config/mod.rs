@@ -1748,6 +1748,10 @@ pub struct RetrievalIoConfig {
     pub cache_ttl_seconds: u64,
     pub enable_retrieval: bool,
     pub max_retries: usize,
+    /// SearXNG instance URL for L11 retrieval (V14.2 architecture)
+    pub searxng_url: String,
+    /// Enable SearXNG as primary search source
+    pub searxng_enabled: bool,
 }
 
 impl Default for RetrievalIoConfig {
@@ -1758,6 +1762,8 @@ impl Default for RetrievalIoConfig {
             cache_ttl_seconds: 3_600,
             enable_retrieval: true,
             max_retries: 2,
+            searxng_url: "http://localhost:8080".to_string(),
+            searxng_enabled: true,
         }
     }
 }

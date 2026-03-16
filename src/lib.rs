@@ -9,7 +9,7 @@ pub mod drill_lib;
 pub mod engine;
 pub mod gpu;
 pub mod memory;
-pub mod open_sources;
+// Removed: open_sources - no external datasets per §11.9
 pub mod persistence;
 pub mod predictive;
 pub mod proto;

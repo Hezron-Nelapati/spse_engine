@@ -129,6 +129,11 @@ impl Engine {
         &self.config
     }
 
+    /// Get access to the internal memory store for training.
+    pub fn memory(&self) -> Arc<Mutex<MemoryStore>> {
+        Arc::clone(&self.memory)
+    }
+
     pub fn new() -> Self {
         Self::new_with_db_path("spse_memory.db")
     }
@@ -788,15 +793,8 @@ impl Engine {
             ));
 
             for (src_idx, source) in phase.sources.iter().enumerate() {
-                let resolved = match crate::open_sources::resolve_training_source(source) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let msg = format!("source resolve error: {e}");
-                        run_logger.log_progress(&format!("  WARNING: {}", msg));
-                        status.warnings.push(msg);
-                        continue;
-                    }
-                };
+                // Direct source resolution - no external datasets needed
+                let resolved = source.clone();
 
                 let file_path = match resolved.value.as_deref() {
                     Some(p) => std::path::PathBuf::from(p),

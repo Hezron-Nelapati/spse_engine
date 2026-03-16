@@ -460,6 +460,8 @@ layer_11_retrieval:
   cache_ttl_seconds: 3600
   enable_retrieval: true
   max_retries: 2
+  searxng_url: "http://localhost:8080"
+  searxng_enabled: true
 
 layer_16_fine_resolver:
   selection_temperature: 0.60

@@ -128,7 +128,57 @@ impl Db {
                 ON unit_candidates (utility_score DESC)
                 WHERE status IN ('candidate', 'validated');
             CREATE INDEX IF NOT EXISTS idx_combinations_by_gain
-                ON pattern_combinations (compression_gain DESC);",
+                ON pattern_combinations (compression_gain DESC);
+            
+            -- Training model storage (§11.2, §11.3, §11.4)
+            CREATE TABLE IF NOT EXISTS intent_centroids (
+                intent TEXT PRIMARY KEY,
+                centroid_json TEXT NOT NULL,
+                example_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tone_centroids (
+                tone TEXT PRIMARY KEY,
+                centroid_json TEXT NOT NULL,
+                example_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS feature_weights (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                w_structure REAL NOT NULL,
+                w_punctuation REAL NOT NULL,
+                w_semantic REAL NOT NULL,
+                w_derived REAL NOT NULL,
+                w_intent_hash REAL NOT NULL,
+                w_tone_hash REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS word_graph_edges (
+                source_word TEXT NOT NULL,
+                target_word TEXT NOT NULL,
+                weight REAL NOT NULL,
+                traversal_count INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (source_word, target_word)
+            );
+            CREATE TABLE IF NOT EXISTS word_graph_highways (
+                id TEXT PRIMARY KEY,
+                sequence_json TEXT NOT NULL,
+                traversal_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scoring_weights (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                spatial REAL NOT NULL,
+                context REAL NOT NULL,
+                sequence REAL NOT NULL,
+                transition REAL NOT NULL,
+                utility REAL NOT NULL,
+                confidence REAL NOT NULL,
+                evidence REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_edges_by_source ON word_graph_edges (source_word);
+            CREATE INDEX IF NOT EXISTS idx_edges_by_weight ON word_graph_edges (weight DESC);",
         )?;
         ensure_column(
             &conn,
@@ -801,5 +851,210 @@ fn candidate_status_from_str(value: &str) -> CandidateStatus {
         "active" => CandidateStatus::Active,
         "rejected" => CandidateStatus::Rejected,
         _ => CandidateStatus::Candidate,
+    }
+}
+
+// ============================================================================
+// Training Model Persistence (§11.2, §11.3, §11.4)
+// ============================================================================
+
+impl Db {
+    /// Save intent centroid to database
+    pub fn save_intent_centroid(&self, intent: &str, centroid: &[f32], example_count: u64) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let centroid_json = serde_json::to_string(centroid).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO intent_centroids (intent, centroid_json, example_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![intent, centroid_json, example_count as i64, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load all intent centroids from database
+    pub fn load_intent_centroids(&self) -> SqlResult<Vec<(String, Vec<f32>, u64)>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT intent, centroid_json, example_count FROM intent_centroids")?;
+        let rows = stmt.query_map([], |row| {
+            let intent: String = row.get(0)?;
+            let centroid_json: String = row.get(1)?;
+            let example_count: i64 = row.get(2)?;
+            let centroid: Vec<f32> = serde_json::from_str(&centroid_json).unwrap_or_default();
+            Ok((intent, centroid, example_count as u64))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Save tone centroid to database
+    pub fn save_tone_centroid(&self, tone: &str, centroid: &[f32], example_count: u64) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let centroid_json = serde_json::to_string(centroid).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO tone_centroids (tone, centroid_json, example_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![tone, centroid_json, example_count as i64, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load all tone centroids from database
+    pub fn load_tone_centroids(&self) -> SqlResult<Vec<(String, Vec<f32>, u64)>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT tone, centroid_json, example_count FROM tone_centroids")?;
+        let rows = stmt.query_map([], |row| {
+            let tone: String = row.get(0)?;
+            let centroid_json: String = row.get(1)?;
+            let example_count: i64 = row.get(2)?;
+            let centroid: Vec<f32> = serde_json::from_str(&centroid_json).unwrap_or_default();
+            Ok((tone, centroid, example_count as u64))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Save feature weights to database
+    pub fn save_feature_weights(&self, weights: &[f32; 6]) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO feature_weights (id, w_structure, w_punctuation, w_semantic, w_derived, w_intent_hash, w_tone_hash, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![weights[0], weights[1], weights[2], weights[3], weights[4], weights[5], chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load feature weights from database
+    pub fn load_feature_weights(&self) -> SqlResult<Option<[f32; 6]>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT w_structure, w_punctuation, w_semantic, w_derived, w_intent_hash, w_tone_hash FROM feature_weights WHERE id = 1")?;
+        let result = stmt.query_row([], |row| {
+            Ok([
+                row.get::<_, f64>(0)? as f32,
+                row.get::<_, f64>(1)? as f32,
+                row.get::<_, f64>(2)? as f32,
+                row.get::<_, f64>(3)? as f32,
+                row.get::<_, f64>(4)? as f32,
+                row.get::<_, f64>(5)? as f32,
+            ])
+        });
+        match result {
+            Ok(weights) => Ok(Some(weights)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Save word graph edge to database
+    pub fn save_word_edge(&self, source: &str, target: &str, weight: f32) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT INTO word_graph_edges (source_word, target_word, weight, traversal_count)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(source_word, target_word) DO UPDATE SET
+                weight = weight + ?3,
+                traversal_count = traversal_count + 1",
+            params![source, target, weight],
+        )?;
+        Ok(())
+    }
+
+    /// Batch save word graph edges
+    pub fn batch_save_word_edges(&self, edges: &[(String, String, f32)]) -> SqlResult<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO word_graph_edges (source_word, target_word, weight, traversal_count)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(source_word, target_word) DO UPDATE SET
+                    weight = weight + ?3,
+                    traversal_count = traversal_count + 1",
+            )?;
+            for (source, target, weight) in edges {
+                stmt.execute(params![source, target, weight])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Load word graph edges for a source word
+    pub fn load_word_edges(&self, source: &str) -> SqlResult<Vec<(String, f32, u64)>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT target_word, weight, traversal_count FROM word_graph_edges WHERE source_word = ?1 ORDER BY weight DESC"
+        )?;
+        let rows = stmt.query_map(params![source], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32, row.get::<_, i64>(2)? as u64))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Get total edge count
+    pub fn word_edge_count(&self) -> SqlResult<u64> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM word_graph_edges", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// Save highway to database
+    pub fn save_highway(&self, id: &str, sequence: &[String], traversal_count: u64) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let sequence_json = serde_json::to_string(sequence).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO word_graph_highways (id, sequence_json, traversal_count, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, sequence_json, traversal_count as i64, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load all highways
+    pub fn load_highways(&self) -> SqlResult<Vec<(String, Vec<String>, u64)>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT id, sequence_json, traversal_count FROM word_graph_highways")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let sequence_json: String = row.get(1)?;
+            let traversal_count: i64 = row.get(2)?;
+            let sequence: Vec<String> = serde_json::from_str(&sequence_json).unwrap_or_default();
+            Ok((id, sequence, traversal_count as u64))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// Save 7D scoring weights
+    pub fn save_scoring_weights(&self, weights: &[f32; 7]) -> SqlResult<()> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO scoring_weights (id, spatial, context, sequence, transition, utility, confidence, evidence, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![weights[0], weights[1], weights[2], weights[3], weights[4], weights[5], weights[6], chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Load 7D scoring weights
+    pub fn load_scoring_weights(&self) -> SqlResult<Option<[f32; 7]>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare("SELECT spatial, context, sequence, transition, utility, confidence, evidence FROM scoring_weights WHERE id = 1")?;
+        let result = stmt.query_row([], |row| {
+            Ok([
+                row.get::<_, f64>(0)? as f32,
+                row.get::<_, f64>(1)? as f32,
+                row.get::<_, f64>(2)? as f32,
+                row.get::<_, f64>(3)? as f32,
+                row.get::<_, f64>(4)? as f32,
+                row.get::<_, f64>(5)? as f32,
+                row.get::<_, f64>(6)? as f32,
+            ])
+        });
+        match result {
+            Ok(weights) => Ok(Some(weights)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }

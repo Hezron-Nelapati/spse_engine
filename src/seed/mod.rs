@@ -12,13 +12,19 @@
 //! - `TrainingOptions` - processing options (from types.rs)
 
 pub mod bulk_generator;
-mod classification_generator;
-mod dialogue_generator;
-mod dryrun;
-mod entity_generator;
-mod intelligence_generator;
+pub mod classification_dataset_generator;
+pub mod classification_generator;
+pub mod consistency_generator;
+pub mod dialogue_generator;
+pub mod dryrun;
+pub mod entity_generator;
+pub mod intelligence_generator;
+pub mod predictive_generator;
+pub mod reasoning_generator;
 
+pub use classification_dataset_generator::ClassificationDatasetGenerator;
 pub use classification_generator::generate_bulk_classification;
+pub use consistency_generator::ConsistencyDatasetGenerator;
 pub use dialogue_generator::generate_bulk_dialogues;
 pub use dialogue_generator::{
     Dialogue, DialogueGenerator, DialogueJsonDataset, DialogueMetadata as SeedDialogueMetadata,
@@ -30,6 +36,8 @@ pub use entity_generator::{EntityGenerator, EntityJsonDataset};
 pub use intelligence_generator::{
     generate_bulk_intelligence, generate_intelligence_seeds, intelligence_seed_count,
 };
+pub use predictive_generator::PredictiveQAGenerator;
+pub use reasoning_generator::ReasoningDatasetGenerator;
 
 use crate::types::{
     IntentKind, MemoryChannel, MemoryType, ReasoningStep, ReasoningStepType, ReasoningTrace,

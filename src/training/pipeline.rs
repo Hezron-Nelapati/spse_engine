@@ -1,6 +1,5 @@
 use crate::config::EngineConfig;
 use crate::memory::store::MemoryStore;
-use crate::open_sources;
 use crate::types::{
     MemoryChannel, MemoryType, ReasoningTrace, SourceKind, TrainingExecutionMode,
     TrainingJobStatus, TrainingOptions, TrainingPhaseKind, TrainingSource,
@@ -459,7 +458,25 @@ fn phase_options(
 }
 
 fn source(name: &str) -> TrainingSource {
-    open_sources::catalog_source(name)
+    // Create TrainingSource for internal seed datasets (no external open sources per §11.9)
+    let (source_type, target_memory) = match name {
+        "seed_entities" => (crate::types::TrainingSourceType::QaJson, MemoryType::Core),
+        "seed_intelligence" => (crate::types::TrainingSourceType::QaJson, MemoryType::Episodic),
+        "seed_classification" => (crate::types::TrainingSourceType::StructuredJson, MemoryType::Episodic),
+        "seed_dialogues" => (crate::types::TrainingSourceType::QaJson, MemoryType::Episodic),
+        _ => (crate::types::TrainingSourceType::QaJson, MemoryType::Episodic),
+    };
+    
+    TrainingSource {
+        source_type,
+        name: Some(name.to_string()),
+        value: None,
+        mime: Some("application/json".to_string()),
+        content: None, // Content is generated dynamically by seed generators
+        target_memory: Some(target_memory),
+        memory_channels: Some(vec![MemoryChannel::Main, MemoryChannel::Intent]),
+        stream: Default::default(),
+    }
 }
 
 fn curriculum_order(mut sources: Vec<TrainingSource>) -> Vec<TrainingSource> {

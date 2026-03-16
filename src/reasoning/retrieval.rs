@@ -13,10 +13,323 @@ use futures_util::future::join_all;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+// ============================================================================
+// SearXNG Client (V14.2 L11 Architecture)
+// ============================================================================
+
+/// SearXNG search categories per V14.2 architecture
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearxCategory {
+    General,
+    Science,
+    IT,
+    News,
+    Files,
+    Images,
+    Videos,
+    Music,
+    Social,
+}
+
+impl SearxCategory {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Science => "science",
+            Self::IT => "it",
+            Self::News => "news",
+            Self::Files => "files",
+            Self::Images => "images",
+            Self::Videos => "videos",
+            Self::Music => "music",
+            Self::Social => "social",
+        }
+    }
+}
+
+/// SearXNG search result from API
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearxResult {
+    pub url: String,
+    pub title: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub engine: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub publishedDate: Option<String>,
+}
+
+/// SearXNG API response
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearxResponse {
+    pub query: String,
+    #[serde(default)]
+    pub results: Vec<SearxResult>,
+    #[serde(default)]
+    pub answers: Vec<String>,
+    #[serde(default)]
+    pub corrections: Vec<String>,
+    #[serde(default)]
+    pub infoboxes: Vec<SearxInfobox>,
+    #[serde(default)]
+    pub suggestions: Vec<String>,
+    #[serde(default)]
+    pub unresponsive_engines: Vec<Vec<String>>,
+}
+
+/// SearXNG infobox (knowledge graph style)
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearxInfobox {
+    #[serde(default)]
+    pub infobox: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub urls: Vec<SearxInfoboxUrl>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearxInfoboxUrl {
+    pub title: String,
+    pub url: String,
+}
+
+/// SearXNG client for L11 retrieval
+pub struct SearxNGClient {
+    client: Client,
+    base_url: String,
+    timeout_ms: u64,
+}
+
+impl SearxNGClient {
+    pub fn new(base_url: &str, timeout_ms: u64) -> Self {
+        let client = Client::builder()
+            .user_agent("spse_engine/0.1 (educational research)")
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .expect("failed to build SearXNG client");
+        
+        Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout_ms,
+        }
+    }
+
+    /// Search SearXNG with specified categories
+    pub async fn search(
+        &self,
+        query: &str,
+        categories: &[SearxCategory],
+        limit: usize,
+        language: Option<&str>,
+    ) -> Result<SearxResponse, String> {
+        let categories_str = categories
+            .iter()
+            .map(|c| c.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        
+        let encoded_query = Self::encode_query(query);
+        let lang = language.unwrap_or("en");
+        
+        let url = format!(
+            "{}/search?q={}&format=json&categories={}&language={}&safesearch=0&pageno=1",
+            self.base_url, encoded_query, categories_str, lang
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("SearXNG request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("SearXNG returned status: {}", response.status()));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("SearXNG body read failed: {}", e))?;
+
+        let mut searx_response: SearxResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("SearXNG JSON parse failed: {} - body: {}", e, &body[..body.len().min(200)]))?;
+
+        // Truncate results to limit
+        searx_response.results.truncate(limit);
+
+        Ok(searx_response)
+    }
+
+    /// Check if SearXNG instance is available
+    pub async fn health_check(&self) -> bool {
+        let url = format!("{}/healthz", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => {
+                // Try search endpoint as fallback health check
+                let test_url = format!("{}/search?q=test&format=json", self.base_url);
+                self.client.get(&test_url).send().await.is_ok()
+            }
+        }
+    }
+
+    /// Convert SearXNG results to RetrievedDocuments
+    pub fn results_to_documents(&self, response: &SearxResponse) -> Vec<RetrievedDocument> {
+        let mut docs = Vec::new();
+
+        // Process direct answers first (highest trust)
+        for answer in &response.answers {
+            if !answer.is_empty() {
+                let normalized = input::normalize_text(answer);
+                if !normalized.is_empty() {
+                    docs.push(build_retrieved_document(
+                        format!("searxng://answer/{}", response.query),
+                        "Direct Answer".to_string(),
+                        answer.clone(),
+                        normalized,
+                        0.85, // High trust for direct answers
+                    ));
+                }
+            }
+        }
+
+        // Process infoboxes (knowledge graph - high trust)
+        for infobox in &response.infoboxes {
+            if !infobox.content.is_empty() {
+                let normalized = input::normalize_text(&infobox.content);
+                if !normalized.is_empty() {
+                    let source_url = infobox.urls.first()
+                        .map(|u| u.url.clone())
+                        .unwrap_or_else(|| format!("searxng://infobox/{}", infobox.id));
+                    
+                    docs.push(build_retrieved_document(
+                        source_url,
+                        infobox.infobox.clone(),
+                        infobox.content.clone(),
+                        normalized,
+                        0.80, // High trust for infoboxes
+                    ));
+                }
+            }
+        }
+
+        // Process search results
+        for result in &response.results {
+            if result.url.is_empty() || result.content.is_empty() {
+                continue;
+            }
+
+            let normalized = input::normalize_text(&result.content);
+            if normalized.is_empty() {
+                continue;
+            }
+
+            // Trust based on engine source
+            let base_trust = Self::engine_trust(&result.engine);
+            
+            // Boost trust if score is provided and high
+            let trust = if result.score > 0.0 {
+                (base_trust + (result.score as f32 * 0.1)).min(0.90)
+            } else {
+                base_trust
+            };
+
+            docs.push(build_retrieved_document(
+                result.url.clone(),
+                result.title.clone(),
+                result.content.clone(),
+                normalized,
+                trust,
+            ));
+        }
+
+        docs
+    }
+
+    fn encode_query(query: &str) -> String {
+        query
+            .replace(' ', "+")
+            .replace('&', "%26")
+            .replace('?', "%3F")
+            .replace('#', "%23")
+            .replace('=', "%3D")
+            .replace('/', "%2F")
+    }
+
+    fn engine_trust(engine: &str) -> f32 {
+        match engine.to_lowercase().as_str() {
+            "wikipedia" => 0.75,
+            "wikidata" => 0.70,
+            "wolfram alpha" | "wolframalpha" => 0.80,
+            "duckduckgo" => 0.55,
+            "google" => 0.60,
+            "bing" => 0.55,
+            "qwant" => 0.50,
+            "brave" => 0.55,
+            "startpage" => 0.55,
+            "mojeek" => 0.45,
+            "yandex" => 0.45,
+            "yahoo" => 0.50,
+            "pubmed" => 0.85,
+            "arxiv" => 0.80,
+            "semantic scholar" => 0.75,
+            "stackoverflow" => 0.65,
+            "github" => 0.60,
+            _ => 0.45,
+        }
+    }
+
+    /// Determine best categories for a query
+    pub fn categorize_query(query: &str) -> Vec<SearxCategory> {
+        let query_lower = query.to_lowercase();
+        let mut categories = vec![SearxCategory::General];
+
+        // Technical/IT queries
+        if query_lower.contains("code") || query_lower.contains("programming")
+            || query_lower.contains("software") || query_lower.contains("api")
+            || query_lower.contains("algorithm") || query_lower.contains("debug")
+            || query_lower.contains("error") || query_lower.contains("function")
+        {
+            categories.push(SearxCategory::IT);
+        }
+
+        // Science queries
+        if query_lower.contains("research") || query_lower.contains("study")
+            || query_lower.contains("experiment") || query_lower.contains("theory")
+            || query_lower.contains("hypothesis") || query_lower.contains("scientific")
+            || query_lower.contains("physics") || query_lower.contains("chemistry")
+            || query_lower.contains("biology")
+        {
+            categories.push(SearxCategory::Science);
+        }
+
+        // News queries
+        if query_lower.contains("news") || query_lower.contains("latest")
+            || query_lower.contains("recent") || query_lower.contains("today")
+            || query_lower.contains("yesterday") || query_lower.contains("breaking")
+        {
+            categories.push(SearxCategory::News);
+        }
+
+        categories
+    }
+}
 
 #[cfg(feature = "gpu")]
 use once_cell::sync::Lazy;
@@ -216,9 +529,11 @@ struct CacheEntry {
 
 pub struct RetrievalPipeline {
     client: Client,
+    searxng: SearxNGClient,
     cache: Mutex<HashMap<String, CacheEntry>>,
     builder: UnitBuilderConfig,
     governance: GovernanceConfig,
+    searxng_enabled: bool,
 }
 
 impl RetrievalPipeline {
@@ -231,11 +546,18 @@ impl RetrievalPipeline {
             .build()
             .expect("failed to build reqwest client");
 
+        let searxng = SearxNGClient::new(
+            &config.retrieval_io.searxng_url,
+            config.retrieval_io.retrieval_timeout_ms,
+        );
+
         Self {
             client,
+            searxng,
             cache: Mutex::new(HashMap::new()),
             builder: config.builder.clone(),
             governance: config.governance.clone(),
+            searxng_enabled: config.retrieval_io.searxng_enabled,
         }
     }
 
@@ -396,6 +718,17 @@ impl RetrievalPipeline {
         query: &SanitizedQuery,
         limit: usize,
     ) -> Result<Vec<RetrievedDocument>, String> {
+        self.fetch_search_documents_with_config(query, limit, "http://localhost:8080", true).await
+    }
+
+    /// L11 retrieval per V14.2 architecture - SearXNG as primary source
+    async fn fetch_search_documents_with_config(
+        &self,
+        query: &SanitizedQuery,
+        limit: usize,
+        searxng_url: &str,
+        searxng_enabled: bool,
+    ) -> Result<Vec<RetrievedDocument>, String> {
         let query_lower = query.raw_query.to_lowercase();
         let is_medical_query = is_medical_query(&query_lower);
         let is_location_query = is_location_query(&query_lower);
@@ -415,9 +748,13 @@ impl RetrievalPipeline {
                 >,
             > = Vec::new();
 
-            // Always include these sources
+            // V14.2: SearXNG as primary search source (L11)
+            if searxng_enabled {
+                futures_vec.push(Box::pin(self.fetch_searxng_documents(&variant, searxng_url, 5)));
+            }
+
+            // Supplementary sources
             futures_vec.push(Box::pin(self.fetch_wikipedia_documents(&variant, 3)));
-            futures_vec.push(Box::pin(self.fetch_duckduckgo_documents(&variant, 3)));
             futures_vec.push(Box::pin(self.fetch_wikidata_documents(&variant, 2)));
 
             // Conditional sources
@@ -456,6 +793,31 @@ impl RetrievalPipeline {
         }
 
         Ok(self.hydrate_documents(all_docs, limit).await)
+    }
+
+    /// Fetch documents from SearXNG using the SearxNGClient (V14.2 L11)
+    async fn fetch_searxng_documents_via_client(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RetrievedDocument>, String> {
+        let categories = SearxNGClient::categorize_query(query);
+        let response = self.searxng.search(query, &categories, limit, Some("en")).await?;
+        Ok(self.searxng.results_to_documents(&response))
+    }
+
+    /// Fetch documents from SearXNG metasearch engine (V14.2 L11) - direct method
+    async fn fetch_searxng_documents(
+        &self,
+        query: &str,
+        searxng_url: &str,
+        limit: usize,
+    ) -> Result<Vec<RetrievedDocument>, String> {
+        // Use the SearxNGClient for proper structured parsing
+        let client = SearxNGClient::new(searxng_url, 2000);
+        let categories = SearxNGClient::categorize_query(query);
+        let response = client.search(query, &categories, limit, Some("en")).await?;
+        Ok(client.results_to_documents(&response))
     }
 
     async fn fetch_duckduckgo_documents(

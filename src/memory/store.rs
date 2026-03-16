@@ -476,10 +476,68 @@ impl MemoryStore {
             intent_centroids: HashMap::new(),
             tone_centroids: HashMap::new(),
         };
+        
+        // Load trained centroids from SQLite if available
+        store.load_trained_centroids_from_db();
+        
         if seed_bootstrap_units {
             store.ensure_bootstrap_seeds();
         }
         store
+    }
+    
+    /// Load trained centroids from database persistence layer
+    fn load_trained_centroids_from_db(&mut self) {
+        // Load intent centroids
+        if let Ok(centroids) = self.db.load_intent_centroids() {
+            let mut loaded_count = 0;
+            for (intent_str, centroid, count) in centroids {
+                let intent = match intent_str.as_str() {
+                    "Question" => crate::types::IntentKind::Question,
+                    "Explain" => crate::types::IntentKind::Explain,
+                    "Compare" => crate::types::IntentKind::Compare,
+                    "Analyze" => crate::types::IntentKind::Analyze,
+                    "Plan" => crate::types::IntentKind::Plan,
+                    "Debug" => crate::types::IntentKind::Debug,
+                    "Verify" => crate::types::IntentKind::Verify,
+                    "Summarize" => crate::types::IntentKind::Summarize,
+                    "Classify" => crate::types::IntentKind::Classify,
+                    "Recommend" => crate::types::IntentKind::Recommend,
+                    "Extract" => crate::types::IntentKind::Extract,
+                    "Critique" => crate::types::IntentKind::Critique,
+                    "Brainstorm" => crate::types::IntentKind::Brainstorm,
+                    "Help" => crate::types::IntentKind::Help,
+                    "Greeting" => crate::types::IntentKind::Greeting,
+                    "Farewell" => crate::types::IntentKind::Farewell,
+                    "Gratitude" => crate::types::IntentKind::Gratitude,
+                    _ => continue,
+                };
+                // Store as sum (centroid * count) so mean calculation works
+                let sum: Vec<f32> = centroid.iter().map(|v| v * count as f32).collect();
+                self.intent_centroids.insert(intent, (sum, count));
+                loaded_count += 1;
+            }
+            if loaded_count > 0 {
+                eprintln!("[SPSE] Loaded {} intent centroids from database", loaded_count);
+            }
+        }
+        
+        // Load tone centroids
+        if let Ok(centroids) = self.db.load_tone_centroids() {
+            for (tone_str, centroid, count) in centroids {
+                let tone = match tone_str.as_str() {
+                    "NeutralProfessional" => crate::types::ToneKind::NeutralProfessional,
+                    "Empathetic" => crate::types::ToneKind::Empathetic,
+                    "Direct" => crate::types::ToneKind::Direct,
+                    "Technical" => crate::types::ToneKind::Technical,
+                    "Casual" => crate::types::ToneKind::Casual,
+                    "Formal" => crate::types::ToneKind::Formal,
+                    _ => continue,
+                };
+                let sum: Vec<f32> = centroid.iter().map(|v| v * count as f32).collect();
+                self.tone_centroids.insert(tone, (sum, count));
+            }
+        }
     }
 
     pub fn apply_governance(&mut self, governance: &GovernanceConfig) {
@@ -724,9 +782,12 @@ impl MemoryStore {
 
     /// Rebuild centroids from all loaded classification patterns.
     /// Called on startup after patterns are loaded from DB.
+    /// Skips rebuild if centroids were already loaded from database.
     pub fn rebuild_centroids_from_patterns(&mut self) {
-        self.intent_centroids.clear();
-        self.tone_centroids.clear();
+        // Skip rebuild if centroids were already loaded from database
+        if !self.intent_centroids.is_empty() {
+            return;
+        }
         let patterns: Vec<_> = self.classification_patterns.values().cloned().collect();
         for pattern in &patterns {
             let fv = pattern.signature.to_feature_vector();
