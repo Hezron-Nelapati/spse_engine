@@ -413,6 +413,37 @@ POS tagging uses a pre-trained NLTK perceptron model (`postagger` crate) loaded 
 
 `SemanticHasher` produces a deterministic 3D position from text using trigram-frequency FNV hashing with domain anchor blending (80% hash / 20% anchor) — no embedding model needed.
 
+**Implementation Invariants (validated by real-world benchmarks):**
+
+> **ISSUE-RW1 — Punctuation stripping before social-word lookup (REQUIRED):**
+> The `formality_score` / social-word detection in `ClassificationSignature::compute()` must strip
+> non-alphabetic characters from each token **before** consulting the social-words list.
+> Without stripping, `"Thanks!"` tokenizes to `["thanks!"]` and `social_words.contains("thanks!")`
+> returns `false`, misclassifying social greetings. The fix is one line:
+> ```
+> let token = raw_token.trim_matches(|c: char| !c.is_alphabetic());
+> ```
+> This invariant must be preserved in any feature-vector refactor or tokenizer change.
+> The social-words list covers: `["hi", "hello", "hey", "thanks", "thank", "bye", "goodbye",
+> "please", "sorry", "welcome", "cheers"]` (and variants); all entries are lowercase with no
+> trailing punctuation.
+
+> **ISSUE-RW2 — `creative_cue` feature is mandatory for imperative disambiguation (REQUIRED):**
+> Imperative-creative queries ("Write a poem about autumn") and imperative-factual queries
+> ("Explain how photosynthesis works") share the same surface structure — both start with a verb
+> and have no question mark. Without a dedicated `creative_cue` binary feature in the structural
+> vector, both score similarly and the classifier cannot reliably separate `Brainstorm` from
+> `Explain` intents.
+>
+> The `creative_cue` flag must be 1.0 when the query contains a creative-task verb or noun near
+> the start: `["write", "create", "compose", "draw", "design", "invent", "brainstorm", "imagine",
+> "generate", "make", "build", "craft", "draft"]`. It must be 0.0 for factual-imperative verbs:
+> `["explain", "describe", "define", "list", "summarize", "calculate", "find", "show", "prove"]`.
+>
+> This feature must survive any feature vector reorganization. Regression test:
+> `extract_structural_features("Write a poem")[creative_cue_idx] == 1.0` and
+> `extract_structural_features("Explain photosynthesis")[creative_cue_idx] == 0.0`.
+
 #### ClassificationPattern (`classification/pattern.rs`)
 
 Stored in Intent memory channel as a specialized Unit:
@@ -452,11 +483,14 @@ Feature weights (configurable via `ClassificationConfig`):
 5. Winner = argmax per dimension
 6. Confidence = `best_sim × (margin_blend + (1 - margin_blend) × (best_sim - runner_up_sim) / best_sim)`
    where `margin_blend` is configurable (default: 0.5). Config: `classification.margin_blend_weight`.
+   **Guard (FIX-1):** if `best_sim < ε` (i.e., the query is completely orthogonal to all centroids),
+   return `0.0` directly — the division `(best - runner) / best` is undefined for best=0.
    This blends absolute centroid similarity with margin discrimination:
    - best=0.95, runner_up=0.90 → 0.95 × (0.5 + 0.5 × 0.053) = **0.50** (ambiguous — close runners)
    - best=0.95, runner_up=0.50 → 0.95 × (0.5 + 0.5 × 0.474) = **0.70** (moderate — clear but not dominant)
    - best=0.95, runner_up=0.10 → 0.95 × (0.5 + 0.5 × 0.895) = **0.90** (high — clear winner)
    - best=0.30, runner_up=0.05 → 0.30 × (0.5 + 0.5 × 0.833) = **0.27** (low — weak absolute match)
+   - best=0.0 (orthogonal to all centroids) → **0.0** (guard fires — returns Exploratory mode)
    Naturally bounded in [0, 1] without clamping. Produces meaningful discrimination
    across all operating ranges, ensuring downstream thresholds (0.40, 0.72, 0.85) are effective.
 7. Confidence → resolver mode: `< 0.40 → Exploratory`, `> 0.85 → Deterministic`, else `Balanced`
@@ -925,6 +959,27 @@ for step in 0..max_internal_steps (default 3):
        → Confidence improvement: 0.1 × (1.0 - previous).min(0.3)
     3. If step > 0 and confidence < exit_threshold × 0.7:
        → Set needs_retrieval = true (triggers web retrieval)
+       // NOTE (FIX-3): The retrieval trigger here is 0.60 × 0.7 = 0.42,
+       // which is 2pp above the loop's entry trigger_floor (0.40). This
+       // intentional 2pp "over-cautious" band means step 1 triggers retrieval
+       // even if confidence rose slightly above trigger_floor but is still
+       // below 0.42. This is desired: a marginal improvement is not enough —
+       // the system proactively fetches rather than continuing to guess.
+       //
+       // NOTE (ISSUE-RW3 — real-world validation finding): The retrieval check
+       // fires only on step > 0 AFTER the confidence improvement has already run.
+       // For the default improvement formula (0.1 × (1 - conf)), after one step
+       // from initial_conf C, the new confidence is ≈ 0.9C + 0.1. Retrieval
+       // triggers only if 0.9C + 0.1 < 0.42, i.e., C < ~0.283.
+       //
+       // Effective retrieval floor ≈ 0.28 (NOT 0.40). Queries with initial
+       // confidence in [0.28, 0.40) enter the loop but NEVER trigger retrieval —
+       // they run reasoning steps without external evidence. This is a "dead band"
+       // where the system works harder but doesn't fetch evidence that could help.
+       //
+       // Recommended fix: also check retrieval at step == 0 using initial confidence,
+       // OR compare initial_conf directly against retrieval_sub_trigger on loop entry.
+       //   if initial_conf < retrieval_sub_trigger: set needs_retrieval = true immediately
     4. Ingest thought into Reasoning channel as Episodic unit
        → NOT Core memory (prevents pollution)
     5. Track confidence trajectory
@@ -1686,8 +1741,13 @@ Edge context storage (replaces raw SmallVec for mature edges):
    On edge activation check:
      if context_bloom.probably_contains(current_context_hash):
        → Activate edge (with standard weight scoring)
-   False positive rate: ~1-3% at 1000 insertions (acceptable: slightly
-   less precise gating, never misses a valid context)
+   False positive rate: ~1-3% for typical edges with ≤25 distinct context
+   fingerprints (FIX-BLOOM: a 32-byte/256-bit filter saturates at 1000
+   insertions — FP approaches 100%. The filter is sized for typical edges
+   with 5–25 context tags; high-context hub edges should rely on the
+   dominant_cluster_id fast-path below rather than the Bloom filter alone.
+   Edges requiring >100 distinct context fingerprints should use an
+   enlarged per-hub filter of ~91 bytes — see config note below)
 
 2. DOMINANT CLUSTER ID (u32):
    During L21 maintenance, cluster recent context hashes per edge:
@@ -1705,11 +1765,11 @@ Edge context storage (replaces raw SmallVec for mature edges):
 ```
 
 **Config:**
-- `context_bloom_size_bytes: u8` (default: 32) — per-edge Bloom filter size
+- `context_bloom_size_bytes: u8` (default: 32) — per-edge Bloom filter size for typical edges (≤25 context tags, ~1-3% FP). For hub edges with high context diversity, `hub_bloom_size_bytes` (default: 91) is applied instead — see `HubManagementConfig`.
 - `dominant_cluster_threshold: f32` (default: 0.80) — fraction of activations before setting dominant cluster
 - `context_bloom_migration_threshold: u32` (default: 4) — SmallVec entries before migrating to Bloom
 
-**Benefit:** Infinite context history in constant memory (32 bytes vs. unbounded growth). The dominant cluster fast-path avoids even the Bloom check for the common case where an edge serves one primary meaning (~70% of edges). No eviction logic needed — the Bloom filter gracefully degrades with a known, bounded false positive rate.
+**Benefit:** Infinite context history in constant memory. The dominant cluster fast-path avoids even the Bloom check for the common case where an edge serves one primary meaning (~70% of edges). Hub edges with high context diversity use either the dominant_cluster_id fast-path or a larger 91-byte filter. No eviction logic needed — FP rate is bounded and known for the typical usage range.
 
 ### 5.2 Vocabulary Bootstrap & Growth
 
@@ -1822,7 +1882,10 @@ The walk maintains `beam_width` (from profile, §4.2) parallel candidate sequenc
 
 ```
 0. Initialize:
-   beams = [Beam { words: [start_node], score: 1.0 }]  // single seed
+   beams = [Beam { words: [start_node], log_score: 0.0 }]  // single seed
+   // FIX-2: use log-space accumulation (log_score = Σ ln(edge_weight))
+   // to prevent floating-point underflow on long walks (brainstorm: 300 steps
+   // × ln(0.5) ≈ −208, representable as f64; raw product 0.5^300 ≈ 10^-90 → 0.0)
    max_steps = profile.max_steps  // per-profile (§4.2)
 
 1. For step in 0..max_steps:
@@ -1854,24 +1917,27 @@ The walk maintains `beam_width` (from profile, §4.2) parallel candidate sequenc
                                max_hops=pathfind_max_hops,
                                max_explored=pathfind_max_explored_nodes,
                                prefer_hubs=true)
+         // FIX-6: if max_explored reached without reaching target:
+         //   → fall back to best Tier 1/2 edge, do NOT emit partial A* path
+         //   → this prevents incoherent word sequences when A* runs out of budget
          path_scores = paths.map(|p| path_weight(p) × subgraph_density(p))
 
      // Merge candidates for this beam
      candidates = merge(highway_candidate, near_edges, far_edges, paths)
      top_K = L16_step_resolve(candidates, context, K=beam_width)
-     for (word, score) in top_K:
+     for (word, log_w) in top_K:
        next_beams.push(Beam {
          words: beam.words + [word],
-         score: beam.score × score,
+         log_score: beam.log_score + ln(log_w.max(ε)),  // FIX-2: log-space
        })
 
-   // Prune to top beam_width beams by cumulative score
+   // Prune to top beam_width beams by cumulative log_score
    beams = top(next_beams, beam_width)
 
    // Early exit: all beams reached EOS or high-confidence plateau
    if all beams terminated: break
 
-2. Return best beam (highest cumulative score) → L17 Sequence Assembler
+2. Return best beam (highest cumulative log_score) → L17 Sequence Assembler
 ```
 
 **Beam width scaling:** For `beam_width=1` (not a default, but valid), this degenerates to greedy search. For `beam_width=3` (factual), it explores 3 parallel sequences — enough to recover from a single wrong step. For `beam_width=10` (brainstorm), it explores widely, producing more diverse and creative outputs.
@@ -2161,6 +2227,7 @@ During L21 maintenance:
 - `hub_election_min_frequency: u32` (default: 500) — minimum frequency before centrality computed
 - `hub_centrality_sample_pairs: u32` (default: 100) — sampling pairs per maintenance cycle
 - `language_function_words_dir: String` (default: "config/function_words/") — per-language function word lists
+- `hub_bloom_size_bytes: u8` (default: 91) — (FIX-BLOOM) larger per-hub-edge Bloom filter for edges that accumulate >25 context fingerprints; 91 bytes provides ≤5% FP at 100 distinct context tags. Regular edges continue using `context_bloom_size_bytes` (32 bytes) which is calibrated for ≤25 context fingerprints.
 
 **Benefit:** Prevents the star-topology bottleneck that degrades both path quality and compute cost. Domain gating ensures paths through hubs are semantically relevant. Secondary hubs and dynamic hub election distribute routing load to domain-specific high-connectivity nodes, reducing dependence on pure Function words. Language-aware bootstrap enables multilingual support without hardcoded English assumptions.
 
