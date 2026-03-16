@@ -876,17 +876,43 @@ pub fn train_reasoning(
     //       Run reasoning loop → check if retrieval decision matches ground truth
     //     Record gate accuracy
     //   Select thresholds maximizing gate accuracy
-    
+    //
+    // NOTE (FIX-3 — intentional 2pp retrieval threshold gap):
+    //   The architecture defines retrieval_sub_trigger = exit_threshold × 0.7.
+    //   With exit_threshold = 0.60: retrieval_sub_trigger = 0.42, which is 2pp above
+    //   trigger_floor (0.40). This small but intentional gap means a query that barely
+    //   entered the reasoning loop (confidence just crossed 0.40 upward) will still
+    //   trigger retrieval on step 1, even if confidence nominally rose above trigger_floor.
+    //   This is an over-cautious safety band — do NOT sweep trigger_floor above 0.40 or
+    //   exit_threshold below 0.61 without verifying the retrieval_sub_trigger gap stays ≥ 1pp.
+    //   When the threshold sweep proposes a new exit_threshold, always recompute
+    //   retrieval_sub_trigger = exit_threshold × 0.7 and assert it > trigger_floor.
+    //
+    // NOTE (ISSUE-RW3 — real-world validation finding):
+    //   The retrieval check fires on step > 0 AFTER confidence has already improved.
+    //   With the default improvement formula, initial_conf must be < ~0.28 for retrieval
+    //   to trigger. Queries in [0.28, 0.40) enter the loop but NEVER fetch evidence —
+    //   a "dead band" identified by the RW benchmark tests.
+    //
+    //   When training threshold sweeps, verify retrieval accuracy separately for:
+    //     Group A: initial_conf < 0.28 (retrieval fires reliably)
+    //     Group B: initial_conf in [0.28, 0.40) (dead band — retrieval never fires)
+    //   A good fix: also check at step=0 (before first improvement) whether
+    //   initial_conf < retrieval_sub_trigger and set needs_retrieval immediately.
+    //   This makes the effective floor equal to the nominal 0.42.
+
     // Return combined ReasoningLoss
     todo!()
 }
 ```
 
-**Files modified:** `src/engine.rs` (or `src/training.rs`)  
+**Files modified:** `src/engine.rs` (or `src/training.rs`)
 **Tests:**
 - `train_reasoning_improves_mrr_over_default`
 - `train_reasoning_learns_compare_template`
 - `train_reasoning_optimizes_retrieval_gate`
+- `rw_issue_rw3_effective_retrieval_floor_is_0_28_not_0_40` *(regression — verifies dead band)*
+- `rw_issue_rw3_dead_band_queries_loop_without_retrieval` *(regression — documents [0.28, 0.40) dead band)*
 
 ---
 
@@ -2730,8 +2756,16 @@ layer_5_semantic_map:
 // Add to src/predictive/router.rs (WordEdge extension)
 
 /// Per-edge Bloom filter for context gating (replaces SmallVec for mature edges)
+///
+/// FIX-BLOOM: A 32-byte (256-bit) filter with k=3 hash functions saturates at FP ≈ 100%
+/// by ~1000 insertions. This filter is sized for typical edges (≤25 distinct context tags,
+/// FP ≤ 3%). Hub edges (>25 context tags) must use a larger filter:
+///   hub_bloom_size_bytes = 91 bytes (728 bits) → FP ≤ 3% up to ~100 insertions.
+///
+/// Use `ContextBloom::for_edge(is_hub: bool, config: &ContextBloomConfig)` to pick the
+/// right size. The `bits` field is heap-allocated (`Vec<u8>`) to allow variable sizing.
 pub struct ContextBloom {
-    bits: [u8; 32],  // 256-bit Bloom filter, fixed size
+    bits: Vec<u8>,  // 32 bytes for standard edges; 91 bytes for hub edges (FIX-BLOOM)
 }
 
 impl ContextBloom {
@@ -2790,7 +2824,8 @@ fn is_edge_active(edge: &WordEdge, query_hash: u64, query_cluster: Option<u32>) 
 ```yaml
 layer_5_semantic_map:
   context_bloom:
-    bloom_size_bytes: 32
+    bloom_size_bytes: 32         # standard edges (≤25 context tags, FP ≤ 3%)
+    hub_bloom_size_bytes: 91     # FIX-BLOOM: hub edges (>25 tags) need 728-bit filter for FP ≤ 3%
     dominant_cluster_threshold: 0.80
     migration_threshold: 4
 ```
@@ -2799,7 +2834,10 @@ layer_5_semantic_map:
 
 **Tests:**
 - `bloom_filter_insert_and_contains`
-- `bloom_false_positive_rate_within_bounds`
+- `bloom_false_positive_rate_within_bounds` — verifies FP ≤ 3% at ≤25 insertions into 32-byte filter
+- `bloom_32byte_saturates_at_1000_insertions` — **FIX-BLOOM regression test:** asserts FP > 95% at 1000 insertions (documents the size limitation)
+- `bloom_hub_91byte_fp_rate_within_bounds` — verifies FP ≤ 3% for hub edges at realistic counts
+- `context_bloom_selects_correct_size_by_edge_type` — standard edges get 32-byte filter, hub edges get 91-byte
 - `smallvec_migrates_to_bloom_at_threshold`
 - `dominant_cluster_fast_path_activates_edge`
 - `young_edge_uses_smallvec_gating`
@@ -3093,6 +3131,19 @@ layer_5_semantic_map:
 
 ## 13. Phase 12: Architecture Fixes (Confidence, Beam Search, A* Limit)
 
+Five fixes identified by the V14.2 architecture validation benchmark (`tests/v14_2_architecture_validation_test.rs`). Fixes are tagged FIX-1 through FIX-BLOOM in both the architecture doc and this plan.
+
+| Fix | Issue | Location |
+|-----|-------|----------|
+| **FIX-1** | Division-by-zero in confidence formula when `best_sim=0` | Task 12A |
+| **FIX-2** | Floating-point underflow in 300-step beam walks (Brainstorm profile) | Task 12B |
+| **FIX-3** | Undocumented 2pp gap between `trigger_floor=0.40` and `retrieval_sub_trigger=0.42` | Task 3.4 (note added) |
+| **FIX-6** | A* cap returns incoherent partial path instead of clean Tier 1/2 fallback | Task 12C |
+| **FIX-BLOOM** | 32-byte Bloom filter FP ≈ 100% at 1000 insertions (hub edges need 91-byte filter) | Task 11H + Config |
+| **ISSUE-RW1** | Feature extraction strips `!` from "thanks!" but not from all social tokens (`social_words` check fails on punctuated inputs) | `src/classification/signature.rs` — strip punctuation before social-word lookup |
+| **ISSUE-RW2** | Imperative creative vs. imperative factual ambiguity — `creative_cue` feature [11] is mandatory; without it "Write a poem" scores similar to "Explain X" (both imperative) | Verified working; must be preserved in any feature vector refactor |
+| **ISSUE-RW3** | Effective retrieval trigger floor is **~0.28**, not 0.40. Queries with initial_conf ∈ [0.28, 0.40) enter the loop but never fetch evidence (dead band). Fix: check retrieval at step=0 before first improvement | Task 3.4 (additional fix note added) |
+
 Three critical fixes to bring inference-path logic in line with the updated architecture (§3.5, §4.2, §5.4).
 
 ### Task 12A: Confidence Formula Fix (`src/classification/calculator.rs`)
@@ -3101,11 +3152,18 @@ Three critical fixes to bring inference-path logic in line with the updated arch
 
 **Problem:** The current confidence formula `(best - runner_up) / best + best` saturates at 1.0 for any decent centroid match (e.g., best=0.8, runner_up=0.3 → 1.425, clamped to 1.0), making all downstream thresholds (0.40, 0.72, 0.85) meaningless.
 
-**Fix:** Replace with compound margin-blend formula:
+**Additional fix (FIX-1 — division-by-zero guard):** When the query vector is completely orthogonal to all centroids (`best_sim ≈ 0`), the division `(best - runner) / best` is undefined. The `.max(1e-6)` denominator clamp alone still produces a misleading near-zero confidence rather than signalling the query is unclassifiable. The explicit guard returns 0.0 early, routing the query to Exploratory mode.
+
+**Fix:** Replace with compound margin-blend formula with epsilon guard:
 
 ```rust
 // In ClassificationCalculator::classify()
-let margin = (best_sim - runner_up_sim) / best_sim.max(1e-6);
+// FIX-1: explicit zero-vector guard — orthogonal query → Exploratory mode
+const EPSILON: f32 = 1e-6;
+if best_sim < EPSILON {
+    return ClassificationResult::exploratory_fallback();
+}
+let margin = (best_sim - runner_up_sim) / best_sim;
 let w = self.config.classification.margin_blend_weight; // default: 0.50
 let confidence = best_sim * (w + (1.0 - w) * margin);
 // Result naturally bounded in [0, 1], discriminates well across the full range
@@ -3113,12 +3171,13 @@ let confidence = best_sim * (w + (1.0 - w) * margin);
 
 **Config:** `classification.margin_blend_weight` (default: 0.50, added to `ClassificationConfig` in `src/config/mod.rs`).
 
-**Files modified:** `src/classification/calculator.rs`, `src/config/mod.rs`, `config/config.yaml`  
+**Files modified:** `src/classification/calculator.rs`, `src/config/mod.rs`, `config/config.yaml`
 **Tests:**
 - `confidence_discriminates_clear_winner_vs_ambiguous`
 - `confidence_never_exceeds_one`
 - `margin_blend_weight_zero_gives_pure_similarity`
 - `margin_blend_weight_one_gives_pure_margin`
+- `confidence_zero_guard_for_orthogonal_query` — **FIX-1 regression test:** best_sim=0 → returns exploratory fallback, no NaN/panic
 
 ### Task 12B: Beam Search + Per-Profile Max Steps (`src/engine.rs`)
 
@@ -3126,37 +3185,51 @@ let confidence = best_sim * (w + (1.0 - w) * margin);
 
 **Problem:** `beam_width` was configured per profile (3–10) but never wired into the graph walk algorithm. The walk used greedy single-step selection. `max_steps` was a single global default (50), too short for Explain/Plan/Brainstorm intents.
 
+**Additional fix (FIX-2 — log-space underflow prevention):** Multiplying per-step scores (each in [0,1]) over a long walk causes floating-point underflow. For the Brainstorm profile (`max_steps=300`), a modest per-step score of 0.5 gives `0.5^300 ≈ 10^-90` — below `f32::MIN_POSITIVE`. Beams become indistinguishable by score. Fix: accumulate in log-space (`log_score += ln(step_score)`) using `f64` precision; compare and prune beams by `log_score` (higher = better); emit `log_score.exp() as f32` only at the final result step.
+
 **Fix:** Replace the greedy walk loop in `process_prompt()` (L15 Graph Walker) with a beam search that:
 1. Maintains `beam_width` (from active profile) parallel candidate sequences
-2. At each step, expands all beams by their top candidates, then prunes to top `beam_width` by cumulative score
+2. At each step, expands all beams by their top candidates, then prunes to top `beam_width` by cumulative log-score
 3. Uses `max_steps` from the active profile (50–300 depending on intent)
 
 ```rust
 // In engine.rs — L15 Graph Walker
+const LOG_EPSILON: f64 = 1e-10;
 let beam_width = self.active_profile().beam_width;
 let max_steps = self.active_profile().max_steps;
-let mut beams: Vec<Beam> = vec![Beam::new(start_node)];
+// FIX-2: store log_score as f64 to prevent underflow on long walks (max_steps up to 300)
+let mut beams: Vec<Beam> = vec![Beam { words: vec![start_node], log_score: 0.0f64 }];
 
 for _step in 0..max_steps {
     let mut next_beams = Vec::new();
     for beam in &beams {
-        let candidates = self.expand_beam(beam, grid, scorer, resolver);
-        next_beams.extend(candidates);
+        for (candidate, raw_weight) in self.expand_beam(beam, grid, scorer, resolver) {
+            // FIX-2: log-space accumulation — never underflows
+            let log_w = (raw_weight as f64).max(LOG_EPSILON).ln();
+            next_beams.push(Beam {
+                words: { let mut w = beam.words.clone(); w.push(candidate); w },
+                log_score: beam.log_score + log_w,
+            });
+        }
     }
-    next_beams.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    // Prune by log_score (higher = better)
+    next_beams.sort_by(|a, b| b.log_score.partial_cmp(&a.log_score).unwrap());
     next_beams.truncate(beam_width);
     beams = next_beams;
     if beams.iter().all(|b| b.is_terminal()) { break; }
 }
+// Emit best beam; convert log_score → linear score at result boundary only
+let best = beams.into_iter().max_by(|a, b| a.log_score.partial_cmp(&b.log_score).unwrap());
 ```
 
 **Config:** Per-profile `beam_width` and `max_steps` already in `adaptive_behavior.profiles.<name>` (§4.2).
 
-**Files modified:** `src/engine.rs`  
+**Files modified:** `src/engine.rs`
 **Tests:**
 - `beam_search_produces_better_sequences_than_greedy`
 - `max_steps_respected_per_profile`
 - `beam_width_1_equivalent_to_greedy`
+- `beam_search_log_score_no_underflow_300_steps` — **FIX-2 regression test:** 300-step walk at score=0.5/step gives finite log_score (linear score would underflow to 0.0)
 
 ### Task 12C: A* Exploration Limit (`src/predictive/router.rs`)
 
@@ -3164,7 +3237,9 @@ for _step in 0..max_steps {
 
 **Problem:** Tier 3 on-the-fly pathfinding via A* has no limit on explored nodes. Through dense Function-word hubs (2000+ edges), a single pathfinding call could explore thousands of nodes before finding a path or giving up.
 
-**Fix:** Add `pathfind_max_explored_nodes` (default: 500) to cap A* search. When the limit is hit, return the best partial path found so far (or `None` if no viable path).
+**Additional fix (FIX-6 — A* cap fallback coherence):** The original spec said "return the best partial path found so far" when the A* cap fires. However, a partial path does not connect the current walk position to the goal node — it produces an incoherent word sequence mid-walk. The correct degradation is to fall back to the best available Tier 1 (near-edge) or Tier 2 (far-edge) candidate, which gives the system a coherent single-hop step. The router must **not** emit a partial A* path; only a complete A* path (goal reached before cap) or a Tier 1/2 fallback is valid output.
+
+**Fix:** Add `pathfind_max_explored_nodes` (default: 500) to cap A* search. When the limit is hit, fall back to the best Tier 1 / Tier 2 edge — do NOT return a partial A* path:
 
 ```rust
 // In router.rs — astar_pathfind()
@@ -3173,18 +3248,33 @@ let mut explored = 0;
 while let Some(current) = open_set.pop() {
     explored += 1;
     if explored > max_explored {
-        return best_partial_path; // graceful degradation
+        // FIX-6: cap reached — partial A* path is incoherent (doesn't reach goal).
+        // Return None; caller falls back to best Tier 1/2 edge.
+        return None;
     }
     // ... normal A* expansion
+    if current == goal {
+        return Some(reconstruct_path(&came_from, goal)); // complete path only
+    }
 }
+None // exhausted open set without reaching goal
+
+// In the walk tier-selection logic:
+// Tier 3 A* result:
+let tier3_result = self.astar_pathfind(current, goal, config);
+let next_step = tier3_result
+    .and_then(|path| path.into_iter().nth(1))     // first hop of complete A* path
+    .or_else(|| best_tier2_candidate)             // FIX-6: fall back to Tier 2
+    .or_else(|| best_tier1_candidate);            // FIX-6: final fallback to Tier 1
 ```
 
 **Config:** `layer_5_semantic_map.pathfind_max_explored_nodes` (default: 500, added to `WordGraphConfig` in `src/config/mod.rs`).
 
-**Files modified:** `src/predictive/router.rs`, `src/config/mod.rs`, `config/config.yaml`  
+**Files modified:** `src/predictive/router.rs`, `src/config/mod.rs`, `config/config.yaml`
 **Tests:**
 - `astar_respects_exploration_limit`
-- `astar_returns_partial_path_on_limit`
+- `astar_cap_fires_returns_none_not_partial_path` — **FIX-6 regression test:** when cap fires, `astar_pathfind()` returns `None`, never a partial path
+- `astar_cap_falls_back_to_tier1_or_tier2` — tier-selection logic uses Tier 1/2 edge when A* returns None
 - `dense_hub_does_not_cause_timeout`
 
 ---
@@ -3271,7 +3361,8 @@ All new config fields with their defaults:
 | | `max_intent_count` | `u32` | 48 | Max total intent variants |
 | | `consecutive_windows_required` | `u32` | 3 | Windows above/below threshold before action |
 | | `min_viability_sweeps` | `u32` | 3 | Freeze period after split (training sweeps) |
-| `layer_5_semantic_map.context_bloom` | `bloom_size_bytes` | `u8` | 32 | Per-edge Bloom filter size in bytes |
+| `layer_5_semantic_map.context_bloom` | `bloom_size_bytes` | `u8` | 32 | Standard edge Bloom filter size in bytes (≤25 context tags, FP ≤ 3%) |
+| | `hub_bloom_size_bytes` | `u8` | 91 | **FIX-BLOOM:** Hub edge Bloom filter size in bytes (>25 context tags; 32-byte filter saturates at 1000 insertions — FP ≈ 100%) |
 | | `dominant_cluster_threshold` | `f32` | 0.80 | Activation fraction before setting dominant cluster |
 | | `migration_threshold` | `u32` | 4 | SmallVec entries before migrating to Bloom |
 | `layer_5_semantic_map.runtime_learning` | `feedback_queue_ttl_secs` | `u64` | 600 | TTL for WalkEvents in feedback queue |
