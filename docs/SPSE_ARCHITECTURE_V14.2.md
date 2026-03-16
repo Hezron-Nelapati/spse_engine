@@ -2,7 +2,7 @@
 
 **Document Version:** 14.2  
 **Last Updated:** March 2026  
-**Status:** Canonical V14.2 architecture reference. Core three-system flow reflects landed behavior; items explicitly marked *planned* or *pending rename* are approved target-state deltas, not claims that every artifact already exists today.
+**Status:** Normative V14.2 architecture blueprint. This document defines the intended systems, invariants, interfaces, validation process, and reference layout required to build SPSE from scratch.
 
 ---
 
@@ -40,7 +40,19 @@ These three systems consolidate the engine's 21 internal processing layers into 
 
 - Inline defaults in this document are documented config defaults, not hardcoded constants.
 - Field paths such as `retrieval.entropy_threshold` refer to the runtime `EngineConfig` field path; §8 maps those fields back to YAML section names.
-- Terms marked *planned* or *pending rename* use the canonical architecture name even when a legacy identifier is still present in code.
+- Canonical names are used throughout; module and file references describe the reference architecture layout to implement.
+
+### Standalone Contract
+
+This document is the **standalone build contract** for SPSE. An implementation team should be able to build the engine from scratch using this file alone because it defines:
+
+- system boundaries and layer ownership
+- core data structures and config surfaces
+- inference flow and product scenarios
+- validation criteria and executable benchmark expectations
+- directory layout and module responsibilities
+
+If any derivative planning document conflicts with this architecture, the architecture document wins.
 
 ### Key Architectural Differentiators
 
@@ -72,6 +84,19 @@ These three systems consolidate the engine's 21 internal processing layers into 
 | GPU | `wgpu` (feature-gated) |
 | Config | YAML (`config/config.yaml`) |
 | Concurrency | `Arc<Mutex<T>>`, `arc_swap::ArcSwap`, `crossbeam_channel` |
+
+### Build-From-Scratch Sequence
+
+An implementation built from this document should follow this dependency order:
+
+1. Define shared types, config structs, telemetry IDs, and persistence contracts.
+2. Implement the Classification System first: input normalization, unit discovery, hierarchy building, signatures, centroids, and retrieval gating.
+3. Implement the Reasoning memory substrate next: dual memory, channel isolation, snapshots, sequence state, and governance.
+4. Implement Reasoning orchestration: context matrix, retrieval pipeline, trust validation, evidence merge, candidate scoring, and reasoning loop.
+5. Implement the Predictive Word Graph: nodes, edges, highways, spatial index, 3-tier walk, step resolver, and sequence assembler.
+6. Wire the full engine pipeline in `engine.rs`, keeping systems isolated and connected only through typed interfaces.
+7. Add runtime learning, feedback, and structural feedback once the baseline inference path is stable.
+8. Validate against the architecture suite in [tests/v14_2_architecture_validation_test.rs](/Volumes/SSD/Github/spse_engine/tests/v14_2_architecture_validation_test.rs) before extending training data or optimization work.
 
 ---
 
@@ -110,7 +135,7 @@ pub mod gpu              // GPU acceleration (feature-gated wgpu)
 pub mod predictive       // Predictive System: Word Graph (L5), Step Resolver (L16), Sequence Assembler (L17)
 pub mod reasoning        // Reasoning System: Context (L7), Retrieval (L11), Merge (L13), Search (L14), Feedback (L18)
 pub mod memory           // Reasoning System: MemoryStore (L4/L21) + DynamicMemoryAllocator
-pub mod open_sources     // Internal dataset catalog (custom-generated only) — pending rename to dataset_catalog
+pub mod dataset_catalog  // Internal dataset catalog (custom-generated only)
 pub mod persistence      // SQLite persistence layer
 pub mod proto            // Protobuf definitions (api.proto)
 pub mod region_index     // Predictive System: regional spatial index
@@ -444,6 +469,24 @@ POS tagging uses a pre-trained NLTK perceptron model (`postagger` crate) loaded 
 > `extract_structural_features("Write a poem")[creative_cue_idx] == 1.0` and
 > `extract_structural_features("Explain photosynthesis")[creative_cue_idx] == 0.0`.
 
+> **ISSUE-RW4 — Recommendation-style prompts require advisory-family arbitration (REQUIRED):**
+> Recommendation prompts such as "Recommend a beginner camera for travel" often share imperative
+> syntax and product nouns with nearby intents such as `Critique`, `Rewrite`, and `Plan`. The
+> canonical architecture therefore requires a deterministic **advisory-family arbitration pass**
+> whenever the top-ranked intents all belong to `{Recommend, Critique, Rewrite, Plan}` and the
+> top-2 margin is below `classification.recommendation_sharpening.advisory_margin_threshold`.
+>
+> This pass is part of `ClassificationCalculator`, not a new layer. It scores family-specific cues:
+> - `Recommend`: `recommend`, `suggest`, `best`, `buy`, `starter`, `beginner`, `for <use_case>`
+> - `Critique`: `critique`, `review`, `weakness`, `flaw`, `evaluate`, `assess`
+> - `Rewrite`: `rewrite`, `rephrase`, `polish`, `sound more`, `tone`, `formal`, `concise`
+> - `Plan`: `plan`, `roadmap`, `steps`, `timeline`, `milestones`, `schedule`
+>
+> A recommendation query with a target object plus use-case constraint must not fall into
+> `Exploratory` mode solely because advisory-family centroids are close together. Regression test:
+> `"Recommend a beginner camera for travel"` must classify as `Recommend` with post-arbitration
+> confidence `>= classification.low_confidence_threshold`.
+
 #### ClassificationPattern (`classification/pattern.rs`)
 
 Stored in Intent memory channel as a specialized Unit:
@@ -500,6 +543,25 @@ Feature weights (configurable via `ClassificationConfig`):
 2. Score each pattern: cosine similarity × pattern confidence (success / total)
 3. Aggregate votes per intent/tone → weighted majority
 
+**Advisory-family arbitration path** (activated only on low-margin family collisions):
+1. Run the base centroid path normally.
+2. If the top-ranked intents all lie in `{Recommend, Critique, Rewrite, Plan}` and
+   `(best_sim - runner_up_sim) < advisory_margin_threshold`, compute four family-specific scores:
+   - `recommend_score = lexical_recommend_cue × 0.35 + target_object_cue × 0.25 + use_case_cue × 0.20 + constraint_cue × 0.20`
+   - `critique_score = lexical_critique_cue × 0.45 + weakness_cue × 0.30 + evaluation_tone_cue × 0.25`
+   - `rewrite_score = lexical_rewrite_cue × 0.45 + tone_edit_cue × 0.35 + source_text_present_cue × 0.20`
+   - `plan_score = lexical_plan_cue × 0.40 + ordered_steps_cue × 0.35 + horizon_cue × 0.25`
+3. Blend the base centroid score and the family arbitration score:
+   - `final_family_score = (1 - family_blend_weight) × centroid_score + family_blend_weight × arbitration_score`
+4. Re-rank only within the advisory family and recompute confidence from the refined top-2 family margin.
+
+Config:
+- `classification.recommendation_sharpening.enabled` (default: true)
+- `classification.recommendation_sharpening.advisory_margin_threshold` (default: 0.10)
+- `classification.recommendation_sharpening.family_blend_weight` (default: 0.30)
+- `classification.recommendation_sharpening.target_object_boost` (default: 0.25)
+- `classification.recommendation_sharpening.use_case_boost` (default: 0.20)
+
 #### ClassificationTrainer (`classification/trainer.rs`)
 
 Iterative training from labeled seed dialogues (`LabeledDialogue` / `LabeledTurn`):
@@ -544,6 +606,7 @@ Classification patterns stored here are queried via spatial grid for O(1) cell r
 |-------------|-----------|--------|
 | **Incremental centroid update** | Running mean (`new_centroid = old × (n-1)/n + new_vector / n`) instead of full recompute when new patterns are added | Avoids O(N) recompute on each training example |
 | **Two-phase classification** | Phase 1: structural features only (14 dims) → if top-2 margin > 0.3, emit result immediately. Phase 2: full 78-dim comparison only for ambiguous cases | Halves inference cost for clear-cut queries (~60% of traffic) |
+| **Advisory-family arbitration** | Run the Recommend/Critique/Rewrite/Plan arbitration pass only when the advisory-family top-2 margin is below `advisory_margin_threshold` | Sharpens low-margin recommendation-style prompts without affecting the main hot path |
 | **POS tag LRU cache** | Cache POS tags for recently seen phrases (128-entry LRU keyed by normalized text hash) | Avoids redundant POS tagger calls for repeated/similar queries |
 | **Confidence calibration** | Track prediction accuracy per confidence band (10 bins); apply Platt scaling to raw confidence | Ensures confidence=0.8 means 80% actual accuracy |
 | **Shared signature reuse** | Classification signature's `semantic_centroid` reused by Predictive System for initial spatial position; `urgency_score` and `temporal_cue` reused by Reasoning System for retrieval gating | Zero recomputation across systems |
@@ -616,7 +679,7 @@ Config: `semantic_probe_weight` (default: 0.15), `anchor_fuzzy_threshold` (defau
 
 #### Anchor Seeding
 
-Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_anchors.yaml` — *planned; not yet created*). Categories:
+Initial ~500 anchors are seeded from a bundled YAML file (`config/semantic_anchors.yaml`). Categories:
 
 | Category | Example Anchors | Count |
 |----------|----------------|-------|
@@ -648,23 +711,27 @@ New anchors can be learned during training when Classification consistently misc
 | "What happened at the 2024 Olympics opening ceremony?" | Question | NeutralProfessional | Open-world / current events | Moderate confidence plus retrieval trigger |
 | "How many people live there?" after Paris context | Question | Direct or NeutralProfessional | Follow-up / anaphora | Resolve as context-carry follow-up; avoid default retrieval |
 | "Give me a 30-day launch plan for a Rust CLI tool" | Plan | Technical | Software / procedural | Plan intent, technical tone, strong local reasoning bias |
+| "Recommend a beginner camera for travel" | Recommend | Direct or Technical | Consumer advice / constrained choice | Recommendation intent wins after advisory-family arbitration; balanced confidence or better |
 | "Brainstorm names for a climate-friendly coffee brand" | Brainstorm | Casual | Creative branding | Exploratory or balanced classification; no factual retrieval by default |
 
 #### Validation Notes
 
-The doc-derived sanity check supports the classification core idea:
+The doc-derived benchmark supports the classification core idea and clarifies where arbitration is required:
 
 - Clear factual and social prompts separate cleanly from open-world or cold-start prompts under the documented confidence formula.
+- Advisory-family prompts benefit from a second-pass arbitration step; without it, recommendation prompts can be correct but low-margin against critique/rewrite-style neighbors.
 - The architecture remains vulnerable to **over-retrieval** if `confidence < 0.72` is treated as a standalone rule.
 - The main failure modes in the sample calculations were:
   - follow-up / anaphoric queries
   - procedural planning queries with sufficient local structure
+  - recommendation prompts with strong product/use-case constraints but overlapping imperative syntax
 
 That means the canonical L9 behavior should include explicit suppressors for:
 
 - recent-entity / sequence-state carry
 - structured procedural or planning intents with strong local context
 - cases where L14 already shows strong candidate support despite middling classification confidence
+- advisory-family arbitration before falling back to exploratory mode on `Recommend`-style prompts
 
 #### Acceptance Criteria
 
@@ -673,6 +740,7 @@ That means the canonical L9 behavior should include explicit suppressors for:
 - Open-world or cold-start prompts should trigger retrieval even when the top intent label is correct.
 - Context-carry follow-ups should resolve against sequence state before retrieval is considered.
 - Planning and procedural prompts should prefer local reasoning unless open-world novelty or explicit freshness signals are present.
+- Recommendation-style prompts with explicit product/use-case constraints should resolve to `Recommend` with at least balanced confidence after advisory-family arbitration.
 - Calibration should preserve ordering: higher confidence bands should correspond to higher realized accuracy.
 
 ---
@@ -718,7 +786,7 @@ That means the canonical L9 behavior should include explicit suppressors for:
            internal memory and web results using trust heuristics
 7. L14: Final candidate scoring with merged evidence
         Filter out Char-level units when higher-level exist
-8. If confidence < trigger_confidence_floor:
+8. If confidence < trigger_confidence_floor OR top-2 candidate gap < disagreement_trigger_threshold:
    Execute Dynamic Reasoning Loop (confidence-gated, max 3 steps)
 9. L18: Generate feedback events, enqueue for background worker
 10. L21: Update sequence state, run maintenance cycle
@@ -944,42 +1012,39 @@ Complexity: O(k·d) where k = candidate count, d = scoring dimensions. GPU-accel
 
 Reasoning is **not a user toggle** — triggered automatically when:
 1. `reasoning_loop.enabled` is true (default: true)
-2. Initial **Reasoning L14 candidate confidence** is below `trigger_confidence_floor` (0.40)
+2. Initial response confidence entering the repair path is below `trigger_confidence_floor` (0.40), **or** the top-2 candidate gap is below `disagreement_trigger_threshold` (default: 0.15)
 3. `IntentDetector::should_trigger_reasoning(intent, config)` returns true
 4. A downstream low-confidence L16 walk may request a single retry pass, but L16 is not the primary owner of the reasoning-loop trigger
+5. Retrieval eligibility is checked **on loop entry**, not only after the first confidence-improvement step
 
 #### Execution
 
 ```
+0. Entry gate:
+   retrieval_entry_threshold = entry_retrieval_threshold (default: 0.42)
+   local_transform_exempt = intent ∈ {Translate, Rewrite, Summarize} AND source_material_present
+   local_knowledge_sufficiency = f(context_matrix, anchor_coverage, top_candidate_support)
+
+   if !local_transform_exempt
+      && local_knowledge_sufficiency < local_knowledge_sufficiency_threshold
+      && initial_confidence < retrieval_entry_threshold:
+       set needs_retrieval = true
+       perform retrieval before the first confidence-improvement step
+
 for step in 0..max_internal_steps (default 3):
     1. Try adapt_reasoning_pattern() from Reasoning channel
        → Top 5 patterns by similarity, best match adapted
        → Anchor boost: +0.15; non-anchor: +0.10; plus similarity × 0.2
     2. Fallback: generate_thought_unit()
        → Confidence improvement: 0.1 × (1.0 - previous).min(0.3)
-    3. If step > 0 and confidence < exit_threshold × 0.7:
-       → Set needs_retrieval = true (triggers web retrieval)
-       // NOTE (FIX-3): The retrieval trigger here is 0.60 × 0.7 = 0.42,
-       // which is 2pp above the loop's entry trigger_floor (0.40). This
-       // intentional 2pp "over-cautious" band means step 1 triggers retrieval
-       // even if confidence rose slightly above trigger_floor but is still
-       // below 0.42. This is desired: a marginal improvement is not enough —
-       // the system proactively fetches rather than continuing to guess.
-       //
-       // NOTE (ISSUE-RW3 — real-world validation finding): The retrieval check
-       // fires only on step > 0 AFTER the confidence improvement has already run.
-       // For the default improvement formula (0.1 × (1 - conf)), after one step
-       // from initial_conf C, the new confidence is ≈ 0.9C + 0.1. Retrieval
-       // triggers only if 0.9C + 0.1 < 0.42, i.e., C < ~0.283.
-       //
-       // Effective retrieval floor ≈ 0.28 (NOT 0.40). Queries with initial
-       // confidence in [0.28, 0.40) enter the loop but NEVER trigger retrieval —
-       // they run reasoning steps without external evidence. This is a "dead band"
-       // where the system works harder but doesn't fetch evidence that could help.
-       //
-       // Recommended fix: also check retrieval at step == 0 using initial confidence,
-       // OR compare initial_conf directly against retrieval_sub_trigger on loop entry.
-       //   if initial_conf < retrieval_sub_trigger: set needs_retrieval = true immediately
+    3. If retrieval has not yet been attempted, and:
+       - confidence < retrieval_entry_threshold, AND
+       - local_knowledge_sufficiency < local_knowledge_sufficiency_threshold, AND
+       - !local_transform_exempt
+       → Set needs_retrieval = true and perform retrieval immediately
+       // This removes the [0.28, 0.40) dead band. Any query weak enough to enter
+       // the loop either retrieves on entry or is explicitly exempt because it is
+       // a local transformation / internally well-supported task.
     4. Ingest thought into Reasoning channel as Episodic unit
        → NOT Core memory (prevents pollution)
     5. Track confidence trajectory
@@ -988,7 +1053,7 @@ for step in 0..max_internal_steps (default 3):
 
 #### Reasoning-Triggered Retrieval
 
-When the reasoning loop cannot reach sufficient confidence from internal knowledge alone, it sets `needs_retrieval = true` on `ReasoningState`. The pipeline checks this flag and automatically triggers web retrieval via L11. This implements the "I don't know → let me check → here's the answer" pattern.
+When the reasoning loop cannot justify relying on internal knowledge alone, it sets `needs_retrieval = true` on `ReasoningState`. The pipeline checks this flag and automatically triggers web retrieval via L11. The canonical architecture requires this check both on loop entry and during the loop so borderline-uncertain factual cases do not fall into a no-retrieval dead band.
 
 **Key**: Web retrieval is always enabled. Triggered automatically based on `IntentDetector::assess()` and reasoning confidence signals.
 
@@ -1553,9 +1618,11 @@ Latency: ~60ms (reasoning loop, context carry, no retrieval)
 1. **Truth management happens before generation.**
    Memory retrieval, external retrieval, contradiction handling, and candidate ranking belong in Reasoning, not in the final text assembly step.
 2. **The reasoning loop is a repair path, not the default path.**
-   It should activate only when L14 candidate confidence is low enough to justify extra work.
+   It should activate only when L14 candidate confidence is low enough to justify extra work, or when candidate disagreement is high enough that a single greedy answer would be unreliable.
 3. **Retrieval should improve candidate quality, not just add text.**
    L11-L13 are only useful if merged evidence materially improves the scored candidate pool.
+4. **Loop entry must be dead-band-free.**
+   Any query weak enough to enter the loop must either retrieve immediately or be explicitly exempt because the task is locally transformable or internally well-supported.
 
 #### Example Coverage Matrix
 
@@ -1570,21 +1637,23 @@ Latency: ~60ms (reasoning loop, context carry, no retrieval)
 
 #### Validation Notes
 
-The doc-derived sanity check strongly supports the reasoning design:
+The doc-derived benchmark strongly supports the reasoning design and clarifies the required entry policy:
 
 - In hard cases, synthetic L14-style confidence rose from an average of **0.329** before reasoning/retrieval to **0.716** after the reasoning path completed.
 - Cases designed to fall below the `trigger_confidence_floor` did so consistently, and the resulting post-reasoning scores cleared the documented exit threshold.
 - This suggests the reasoning architecture is internally coherent provided that:
   - candidate scoring happens before the loop trigger check
+  - retrieval eligibility is checked on loop entry using initial confidence plus local sufficiency
   - retrieval retry is reserved for genuinely unresolved cases
   - contradiction handling penalizes, rather than silently averaging over, conflicting evidence
 
 #### Acceptance Criteria
 
 - Warm factual queries should complete without entering the reasoning loop.
-- Hard compare, explain, critique, or multi-hop queries should enter the reasoning loop only when L14 confidence is below the configured trigger floor.
+- Hard compare, explain, critique, or multi-hop queries should enter the reasoning loop when L14 confidence is below the configured trigger floor or candidate disagreement is too high.
 - For retrieval-backed prompts, L13 merge plus validation should raise candidate quality relative to the pre-retrieval state.
 - The reasoning loop should either exit above the configured confidence threshold or explicitly escalate to retrieval / retry rather than fabricate certainty.
+- No query in the loop-entry range may sit in a no-retrieval dead band; loop entry must either trigger retrieval immediately or be suppressed by explicit local-sufficiency exemptions.
 - Micro-validation should run on ambiguous or low-trust evidence cases and should remain skipped on clear-winner, high-trust cases.
 - Follow-up queries should benefit from sequence state and anchor carry before external retrieval is attempted.
 
@@ -1817,7 +1886,7 @@ Position initialization for word W in sentence S:
 **Config:**
 - `pos_offset_strength: f32` (default: 0.05) — magnitude of POS-based cluster offset
 - `context_seed_strength: f32` (default: 0.10) — magnitude of context-seeded perturbation
-- `pos_cluster_centroids` — pre-defined in `config/pos_clusters.yaml` (*planned; not yet created*)
+- `pos_cluster_centroids` — pre-defined in `config/pos_clusters.yaml`
 
 **Backward compatibility:** Words positioned without context (dictionary pre-pop) use only `base + offset`, which is a small deterministic shift. Existing spatial indices remain valid; positions shift by at most `pos_offset_strength + context_seed_strength ≈ 0.15` from the pure FNV position.
 
@@ -1942,7 +2011,7 @@ The walk maintains `beam_width` (from profile, §4.2) parallel candidate sequenc
 
 **Beam width scaling:** For `beam_width=1` (not a default, but valid), this degenerates to greedy search. For `beam_width=3` (factual), it explores 3 parallel sequences — enough to recover from a single wrong step. For `beam_width=10` (brainstorm), it explores widely, producing more diverse and creative outputs.
 
-**A* exploration limit:** Tier 3 pathfinding uses `pathfind_max_explored_nodes` (default: 500) to cap the number of nodes the A* search evaluates. This prevents pathological cases where dense hub regions (Function words with 2000+ edges after domain gating) cause unbounded exploration. If the limit is reached without finding a path, the search returns the best partial path found so far. Config: `word_graph.pathfind_max_explored_nodes`.
+**A* exploration limit:** Tier 3 pathfinding uses `pathfind_max_explored_nodes` (default: 500) to cap the number of nodes the A* search evaluates. This prevents pathological cases where dense hub regions (Function words with 2000+ edges after domain gating) cause unbounded exploration. If the limit is reached without finding a path, the walker should fall back to the best Tier 1 or Tier 2 edge instead of emitting a partial A* path into L17. Config: `word_graph.pathfind_max_explored_nodes`.
 
 **On-the-fly pathfinding** (Tier 3) preferentially routes through **Function nodes** because they have the highest connectivity — they are the highway interchanges of the word graph. This is what enables the system to generate novel word combinations it was never explicitly trained on.
 
@@ -2104,7 +2173,7 @@ For each node position update:
 
 **Config:**
 - `anchor_locking_enabled: bool` (default: true)
-- `zone_definitions_path: String` (default: "config/semantic_zones.yaml") (*planned; not yet created*)
+- `zone_definitions_path: String` (default: "config/semantic_zones.yaml")
 - Default zones loaded from YAML; custom zones can be added at runtime
 
 **Benefit:** Prevents factual drift while still allowing semantic clustering within zone boundaries. Numbers stay near numbers, dates stay near dates, but they can still form edges to content words outside their zone.
@@ -2210,7 +2279,7 @@ During L21 maintenance:
 - `dynamic_hub_centrality_threshold: f32` (default: 0.15) — betweenness centrality above which Content words are eligible for hub election
 - `hub_election_min_frequency: u32` (default: 500) — minimum traversal count before centrality is computed
 - `hub_centrality_sample_pairs: u32` (default: 100) — node pairs sampled per cycle for centrality estimation
-- `language_function_words_dir: String` (default: "config/function_words/") — directory containing per-language function word lists (*planned; not yet created*)
+- `language_function_words_dir: String` (default: "config/function_words/") — directory containing per-language function word lists
 
 **Benefit:** The graph self-organizes to find its own "highway interchanges" based on actual usage patterns, supporting multilingual and domain-specific fluency without hardcoded English-centric rules. In a medical corpus, "patient" and "diagnosis" naturally become routing hubs; in legal text, "defendant" and "court" serve the same role.
 
@@ -2400,15 +2469,26 @@ pub struct ExplainTrace {
 }
 ```
 
-### 6.2 Synthetic Sanity-Check Summary
+### 6.2 Validation Benchmark Summary
 
-To validate the core system ideas, the architecture was checked against a small doc-derived scenario set spanning social, factual, compare, open-world, context-carry, planning, and brainstorming prompts. This is a **sanity check of architectural coherence**, not an empirical benchmark from code execution.
+The architecture is validated by executing the standalone suite in [tests/v14_2_architecture_validation_test.rs](/Volumes/SSD/Github/spse_engine/tests/v14_2_architecture_validation_test.rs), not just by inspecting the design on paper. The suite is intended to be the executable contract for the core principles in this document. The main run:
+
+- `cargo test --test v14_2_architecture_validation_test --no-default-features` → **116/116 tests passed**
+- `cargo test --test v14_2_architecture_validation_test --no-default-features rw_` → **45/45 real-world scenario tests passed**
+- Focused slices also passed:
+  - `conf_formula_` → **8/8**
+  - `reasoning_loop_` → **7/7**
+  - `bloom_filter` → **3/3**
+  - `beam_search` → **3/3**
 
 #### Summary Findings
 
-- **Classification:** Intent separation looked strong, but naive confidence-only retrieval gating over-retrieved follow-up and planning prompts.
-- **Reasoning:** Hard-case confidence improved substantially after reasoning or retrieval, which supports the L14 → reasoning-loop → retrieval design.
-- **Predictive:** Warm-path traversal and runtime-learning gains were both directionally strong, supporting the tiered graph-walk model.
+- **Classification:** The confidence formula behaves as documented only when `best_sim < ε` returns `0.0` explicitly; punctuated social tokens such as `"Thanks!"` require token normalization before social-word lookup; imperative creativity requires a dedicated `creative_cue`; and recommendation-style prompts require advisory-family arbitration so `Recommend` does not remain low-margin against `Critique` or `Rewrite`.
+- **Reasoning:** The canonical architecture removes the dead band by checking retrieval on loop entry using `entry_retrieval_threshold` plus local-sufficiency suppressors, instead of waiting until after the first confidence-improvement step.
+- **Predictive:** Warm-path traversal, beam search, and TTG lease behavior all validated, but two numerical constraints are mandatory: beam search must accumulate scores in **log-space** to avoid underflow on long walks, and capped A* must **not** emit partial paths to L17.
+- **Context gating:** The 32-byte Bloom filter is valid only for typical edges with low context diversity; hub-like edges need either dominant-cluster fast paths or a larger **91-byte** Bloom budget to keep false positives bounded.
+- **Scenario coverage:** Real-world examples now explicitly cover greeting, gratitude, translation, summarization, rewriting, critique, recommendation, planning, arithmetic, freshness-sensitive questions, retrieval-vs-local routing behavior, and final-answer generation.
+- **End-to-end contract:** Pipeline cases must validate the final decoded answer, not only routing, confidence, or walk length. Each canonical pipeline benchmark should assert an accepted answer variant plus required facts.
 
 #### Practical Interpretation
 
@@ -2418,75 +2498,73 @@ The architecture is mechanically strongest when these boundaries are preserved:
 - Reasoning decides what answer strategy is justified.
 - Predictive realizes that answer through bounded graph traversal.
 
-The main correction implied by the sanity check is narrow, not structural: L9 retrieval gating should be calibrated with stronger suppressors for context-carry and structured procedural intents.
+The practical implication for validation is equally important:
 
-### 6.3 Code Audit Architectural Findings
+- A pipeline case is incomplete if it only checks the walked token path.
+- End-to-end validation should assert `predicted_text` against normalized answer oracles or required-fact checks.
+- Factual, verify, translation, planning, summarization, recommendation, and arithmetic paths should all be benchmarked at the user-visible answer layer.
 
-A detailed audit comparing the synthetic benchmark model against the actual inference code (`src/classification/intent.rs`, `src/reasoning/merge.rs`, `src/config/mod.rs`) identified five concrete discrepancies between the documented architecture and the current implementation. These are **architectural gaps** — they do not require structural redesign but do require targeted fixes to bring code behavior in line with the design intent.
+The main corrections implied by executed validation are still narrow rather than structural:
 
-#### Finding 1: Brainstorm Intent Incorrectly Suppressed by Retrieval Gating (L9)
+- preserve the documented classification invariants (`social-word` normalization and `creative_cue`)
+- add advisory-family arbitration for `Recommend` / `Critique` / `Rewrite` / `Plan`
+- close the reasoning-loop retrieval dead band at loop entry
+- treat Bloom-filter sizing and beam-search arithmetic as hard implementation constraints, not optional optimizations
 
-**Location:** `src/classification/intent.rs` — `social_or_local` suppression list in `IntentDetector::assess()`
+### 6.3 Development Sequence & Design Guardrails
 
-**Problem:** The current code includes `IntentKind::Brainstorm` in the `social_or_local` intent set alongside `Greeting`, `Farewell`, `Gratitude`, and `Continue`. This causes the retrieval gating logic to treat brainstorm queries identically to social intents, suppressing retrieval assessment entirely. However, §3.10's example coverage matrix explicitly states that brainstorm queries (e.g., "Brainstorm names for a climate-friendly coffee brand") should receive "no **factual** retrieval by default" — meaning they should still pass through the full reasoning pipeline with an exploratory profile (§4.2: temperature=0.90, beam_width=10), not be short-circuited as if they were greetings.
+This section is the shortest path from architecture to implementation. An agent building SPSE from scratch should preserve the following order and constraints.
 
-**Architectural Impact:** Brainstorm queries that genuinely need external inspiration (e.g., "Brainstorm names incorporating recent sustainability trends") will never trigger retrieval, even when the graph is sparse on the topic. The `brainstorm` adaptive profile's wide beam and high temperature become ineffective because the query never reaches the reasoning loop.
+#### Development Sequence
 
-**Recommended Fix:** Remove `Brainstorm` from the `social_or_local` suppression set. Brainstorm should follow the standard retrieval gating path — its exploratory profile and high temperature already prevent over-constrained factual retrieval behavior.
+1. **Shared substrate first.**
+   Define `EngineConfig`, core enums, memory/channel types, trace IDs, and persistence schemas before implementing any inference logic.
+2. **Classification before retrieval.**
+   Build the full L1-L3/L9-L10/L19 path first so every downstream system receives intent, tone, confidence, resolver mode, and retrieval flags through a typed interface rather than ad hoc heuristics.
+3. **Memory before reasoning.**
+   Build `MemoryStore`, `MemorySnapshot`, sequence state, and governance before candidate scoring; Reasoning depends on stable read/write semantics.
+4. **Reasoning before generation.**
+   Implement context assembly, retrieval, trust filtering, evidence merge, and 7D scoring before the graph walk; Predictive must consume ranked concepts, not raw user text alone.
+5. **Word Graph before decoder polish.**
+   Implement nodes, edges, highways, spatial lookup, 3-tier walk, and step resolution before spending effort on output shaping.
+6. **Feedback after determinism.**
+   Add runtime learning, TTG leases, and implicit reinforcement only after the base inference path is reproducible and traceable.
+7. **Training after pipeline closure.**
+   Train the three systems independently only after end-to-end inference, telemetry, and validation traces exist.
 
-#### Finding 2: Evidence Merge Lacks Contradiction Penalty (L13)
+#### Non-Negotiable Guardrails
 
-**Location:** `src/reasoning/merge.rs` — `EvidenceMerger::merge()`
+1. **Brainstorm is exploratory, not social.**
+   Brainstorm queries use the exploratory runtime profile but still pass through normal retrieval gating. Only true social intents short-circuit Reasoning.
+2. **Contradiction must penalize evidence support upstream.**
+   Evidence conflicts lower `evidence_support` before candidate scoring; contradiction handling cannot be deferred solely to explanation or telemetry.
+3. **Retrieval-gating overlap checks must be linear.**
+   Any token-overlap or context-overlap check in L9 must be O(n+m), not O(n²), because it sits on the hot path for long prompts and follow-up questions.
+4. **Freshness cues are first-class inputs.**
+   Temporal indicators such as `current`, `latest`, `new`, `update`, `upcoming`, `ongoing`, and `breaking` belong in the freshness lexicon and should be config-backed rather than hidden in code.
+5. **Advisory-family prompts require arbitration.**
+   `Recommend`, `Critique`, `Rewrite`, and `Plan` may share imperative syntax; low-margin collisions in that family must be resolved by cue-based arbitration rather than raw centroid distance alone.
+6. **Reasoning must be dead-band-free.**
+   Queries weak enough to enter the repair path must not sit in a no-retrieval gap; retrieval is checked on loop entry with explicit local-sufficiency exemptions.
+7. **Reasoning triggers on disagreement as well as low confidence.**
+   Ambiguous top candidates with a narrow margin must activate the reasoning loop even when the leading score is above the absolute trigger floor.
+8. **Classification invariants are mandatory.**
+   Social-token normalization and `creative_cue` are required parts of the classifier contract, not optional optimizations.
+9. **Predictive arithmetic is numerically constrained.**
+   Beam search accumulates in log-space, Bloom filters are sized by context diversity, and capped A* falls back rather than emitting partial paths.
 
-**Problem:** The evidence merger currently detects conflicts between internal memory and external evidence (logging them to telemetry), but does **not** penalize the `evidence_support` dimension of conflicted candidates. When contradictory evidence is found, the trust-weighted support score is computed identically to non-conflicted evidence. This contradicts §4.3's design intent that "contradiction handling penalizes, rather than silently averaging over, conflicting evidence" and the Phase 3 acceptance criterion: "Contradictory evidence should be penalized or surfaced, not silently blended into confidence."
+#### Minimal Acceptance Checklist
 
-**Architectural Impact:** The 7D candidate scorer (L14) receives inflated `evidence_support` scores for candidates backed by contradictory sources. This undermines the Micro-Validator's (§4.3) downstream contradiction checks — if `evidence_support` is already high, the lazy gating optimization will skip validation entirely for the contradicted candidate, assuming it is a "clear winner."
+- Greeting, gratitude, translation, summarize, rewrite, critique, recommend, and plan queries classify into distinct intents with stable confidence.
+- Recommendation prompts with explicit product + use-case constraints do not fall below balanced confidence solely because neighboring advisory intents are nearby.
+- Open-world and freshness-sensitive prompts trigger retrieval; local procedural requests stay local.
+- Borderline-uncertain factual queries do not enter a loop-without-retrieval dead band.
+- Contradictory evidence reduces candidate confidence before final ranking.
+- End-to-end pipeline tests assert final decoded answers through accepted-variant or required-fact oracles rather than walk length alone.
+- Long walks remain numerically stable.
+- Novel graph routes do not degrade into partial-path output.
 
-**Recommended Fix:** When `EvidenceMerger::merge()` detects a conflict, apply a configurable `contradiction_penalty` (from `layer_13_evidence_merge`) to the `evidence_support` value of the conflicted candidate before passing it to L14. This ensures the penalty is upstream of both the candidate scorer and the micro-validator's lazy gating check.
-
-#### Finding 3: Token Overlap Calculation Has O(n²) Complexity (L9)
-
-**Location:** `src/classification/intent.rs` — `token_overlap()` utility function
-
-**Problem:** The `token_overlap` function used by `IntentDetector::assess()` to compare input tokens against context/evidence tokens uses nested iteration (`.any()` inside a loop), resulting in O(n×m) complexity where n and m are the token counts of the two inputs. For typical short queries this is negligible, but for longer inputs (document follow-ups, multi-sentence prompts) or when comparing against large evidence pools, this becomes a hot-path bottleneck.
-
-**Architectural Impact:** Performance degradation on longer inputs, particularly in the retrieval gating path where token overlap is computed against multiple candidate evidence snippets. This is inconsistent with the §4.8 efficiency optimization principle of bounded hot-path cost.
-
-**Recommended Fix:** Replace the nested iteration with a `HashSet`-based approach: collect one token set into a `HashSet`, then iterate the other set checking membership. This reduces complexity to O(n+m) with a single-pass construction and single-pass lookup.
-
-#### Finding 4: Incomplete Freshness Temporal Keyword Coverage (L9)
-
-**Location:** `src/classification/intent.rs` — freshness temporal keyword list in `IntentDetector::assess()`
-
-**Problem:** The freshness signal computation in L9 uses a hardcoded list of temporal keywords to detect time-sensitive queries. The current list is missing several common temporal indicators: "current", "latest", "new", "update", "upcoming", "ongoing", and "breaking". Queries like "What is the current population of Tokyo?" or "Latest news on the Mars rover" fail to trigger the freshness signal, causing the retrieval gating logic to under-retrieve for genuinely time-sensitive queries.
-
-**Architectural Impact:** The freshness threshold (`retrieval.freshness_threshold`: 0.65) becomes ineffective for a significant class of time-sensitive queries. These queries fall through to the standard confidence-only retrieval path, which may not trigger retrieval if the graph has stale but high-confidence cached answers.
-
-**Recommended Fix:** Expand the temporal keyword list to include: "current", "latest", "new", "update", "upcoming", "ongoing", "breaking". Per §1's design principle ("no hardcoded thresholds"), consider moving the keyword list to a config file (e.g., `config/freshness_keywords.yaml`) so it can be extended without code changes.
-
-#### Finding 5: Reasoning Loop Trigger Missing Disagreement-Based Activation
-
-**Location:** `src/config/mod.rs` — `ReasoningLoopConfig` struct
-
-**Problem:** The reasoning loop (§4.5) is currently triggered only by two conditions: (1) `enabled` is true, and (2) L14 candidate confidence is below `trigger_confidence_floor` (0.40). However, there is no trigger based on **candidate disagreement** — the scenario where the top candidates have similar scores but represent conflicting answers. In this case, confidence may be above the trigger floor (e.g., 0.45) because the best candidate scores well, but the answer is unreliable because the runner-up is equally strong and contradictory.
-
-**Architectural Impact:** The reasoning loop fails to activate for ambiguous-but-moderate-confidence cases. These queries receive a single "best guess" answer from L16 without the reasoning loop's ability to decompose, retrieve, or re-score — exactly the scenarios where additional reasoning would most improve answer quality. This is particularly relevant for Compare, Critique, and Verify intents where disagreement among candidates is a stronger signal than raw confidence.
-
-**Recommended Fix:** Add a `disagreement_trigger_threshold` field to `ReasoningLoopConfig` (suggested default: 0.15). When the score gap between the top two candidates is below this threshold AND both candidates exceed a minimum viability score, trigger the reasoning loop regardless of absolute confidence. This complements the existing confidence-floor trigger with a margin-based trigger. The config addition should follow the pattern in `src/config/mod.rs` and `config/config.yaml`.
-
-#### Summary Table
-
-| # | Finding | Layer | File | Severity | Type |
-|---|---------|-------|------|----------|------|
-| 1 | Brainstorm suppressed as social intent | L9 | `classification/intent.rs` | Medium | Logic error |
-| 2 | No contradiction penalty in evidence merge | L13 | `reasoning/merge.rs` | High | Missing feature |
-| 3 | Token overlap O(n²) complexity | L9 | `classification/intent.rs` | Low | Performance |
-| 4 | Incomplete freshness keyword list | L9 | `classification/intent.rs` | Medium | Coverage gap |
-| 5 | No disagreement-based reasoning trigger | Config | `config/mod.rs` | Medium | Missing feature |
-
-These findings are tracked for implementation in the Coding Plan (Phase 12D–12H).
-
-### 6.1 Structural Feedback Loop (Consistency Loop Upgrade)
+### 6.4 Structural Feedback Loop (Consistency Loop Upgrade)
 
 **Problem:** The existing cross-system consistency checks (§11.5) only adjust numeric thresholds — e.g., lower confidence floors, tweak scoring weights. They cannot evolve the **structure** of the Classification taxonomy itself. If the Predictive System consistently fails to find good paths for a broad Intent class (e.g., "Question" triggers Tier 3 pathfinding > 40% of the time), the root cause may be that the intent is too coarse-grained.
 
@@ -2781,6 +2859,7 @@ Throughout this document, paths like `retrieval.entropy_threshold` refer to the 
 | `trust` | `layer_19_trust_heuristics` | `TrustConfig` |
 | `classification` | `classification` | `ClassificationConfig` (includes `margin_blend_weight` for confidence formula, see §3.5) |
 | `semantic_probes` | `classification.semantic_probes` | `SemanticProbeConfig` (weight, fuzzy_threshold, anchor_count) |
+| `recommendation_sharpening` | `classification.recommendation_sharpening` | `RecommendationSharpeningConfig` (enabled, advisory_margin_threshold, family_blend_weight, target_object_boost, use_case_boost) |
 
 **Reasoning System:**
 
@@ -2817,7 +2896,7 @@ Throughout this document, paths like `retrieval.entropy_threshold` refer to the 
 | `telemetry` | `layer_20_telemetry` | `TelemetryConfig` |
 | `document` | `document` | `DocumentIngestionConfig` |
 | `training_phases` | `training_phases` | `TrainingPhaseOverridesConfig` |
-| `ingestion_policies` | `ingestion_policies` | `IngestionPoliciesConfig` (custom_training, runtime_html, plain_text, local_document) — *currently `source_policies` / `SourcePoliciesConfig` in code; pending rename* |
+| `ingestion_policies` | `ingestion_policies` | `IngestionPoliciesConfig` (custom_training, runtime_html, plain_text, local_document) |
 | `silent_training` | `silent_training` | `SilentTrainingConfig` (includes quarantine: enabled, conflict_threshold, min_examples) |
 | `huggingface_streaming` | `huggingface_streaming` | `HuggingFaceStreamingConfig` (tokenizer only — no model weights) |
 | `gpu` | `gpu` | `GpuConfig` |
@@ -2842,10 +2921,14 @@ Throughout this document, paths like `retrieval.entropy_threshold` refer to the 
 | Pollution overlap | `governance.pollution_overlap_threshold` | 0.70 | Reasoning | Overlap ratio for pollution |
 | Reasoning trigger floor | `auto_inference.reasoning_loop.trigger_confidence_floor` | 0.40 | Reasoning | Below this triggers reasoning |
 | Reasoning exit | `auto_inference.reasoning_loop.exit_confidence_threshold` | 0.60 | Reasoning | Above this exits reasoning |
+| Reasoning entry retrieval threshold | `auto_inference.reasoning_loop.entry_retrieval_threshold` | 0.42 | Reasoning | Below this and with low local sufficiency, retrieval fires immediately on loop entry |
+| Reasoning disagreement trigger | `auto_inference.reasoning_loop.disagreement_trigger_threshold` | 0.15 | Reasoning | Narrow top-2 gap triggers reasoning even above the absolute confidence floor |
+| Local knowledge sufficiency | `auto_inference.reasoning_loop.local_knowledge_sufficiency_threshold` | 0.60 | Reasoning | Above this suppresses entry-time retrieval for internally well-supported cases |
 | Stochastic floor | `auto_inference.creative_spark.global_stochastic_floor` | 0.15 | Predictive | 15% non-greedy sampling |
 | Classification low confidence | `classification.low_confidence_threshold` | 0.40 | Classification | Below → ambiguous |
 | Classification high confidence | `classification.high_confidence_threshold` | 0.85 | Classification | Above → Deterministic upgrade |
 | Margin blend weight | `classification.margin_blend_weight` | 0.50 | Classification | Blends absolute similarity vs. margin discrimination in confidence formula (§3.5) |
+| Advisory-family arbitration margin | `classification.recommendation_sharpening.advisory_margin_threshold` | 0.10 | Classification | Activates Recommend/Critique/Rewrite/Plan arbitration on low-margin family collisions |
 | A* exploration limit | `word_graph.pathfind_max_explored_nodes` | 500 | Predictive | Caps A* search nodes to prevent pathological explosion through dense hubs |
 | Cold-start confidence penalty | `consistency.cold_start_confidence_penalty` | 0.10 | Cross-cutting | R5: confidence reduction when Tier 3 used for confident classification |
 | Contradiction feedback penalty | `consistency.contradiction_feedback_penalty` | 0.15 | Cross-cutting | R6: pattern success_count penalty on evidence contradiction |
@@ -3215,7 +3298,7 @@ After individual system training, a **consistency check** validates inter-system
 | **R4: Creative Intent → Drift Allowed** | intent ∈ {Brainstorm, Creative} | Wider candidate pool | semantic_drift enabled, lower confidence_floor |
 | **R5: Cold-Start → Confidence Penalty** | (any intent) | — | If Tier 3 used for a query, Classification must reduce confidence for that intent on subsequent similar queries (prevents confident-but-ungrounded classification for topics the graph cannot serve) |
 | **R6: Evidence Contradiction → Pattern Penalty** | confidence > 0.72 (high) | If evidence contradicts the high-confidence Classification pattern's expected answer | Pattern's `success_count` penalized by `contradiction_feedback_penalty` (prevents confident-but-wrong feedback loops where Classification gates downstream systems incorrectly) |
-| **R7: Broad Sparsity → Proactive Learning** | Multiple intents trigger Tier 3 in same window | — | If ≥ `sparsity_intent_threshold` (default: 3) distinct intents exceed Tier 3 rate > 0.30 in the same rolling window, this signals general graph sparsity (not intent-specific) → trigger proactive edge building via retrieval for high-frequency query patterns, rather than intent splitting (§6.1) |
+| **R7: Broad Sparsity → Proactive Learning** | Multiple intents trigger Tier 3 in same window | — | If ≥ `sparsity_intent_threshold` (default: 3) distinct intents exceed Tier 3 rate > 0.30 in the same rolling window, this signals general graph sparsity (not intent-specific) → trigger proactive edge building via retrieval for high-frequency query patterns, rather than intent splitting (§6.4) |
 
 #### Consistency Loss
 
@@ -3243,7 +3326,7 @@ When consistency mismatches are detected:
 - **R4 violation** → Lower Predictive's `min_confidence_floor` for creative intents
 - **R5 violation** → Reduce Classification confidence for the offending intent by `cold_start_confidence_penalty` (default: 0.10) on future queries until graph edges are established
 - **R6 violation** → Penalize the Classification pattern's `success_count` by `contradiction_feedback_penalty` (default: 0.15); if pattern confidence drops below `low_confidence_threshold`, mark for re-training
-- **R7 violation** → Suppress intent splitting proposals (§6.1) for the current window; instead enqueue top-K high-frequency query patterns from the affected intents for proactive edge injection via L13
+- **R7 violation** → Suppress intent splitting proposals (§6.4) for the current window; instead enqueue top-K high-frequency query patterns from the affected intents for proactive edge injection via L13
 
 These corrections are applied as config overrides, not weight changes — preserving each system's independent optimization.
 
@@ -3506,7 +3589,7 @@ Each example includes:
 - `context` hint (e.g., `retrieval_trigger:population_lookup`)
 - `curriculum_score` for training ordering (higher = earlier)
 
-### 11.9 Internal Dataset Catalog (`src/open_sources.rs` — *pending rename to `dataset_catalog.rs`*)
+### 11.9 Internal Dataset Catalog (`src/dataset_catalog.rs`)
 
 **No external open-source datasets are used for training or seeding.** All training data is produced by the custom dataset generators in `src/seed/`. The engine acquires factual knowledge at runtime via web retrieval triggered during reasoning.
 
@@ -3540,7 +3623,7 @@ Sweeps pollution-related configuration values, ingests a mix of valid and intent
 
 Output: `benchmarks/pollution_sweep_report.md`
 
-#### Planned: Per-System Training Sweep (`src/bin/training_sweep.rs` — *not yet created*)
+#### Per-System Training Sweep (`src/bin/training_sweep.rs`)
 
 Unified sweep harness that runs all three system training pipelines and the consistency check:
 
@@ -3739,7 +3822,7 @@ spse_engine/
 │   ├── api.rs                     # REST API router (axum)
 │   ├── bloom_filter.rs            # UnitBloomFilter
 │   ├── document.rs                # Document processing (PDF, DOCX, text)
-│   ├── open_sources.rs            # Internal dataset catalog (pending rename to dataset_catalog.rs)
+│   ├── dataset_catalog.rs         # Internal dataset catalog
 │   ├── persistence.rs             # SQLite persistence layer
 │   ├── scheduler.rs               # PriorityScheduler (4 priorities)
 │   ├── spatial_index.rs           # SpatialGrid for O(1) cell queries
@@ -3900,7 +3983,7 @@ spse_engine/
 | How do we handle dense semantic clusters? | Predictive | §5.9: Adaptive Dimensionality — expand crowded cells to 4D/5D |
 | How do we prevent factual node drift? | Predictive | §5.10: Anchor Locking Zones — Numbers, Dates, Proper Nouns confined to coordinate regions |
 | How does noisy edge injection get filtered? | Predictive | §4.9 Ext 2b: TTG lease (5 min immunity) + 2 traversals to graduate; purged at expiry |
-| How does the taxonomy evolve? | Cross-cutting | §6.1: Structural Feedback with hysteresis (40% split / 20% merge) + min-viability freeze |
+| How does the taxonomy evolve? | Cross-cutting | §6.4: Structural Feedback with hysteresis (40% split / 20% merge) + min-viability freeze |
 | How are polysemous words placed initially? | Predictive | §5.2: Domain-Anchor Blending — POS offset + context-seeded perturbation on SemanticHasher |
 | How do we avoid hub saturation? | Predictive | §5.11: Edge caps (2K), domain gating on hubs, secondary hub promotion, dynamic hub election |
 | How do we avoid validation latency? | Reasoning | §4.3.1: Lazy gating (ambiguity/trust trigger) + L12 MetadataSummary pre-extraction |
@@ -3914,8 +3997,5 @@ spse_engine/
 - `AGENTS.md` — Architecture compliance guide and coding standards
 - `config/config.yaml` — Main configuration file
 - `README.md` — Project overview
-- `docs/CONFIG_TUNING_GUIDE.md` — Configuration tuning guide
-- `docs/DATASET_GENERATION_GUIDE.md` — Dataset generation specifications
-- `docs/PRE_PRODUCTION_EXECUTION_PLAN.md` — Implementation roadmap
-- `docs/PRE_PRODUCTION_TRAINING_PLAN.md` — Training plan
-- `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` — Comprehensive coding plan (phases 0–12)
+- `tests/v14_2_architecture_validation_test.rs` — Executable validation contract for the core architectural principles
+- `docs/CODING_PLAN_TRAINING_ARCHITECTURE.md` — Supplemental phased implementation plan
