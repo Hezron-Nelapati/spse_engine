@@ -1,4 +1,4 @@
-use crate::config::ScoringWeights;
+use crate::config::{CandidateFitConfig, LevelMultiplierConfig, QueryProcessingConfig, ScoringWeights};
 use crate::types::{
     text_fingerprint, ContextMatrix, IntentKind, MergedState, ScoreBreakdown, ScoredCandidate,
     SequenceState, Unit, UnitLevel,
@@ -16,6 +16,9 @@ pub fn score_candidates_gpu_accelerated(
     sequence: &SequenceState,
     merged: &MergedState,
     weights: &ScoringWeights,
+    level_multipliers: &LevelMultiplierConfig,
+    candidate_fit: &CandidateFitConfig,
+    query_processing: &QueryProcessingConfig,
     intent: Option<IntentKind>,
     original_query: Option<&str>,
 ) -> Vec<ScoredCandidate> {
@@ -44,7 +47,7 @@ pub fn score_candidates_gpu_accelerated(
             for candidate in &mut scored {
                 let exact_bonus =
                     exact_match_score(&candidate.content.to_lowercase(), &query_terms, intent)
-                        * level_multiplier(crate::types::UnitLevel::Word); // Use default level multiplier
+                        * level_multiplier_from_config(crate::types::UnitLevel::Word, level_multipliers);
                 candidate.score += exact_bonus;
             }
         }
@@ -68,6 +71,9 @@ pub fn score_candidates_gpu_accelerated(
             sequence,
             merged,
             weights,
+            level_multipliers,
+            candidate_fit,
+            query_processing,
             intent,
             original_query,
         )
@@ -83,6 +89,9 @@ impl CandidateScorer {
         sequence: &SequenceState,
         merged: &MergedState,
         weights: &ScoringWeights,
+        level_multipliers: &LevelMultiplierConfig,
+        candidate_fit: &CandidateFitConfig,
+        query_processing: &QueryProcessingConfig,
         intent: Option<IntentKind>,
         original_query: Option<&str>,
     ) -> Vec<ScoredCandidate> {
@@ -165,48 +174,50 @@ impl CandidateScorer {
             };
 
             let spatial_fit = if merged_candidate_ids.contains(&unit.id) {
-                0.9
+                candidate_fit.merged_spatial_fit
             } else {
-                0.35
+                candidate_fit.unmerged_spatial_fit
             };
-            let level_multiplier = level_multiplier(unit.level);
+            let level_mult = level_multiplier_from_config(unit.level, level_multipliers);
 
             // Context match using pre-computed fingerprints (O(1) per cell instead of string cmp)
-            let context_fit = context_match_precomputed(
+            let context_fit = context_match_precomputed_from_config(
                 &lowered,
                 fp,
                 cell_fingerprints,
                 &cell_content_lower,
                 &summary_lower,
-            ) * level_multiplier;
+                candidate_fit,
+            ) * level_mult;
 
             let sequence_fit = if recent_unit_ids.contains(&unit.id) {
-                0.95 * level_multiplier
+                candidate_fit.recent_sequence_fit * level_mult
             } else if task_entities
                 .iter()
                 .any(|entity| lowered.contains(entity.as_str()))
             {
-                0.65 * level_multiplier
+                candidate_fit.task_entity_sequence_fit * level_mult
             } else {
-                0.25 * level_multiplier
+                candidate_fit.default_sequence_fit * level_mult
             };
             let transition_fit =
-                ((unit.links.len() as f32 / 5.0).clamp(0.0, 1.0)) * level_multiplier;
-            let utility_fit = unit.utility_score.clamp(0.0, 1.0) * level_multiplier;
+                ((unit.links.len() as f32 / candidate_fit.transition_fit_divisor).clamp(0.0, 1.0)) * level_mult;
+            let utility_fit = unit.utility_score.clamp(0.0, 1.0) * level_mult;
             let confidence_fit = ((unit.confidence + unit.trust_score) / 2.0).clamp(0.0, 1.0);
 
             // Evidence match using pre-computed lowercase strings
-            let evidence_support = evidence_match_precomputed(
+            let evidence_support = evidence_match_precomputed_from_config(
                 &lowered,
                 &evidence_lower,
                 evidence_trust,
                 evidence_support_base,
-            ) * level_multiplier;
+                candidate_fit,
+            ) * level_mult;
 
             // Exact match bonus: prioritize candidates that exactly match query terms
             // This helps disambiguate "Donald Trump" from "Donald Trump Jr."
             let exact_match_bonus =
-                exact_match_score(&lowered, &query_terms, intent) * level_multiplier;
+                exact_match_score(&lowered, &query_terms, intent) * level_mult;
 
             let breakdown = ScoreBreakdown {
                 spatial_fit,
@@ -239,8 +250,8 @@ impl CandidateScorer {
             }
         };
 
-        // Parallelize scoring for large candidate sets (>128), sequential for small
-        let mut scored = if candidates.len() > 128 {
+        // Parallelize scoring for large candidate sets, sequential for small
+        let mut scored = if candidates.len() > query_processing.parallel_scoring_threshold {
             candidates.par_iter().map(score_one).collect::<Vec<_>>()
         } else {
             candidates.iter().map(score_one).collect::<Vec<_>>()
@@ -292,50 +303,52 @@ fn scoring_weight_vector(weights: &ScoringWeights) -> SVector<f32, 7> {
 
 /// Context match using pre-computed fingerprints and lowercase strings.
 /// Fingerprint equality is checked first (O(1) integer cmp), with string fallback for contains.
-fn context_match_precomputed(
+fn context_match_precomputed_from_config(
     lowered: &str,
     fp: u64,
     cell_fingerprints: &[u64],
     cell_content_lower: &[String],
     summary_lower: &str,
+    config: &CandidateFitConfig,
 ) -> f32 {
     // O(1) integer equality check per cell via fingerprints
     if !cell_fingerprints.is_empty() {
         if cell_fingerprints.iter().any(|&cfp| cfp == fp) {
-            return 1.0;
+            return config.context_match_exact;
         }
     } else if cell_content_lower.iter().any(|cl| cl == lowered) {
-        return 1.0;
+        return config.context_match_exact;
     }
     if summary_lower.contains(lowered) {
-        return 0.75;
+        return config.context_match_summary;
     }
-    0.3
+    config.context_match_none
 }
 
 /// Evidence match using pre-computed lowercase document strings.
-fn evidence_match_precomputed(
+fn evidence_match_precomputed_from_config(
     lowered: &str,
     evidence_lower: &[String],
     average_trust: f32,
     evidence_support_base: f32,
+    config: &CandidateFitConfig,
 ) -> f32 {
     let mentioned = evidence_lower.iter().any(|doc| doc.contains(lowered));
     let corroboration_bonus = if mentioned {
-        0.45 + (average_trust * 0.4)
+        config.evidence_corroboration_base + (average_trust * config.evidence_trust_multiplier)
     } else {
-        evidence_support_base * 0.2
+        evidence_support_base * config.evidence_no_mention_multiplier
     };
     corroboration_bonus.clamp(0.0, 1.0)
 }
 
-fn level_multiplier(level: UnitLevel) -> f32 {
+fn level_multiplier_from_config(level: UnitLevel, config: &LevelMultiplierConfig) -> f32 {
     match level {
-        UnitLevel::Char => 0.15,
-        UnitLevel::Subword => 0.45,
-        UnitLevel::Word => 0.9,
-        UnitLevel::Phrase => 1.0,
-        UnitLevel::Pattern => 0.8,
+        UnitLevel::Char => config.char_level,
+        UnitLevel::Subword => config.subword_level,
+        UnitLevel::Word => config.word_level,
+        UnitLevel::Phrase => config.phrase_level,
+        UnitLevel::Pattern => config.pattern_level,
     }
 }
 

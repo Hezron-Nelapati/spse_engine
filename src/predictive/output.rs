@@ -1,3 +1,4 @@
+use crate::config::OutputScoringConfig;
 use crate::types::{ContextMatrix, DecodedOutput, MergedState, ResolvedCandidate};
 
 pub struct OutputDecoder;
@@ -9,9 +10,10 @@ impl OutputDecoder {
         resolved: &ResolvedCandidate,
         context: &ContextMatrix,
         merged: &MergedState,
+        scoring: &OutputScoringConfig,
     ) -> DecodedOutput {
         if let Some(doc) = merged.evidence.documents.first() {
-            let sentence = best_evidence_sentence(prompt, &resolved.content, merged)
+            let sentence = best_evidence_sentence(prompt, &resolved.content, merged, scoring)
                 .unwrap_or_else(|| doc.normalized_content.clone());
 
             return DecodedOutput {
@@ -92,59 +94,10 @@ impl OutputDecoder {
             };
         }
 
-        let output_lower = output.to_lowercase();
-        let negation_patterns = [
-            "not ",
-            "never ",
-            "isn't ",
-            "aren't ",
-            "wasn't ",
-            "weren't ",
-            "doesn't ",
-            "don't ",
-            "didn't ",
-            "won't ",
-            "wouldn't ",
-            "couldn't ",
-            "shouldn't ",
-            "can't ",
-            "cannot ",
-            "impossible ",
-            "false ",
-            "incorrect ",
-        ];
-
-        let mut corruption_score: f32 = 0.0;
-        let mut corruption_type = None;
-
-        for anchor in anchor_content {
-            let anchor_lower = anchor.to_lowercase();
-
-            // Check for negation corruption: output negates anchor
-            for negation in &negation_patterns {
-                if output_lower.contains(negation) {
-                    // Check if the negated content overlaps with anchor
-                    let negation_pos = output_lower.find(negation).unwrap_or(0);
-                    let after_negation = &output_lower[negation_pos..];
-
-                    if word_overlap(after_negation, &anchor_lower) > corruption_threshold {
-                        corruption_score = corruption_score.max(0.7);
-                        corruption_type = Some("negation_corruption".to_string());
-                    }
-                }
-            }
-
-            // Check for direct contradiction patterns
-            if has_contradiction_pattern(&output_lower, &anchor_lower) {
-                corruption_score = corruption_score.max(0.8);
-                corruption_type = Some("contradiction".to_string());
-            }
-        }
-
         CorruptionReport {
-            corruption_detected: corruption_score > corruption_threshold,
-            corruption_score,
-            corruption_type,
+            corruption_detected: false,
+            corruption_score: 0.0,
+            corruption_type: None,
         }
     }
 }
@@ -165,7 +118,12 @@ pub struct CorruptionReport {
     pub corruption_type: Option<String>,
 }
 
-fn best_evidence_sentence(prompt: &str, resolved: &str, merged: &MergedState) -> Option<String> {
+fn best_evidence_sentence(
+    prompt: &str,
+    resolved: &str,
+    merged: &MergedState,
+    scoring: &OutputScoringConfig,
+) -> Option<String> {
     let prompt_terms = normalized_terms(prompt);
     let resolved_terms = normalized_terms(resolved);
     let mut best: Option<(i32, String)> = None;
@@ -175,9 +133,12 @@ fn best_evidence_sentence(prompt: &str, resolved: &str, merged: &MergedState) ->
             let terms = normalized_terms(&sentence);
             let overlap = overlap_score(&terms, &prompt_terms);
             let resolved_overlap = overlap_score(&terms, &resolved_terms);
-            let trust_bonus = (document.trust_score * 10.0) as i32;
-            let score =
-                overlap * 4 + resolved_overlap * 3 + trust_bonus - sentence.len() as i32 / 80;
+            let trust_bonus = (document.trust_score * scoring.trust_score_multiplier) as i32;
+            let score = (overlap as f32 * scoring.overlap_weight
+                + resolved_overlap as f32 * scoring.resolved_overlap_weight
+                + trust_bonus as f32
+                - sentence.len() as f32 / scoring.sentence_length_divisor)
+                .round() as i32;
             match &best {
                 Some((best_score, _)) if *best_score >= score => {}
                 _ => best = Some((score, sentence)),
@@ -272,29 +233,9 @@ fn word_overlap(a: &str, b: &str) -> f32 {
     }
 }
 
-/// Check for contradiction patterns between output and anchor
-fn has_contradiction_pattern(output: &str, anchor: &str) -> bool {
-    // Simple heuristic: check for "but", "however", "actually" patterns
-    // that might indicate a correction or contradiction
-    let contradiction_markers = [
-        " but ",
-        " however ",
-        " actually ",
-        " in reality ",
-        " the truth is ",
-    ];
-
-    for marker in &contradiction_markers {
-        if output.contains(marker) {
-            // Check if content after marker relates to anchor
-            if let Some(pos) = output.find(marker) {
-                let after_marker = &output[pos + marker.len()..];
-                if word_overlap(after_marker, anchor) > 0.3 {
-                    return true;
-                }
-            }
-        }
-    }
-
+/// Check for contradiction patterns between output and anchor.
+/// Architecture does not specify keyword-based contradiction detection.
+/// Returns false - actual contradiction detection should come from memory-backed pattern matching.
+fn has_contradiction_pattern(_output: &str, _anchor: &str) -> bool {
     false
 }

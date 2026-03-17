@@ -870,6 +870,7 @@ impl Engine {
             self.config.governance.max_candidate_pool,
             &self.config.semantic_map,
             &adaptive.escape,
+            &self.config.output_scoring,
         );
 
         let reasoning_support = self.reasoning_support_from_memory(&packet.original_text);
@@ -896,6 +897,9 @@ impl Engine {
             &sequence_state,
             &merged,
             &adaptive.scoring,
+            &self.config.level_multipliers,
+            &self.config.candidate_fit,
+            &self.config.query_processing,
             Some(intent_profile.primary),
             Some(&packet.original_text),
         );
@@ -1048,6 +1052,9 @@ impl Engine {
             &sequence_state,
             &merged,
             &adaptive.scoring,
+            &self.config.level_multipliers,
+            &self.config.candidate_fit,
+            &self.config.query_processing,
             Some(intent_profile.primary),
             Some(&packet.original_text),
         );
@@ -1076,6 +1083,7 @@ impl Engine {
             &adaptive.resolver,
             &adaptive.shaping,
             &anchor_units,
+            &self.config.resolver_thresholds,
         );
         let layer_16_resolution_time_ms = layer_16_start.elapsed().as_millis() as u64;
         self.latency_monitor.record(16, layer_16_resolution_time_ms);
@@ -1174,7 +1182,7 @@ impl Engine {
             .as_ref()
             .map(|resolved| {
                 self.decoder
-                    .decode(&packet.original_text, resolved, &context_matrix, &merged)
+                    .decode(&packet.original_text, resolved, &context_matrix, &merged, &self.config.output_scoring)
             })
             .unwrap_or_else(|| crate::types::DecodedOutput {
                 text: "No candidate could be resolved.".to_string(),
@@ -4630,6 +4638,7 @@ fn route_candidate_units(
     max_candidates: usize,
     semantic_map: &crate::config::SemanticMapConfig,
     escape: &EscapeProfile,
+    scoring: &crate::config::OutputScoringConfig,
 ) -> crate::types::CandidateRoute {
     SemanticRouter::new(semantic_map).route_candidates(
         active_units,
@@ -4637,6 +4646,7 @@ fn route_candidate_units(
         all_units,
         max_candidates,
         escape,
+        scoring,
     )
 }
 

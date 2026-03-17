@@ -2,8 +2,8 @@ use crate::classification::builder::UnitBuilder;
 use crate::classification::input;
 use crate::classification::safety::TrustSafetyValidator;
 use crate::config::{
-    ClassificationConfig, EngineConfig, GovernanceConfig, RetrievalIoConfig, TrustConfig,
-    UnitBuilderConfig,
+    ClassificationConfig, EngineConfig, GovernanceConfig, QueryProcessingConfig, RetrievalIoConfig,
+    TrustConfig, UnitBuilderConfig,
 };
 use crate::types::{
     DatabaseHealthMetrics, EvidenceState, MetadataSummary, RetrievedDocument, SanitizedQuery,
@@ -303,241 +303,29 @@ impl SearxNGClient {
         }
     }
 
-    /// Determine best categories for a query
-    pub fn categorize_query(query: &str) -> Vec<SearxCategory> {
-        let query_lower = query.to_lowercase();
-        let mut categories = vec![SearxCategory::General];
-
-        // Technical/IT queries
-        if query_lower.contains("code")
-            || query_lower.contains("programming")
-            || query_lower.contains("software")
-            || query_lower.contains("api")
-            || query_lower.contains("algorithm")
-            || query_lower.contains("debug")
-            || query_lower.contains("error")
-            || query_lower.contains("function")
-        {
-            categories.push(SearxCategory::IT);
-        }
-
-        // Science queries
-        if query_lower.contains("research")
-            || query_lower.contains("study")
-            || query_lower.contains("experiment")
-            || query_lower.contains("theory")
-            || query_lower.contains("hypothesis")
-            || query_lower.contains("scientific")
-            || query_lower.contains("physics")
-            || query_lower.contains("chemistry")
-            || query_lower.contains("biology")
-        {
-            categories.push(SearxCategory::Science);
-        }
-
-        // News queries
-        if query_lower.contains("news")
-            || query_lower.contains("latest")
-            || query_lower.contains("recent")
-            || query_lower.contains("today")
-            || query_lower.contains("yesterday")
-            || query_lower.contains("breaking")
-        {
-            categories.push(SearxCategory::News);
-        }
-
-        categories
+    /// Determine best categories for a query.
+    /// Architecture does not specify keyword-based category detection.
+    /// Returns default General category - actual categorization should come from memory-backed pattern matching.
+    pub fn categorize_query(_query: &str) -> Vec<SearxCategory> {
+        vec![SearxCategory::General]
     }
 }
 
 #[cfg(feature = "gpu")]
 use once_cell::sync::Lazy;
 
-/// Cached medical keywords for query classification
-#[cfg(feature = "gpu")]
-static MEDICAL_KEYWORDS: Lazy<[&str; 45]> = Lazy::new(|| {
-    [
-        "disease",
-        "symptom",
-        "treatment",
-        "drug",
-        "medicine",
-        "medication",
-        "clinical",
-        "patient",
-        "diagnosis",
-        "therapy",
-        "vaccine",
-        "virus",
-        "bacteria",
-        "cancer",
-        "diabetes",
-        "heart",
-        "brain",
-        "blood",
-        "surgery",
-        "hospital",
-        "doctor",
-        "medical",
-        "health",
-        "pharma",
-        "enzyme",
-        "protein",
-        "gene",
-        "dna",
-        "rna",
-        "cell",
-        "molecular",
-        "biological",
-        "biochemical",
-        "pathology",
-        "epidemiology",
-        "side effects",
-        "dosage",
-        "prescription",
-        "fda",
-        "nih",
-        "placebo",
-        "randomized",
-        "trial",
-        "study",
-        "cohort",
-    ]
-});
-
-/// Cached location keywords for query classification
-#[cfg(feature = "gpu")]
-static LOCATION_KEYWORDS: Lazy<[&str; 27]> = Lazy::new(|| {
-    [
-        "where is",
-        "location of",
-        "address",
-        "city in",
-        "country",
-        "capital",
-        "coordinates",
-        "map",
-        "latitude",
-        "longitude",
-        "near",
-        "distance from",
-        "directions to",
-        "route",
-        "place",
-        "street",
-        "avenue",
-        "building",
-        "landmark",
-        "geographic",
-        "geography",
-        "region",
-        "province",
-        "state",
-        "town",
-        "village",
-        "postal",
-    ]
-});
-
-/// Check if query is medical/scientific in nature
-fn is_medical_query(query_lower: &str) -> bool {
-    #[cfg(feature = "gpu")]
-    {
-        MEDICAL_KEYWORDS.iter().any(|kw| query_lower.contains(kw))
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        let medical_keywords = [
-            "disease",
-            "symptom",
-            "treatment",
-            "drug",
-            "medicine",
-            "medication",
-            "clinical",
-            "patient",
-            "diagnosis",
-            "therapy",
-            "vaccine",
-            "virus",
-            "bacteria",
-            "cancer",
-            "diabetes",
-            "heart",
-            "brain",
-            "blood",
-            "surgery",
-            "hospital",
-            "doctor",
-            "medical",
-            "health",
-            "pharma",
-            "enzyme",
-            "protein",
-            "gene",
-            "dna",
-            "rna",
-            "cell",
-            "molecular",
-            "biological",
-            "biochemical",
-            "pathology",
-            "epidemiology",
-            "side effects",
-            "dosage",
-            "prescription",
-            "fda",
-            "nih",
-            "placebo",
-            "randomized",
-            "trial",
-            "study",
-            "cohort",
-        ];
-        medical_keywords.iter().any(|kw| query_lower.contains(kw))
-    }
+/// Check if query is medical/scientific in nature.
+/// Architecture does not specify keyword-based detection.
+/// Returns false - actual detection should come from memory-backed pattern matching.
+fn is_medical_query(_query_lower: &str) -> bool {
+    false
 }
 
-/// Check if query is location/geographic in nature
-fn is_location_query(query_lower: &str) -> bool {
-    #[cfg(feature = "gpu")]
-    {
-        LOCATION_KEYWORDS.iter().any(|kw| query_lower.contains(kw))
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        let location_keywords = [
-            "where is",
-            "location of",
-            "address",
-            "city in",
-            "country",
-            "capital",
-            "coordinates",
-            "map",
-            "latitude",
-            "longitude",
-            "near",
-            "distance from",
-            "directions to",
-            "route",
-            "place",
-            "street",
-            "avenue",
-            "building",
-            "landmark",
-            "geographic",
-            "geography",
-            "region",
-            "province",
-            "state",
-            "town",
-            "village",
-            "postal",
-            "zip code",
-        ];
-        location_keywords.iter().any(|kw| query_lower.contains(kw))
-    }
+/// Check if query is location/geographic in nature.
+/// Architecture does not specify keyword-based detection.
+/// Returns false - actual detection should come from memory-backed pattern matching.
+fn is_location_query(_query_lower: &str) -> bool {
+    false
 }
 
 #[derive(Clone)]
@@ -553,6 +341,7 @@ pub struct RetrievalPipeline {
     builder: UnitBuilderConfig,
     classification: ClassificationConfig,
     governance: GovernanceConfig,
+    query_processing: QueryProcessingConfig,
     searxng_enabled: bool,
 }
 
@@ -578,6 +367,7 @@ impl RetrievalPipeline {
             builder: config.builder.clone(),
             classification: config.classification.clone(),
             governance: config.governance.clone(),
+            query_processing: config.query_processing.clone(),
             searxng_enabled: config.retrieval_io.searxng_enabled,
         }
     }
@@ -750,7 +540,7 @@ impl RetrievalPipeline {
         let mut all_docs = Vec::new();
         let mut all_errors = Vec::new();
 
-        for variant in query_variants(query) {
+        for variant in query_variants(query, self.query_processing.max_query_variants, self.query_processing.plural_detection_min_length) {
             // Execute all fetches in parallel using boxed futures
             let mut futures_vec: Vec<
                 std::pin::Pin<
@@ -795,7 +585,7 @@ impl RetrievalPipeline {
 
             // Deduplicate and rank after each variant
             dedup_documents(&mut all_docs);
-            rank_documents_for_query(&variant, &mut all_docs);
+            rank_documents_for_query(&variant, &mut all_docs, self.query_processing.min_token_length);
 
             // Check if we have enough grounded content
             if all_docs.len() >= limit && has_grounded_candidate(&all_docs) {
@@ -1334,12 +1124,18 @@ impl RetrievalPipeline {
         let mut hydrated = Vec::new();
 
         for (index, mut doc) in docs.into_iter().enumerate() {
-            let already_substantive = doc.raw_content.split_whitespace().count() >= 40;
-            if index < limit.min(3) && doc.source_url.starts_with("http") && !already_substantive {
+            let already_substantive =
+                doc.raw_content.split_whitespace().count() >= self.query_processing.substantive_word_count;
+            if index < limit.min(self.query_processing.max_hydrate_docs)
+                && doc.source_url.starts_with("http")
+                && !already_substantive
+            {
                 if let Ok(response) = self.client.get(&doc.source_url).send().await {
                     if let Ok(body) = response.text().await {
                         let normalized = self.normalize_content(&doc.source_url, &body);
-                        if normalized.len() > doc.normalized_content.len().max(120) {
+                        if normalized.len()
+                            > doc.normalized_content.len().max(self.query_processing.min_hydrate_content_length)
+                        {
                             let hydrated = merge_document_content(&doc.raw_content, &normalized);
                             doc.raw_content = hydrated.clone();
                             doc.normalized_content = input::normalize_text(&hydrated);
@@ -1493,22 +1289,22 @@ fn dedup_documents(docs: &mut Vec<RetrievedDocument>) {
     );
 }
 
-fn query_variants(query: &SanitizedQuery) -> Vec<String> {
+fn query_variants(query: &SanitizedQuery, max_variants: usize, plural_min_length: usize) -> Vec<String> {
     let mut variants = Vec::new();
-    push_query_variant(&mut variants, clean_search_query(&query.sanitized_query));
-    push_query_variant(&mut variants, clean_search_query(&query.raw_query));
+    push_query_variant(&mut variants, clean_search_query(&query.sanitized_query, plural_min_length));
+    push_query_variant(&mut variants, clean_search_query(&query.raw_query, plural_min_length));
 
     for expansion in &query.semantic_expansions {
-        let expansion = clean_search_query(expansion);
+        let expansion = clean_search_query(expansion, plural_min_length);
         if expansion.is_empty() {
             continue;
         }
         if let Some(base) = variants.first() {
-            let combined = clean_search_query(&format!("{base} {expansion}"));
+            let combined = clean_search_query(&format!("{base} {expansion}"), plural_min_length);
             push_query_variant(&mut variants, combined);
         }
         push_query_variant(&mut variants, expansion);
-        if variants.len() >= 5 {
+        if variants.len() >= max_variants {
             break;
         }
     }
@@ -1523,14 +1319,14 @@ fn push_query_variant(variants: &mut Vec<String>, candidate: String) {
     variants.push(candidate);
 }
 
-fn clean_search_query(text: &str) -> String {
+fn clean_search_query(text: &str, plural_min_length: usize) -> String {
     let mut tokens = Vec::new();
     let mut seen = HashSet::new();
     for token in text.split_whitespace() {
         let cleaned = token
             .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
             .to_lowercase();
-        let cleaned = if cleaned.len() > 4 && cleaned.ends_with('s') && !cleaned.ends_with("ss") {
+        let cleaned = if cleaned.len() > plural_min_length && cleaned.ends_with('s') && !cleaned.ends_with("ss") {
             cleaned[..cleaned.len() - 1].to_string()
         } else {
             cleaned
@@ -1573,22 +1369,22 @@ fn merge_document_content(summary: &str, hydrated_body: &str) -> String {
     }
 }
 
-fn rank_documents_for_query(query: &str, docs: &mut [RetrievedDocument]) {
-    let query_terms = normalized_query_terms(query);
+fn rank_documents_for_query(query: &str, docs: &mut [RetrievedDocument], min_token_length: usize) {
+    let query_terms = normalized_query_terms(query, min_token_length);
     docs.sort_by(|left, right| {
-        let right_score = retrieval_relevance_score(&query_terms, right);
-        let left_score = retrieval_relevance_score(&query_terms, left);
+        let right_score = retrieval_relevance_score(&query_terms, right, min_token_length);
+        let left_score = retrieval_relevance_score(&query_terms, left, min_token_length);
         right_score.total_cmp(&left_score)
     });
 }
 
-fn retrieval_relevance_score(query_terms: &[String], doc: &RetrievedDocument) -> f32 {
+fn retrieval_relevance_score(query_terms: &[String], doc: &RetrievedDocument, min_token_length: usize) -> f32 {
     if query_terms.is_empty() {
         return doc.trust_score;
     }
 
-    let title_terms = normalized_query_terms(&doc.title);
-    let content_terms = normalized_query_terms(&doc.normalized_content);
+    let title_terms = normalized_query_terms(&doc.title, min_token_length);
+    let content_terms = normalized_query_terms(&doc.normalized_content, min_token_length);
     let title_overlap = overlap_ratio(query_terms, &title_terms);
     let content_overlap = overlap_ratio(query_terms, &content_terms);
     let phrase_match =
@@ -1601,13 +1397,13 @@ fn retrieval_relevance_score(query_terms: &[String], doc: &RetrievedDocument) ->
     (0.42 * title_overlap) + (0.36 * content_overlap) + (0.22 * doc.trust_score) + phrase_match
 }
 
-fn normalized_query_terms(text: &str) -> Vec<String> {
+fn normalized_query_terms(text: &str, min_token_length: usize) -> Vec<String> {
     let mut terms = Vec::new();
     for token in input::normalize_text(text).split_whitespace() {
         let token = token
             .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '-' && ch != '_')
             .to_ascii_lowercase();
-        if token.len() < 2 || terms.contains(&token) {
+        if token.len() < min_token_length || terms.contains(&token) {
             continue;
         }
         terms.push(token);

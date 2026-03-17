@@ -384,8 +384,18 @@ fn score_candidates_cpu(
     merged: &MergedState,
     weights: &ScoringWeights,
 ) -> Vec<ScoredCandidate> {
+    use crate::config::{CandidateFitConfig, LevelMultiplierConfig, QueryProcessingConfig};
     crate::reasoning::search::CandidateScorer::score(
-        candidates, context, sequence, merged, weights, None, None,
+        candidates,
+        context,
+        sequence,
+        merged,
+        weights,
+        &LevelMultiplierConfig::default(),
+        &CandidateFitConfig::default(),
+        &QueryProcessingConfig::default(),
+        None,
+        None,
     )
 }
 

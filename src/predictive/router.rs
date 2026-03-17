@@ -1,4 +1,4 @@
-use crate::config::{CreativeSparkConfig, EscapeProfile, SemanticMapConfig};
+use crate::config::{CreativeSparkConfig, EscapeProfile, OutputScoringConfig, SemanticMapConfig};
 use crate::spatial_index::{centroid, SpatialGrid};
 use crate::types::{RoutingResult, ScoredCandidate, Unit};
 use rand::Rng;
@@ -109,6 +109,7 @@ impl SemanticRouter {
         all_units: &[Unit],
         max_candidates: usize,
         escape: &EscapeProfile,
+        scoring: &OutputScoringConfig,
     ) -> crate::types::CandidateRoute {
         let target_candidates = max_candidates.max(1).min(escape.beam_width.max(1));
         let active_ids: HashSet<Uuid> = active_units.iter().map(|unit| unit.id).collect();
@@ -118,8 +119,8 @@ impl SemanticRouter {
             .map(|unit| (unit.id, unit))
             .collect();
 
-        let near_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, true);
-        let far_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, false);
+        let near_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, true, scoring);
+        let far_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, false, scoring);
         let best_near = near_edges.first().map(|(_, score)| *score).unwrap_or(0.0);
         let best_far = far_edges.first().map(|(_, score)| *score).unwrap_or(0.0);
 
@@ -138,7 +139,7 @@ impl SemanticRouter {
             scored_candidates.extend(near_edges.into_iter());
             scored_candidates.extend(far_edges.into_iter());
             let path_candidates =
-                self.pathfind_candidates(active_units, all_units, &unit_index, &active_ids);
+                self.pathfind_candidates(active_units, all_units, &unit_index, &active_ids, scoring);
             if !path_candidates.is_empty() {
                 used_pathfinding = true;
                 rationale.push("tier3_pathfinding".to_string());
@@ -178,6 +179,7 @@ impl SemanticRouter {
         unit_index: &HashMap<Uuid, &Unit>,
         active_ids: &HashSet<Uuid>,
         near_only: bool,
+        scoring: &OutputScoringConfig,
     ) -> Vec<(Uuid, f32)> {
         let mut scored = Vec::new();
 
@@ -199,11 +201,12 @@ impl SemanticRouter {
                 let score = if near_only {
                     let proximity_bonus =
                         1.0 - (distance / self.neighbor_radius.max(0.001)).min(1.0);
-                    link.weight * proximity_bonus.max(0.05) * utility_bonus(target.utility_score)
+                    link.weight * proximity_bonus.max(scoring.proximity_bonus_floor)
+                        * utility_bonus(target.utility_score, scoring)
                 } else {
                     let distance_scale = (distance / self.neighbor_radius.max(0.001)).max(1.0);
                     let decayed = self.config.distance_decay.powf(distance_scale - 1.0);
-                    link.weight * decayed * utility_bonus(target.utility_score)
+                    link.weight * decayed * utility_bonus(target.utility_score, scoring)
                 };
                 scored.push((target.id, score));
             }
@@ -219,6 +222,7 @@ impl SemanticRouter {
         all_units: &[Unit],
         unit_index: &HashMap<Uuid, &Unit>,
         active_ids: &HashSet<Uuid>,
+        scoring: &OutputScoringConfig,
     ) -> Vec<(Uuid, f32)> {
         let mut goals: Vec<&Unit> = all_units
             .iter()
@@ -234,7 +238,7 @@ impl SemanticRouter {
         let mut scored = Vec::new();
         for start in active_units {
             for goal in &goals {
-                if let Some(path) = self.a_star_path(start.id, goal.id, unit_index) {
+                if let Some(path) = self.a_star_path(start.id, goal.id, unit_index, scoring) {
                     if path.len() < 2 {
                         continue;
                     }
@@ -262,6 +266,7 @@ impl SemanticRouter {
         start_id: Uuid,
         goal_id: Uuid,
         unit_index: &HashMap<Uuid, &Unit>,
+        scoring: &OutputScoringConfig,
     ) -> Option<Vec<Uuid>> {
         #[derive(Clone)]
         struct State {
@@ -334,9 +339,9 @@ impl SemanticRouter {
                     continue;
                 }
                 let hub_bonus = if next.links.len() >= self.config.hub_link_threshold {
-                    0.85
+                    scoring.hub_bonus_non_hub
                 } else {
-                    1.0
+                    scoring.hub_bonus_hub
                 };
                 let heuristic = spatial_distance(next.semantic_position, goal.semantic_position)
                     / self.neighbor_radius.max(0.001);
@@ -446,6 +451,6 @@ fn spatial_distance(lhs: [f32; 3], rhs: [f32; 3]) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn utility_bonus(utility: f32) -> f32 {
-    0.5 + utility.clamp(0.0, 1.0) * 0.5
+fn utility_bonus(utility: f32, scoring: &OutputScoringConfig) -> f32 {
+    scoring.utility_bonus_base + utility.clamp(0.0, 1.0) * scoring.utility_bonus_multiplier
 }

@@ -750,6 +750,9 @@ fn validate_reasoning(
                 &sequence,
                 &merged,
                 &config.scoring,
+                &config.level_multipliers,
+                &config.candidate_fit,
+                &config.query_processing,
                 None,
                 Some(&ex.question),
             );
@@ -831,6 +834,9 @@ fn validate_predictive(
                 &sequence,
                 &merged,
                 &config.scoring,
+                &config.level_multipliers,
+                &config.candidate_fit,
+                &config.query_processing,
                 None,
                 Some(&ex.question),
             );
@@ -848,7 +854,7 @@ fn validate_predictive(
 
             // ACTUALLY INVOKE THE PREDICTIVE SYSTEM (resolver)
             let resolved =
-                FineResolver::select(&scored, ResolverMode::Balanced, false, &config.resolver);
+                FineResolver::select(&scored, ResolverMode::Balanced, false, &config.resolver, &config.resolver_thresholds);
 
             let (matched, actual, confidence) = match resolved {
                 Some(candidate) => {
@@ -861,7 +867,7 @@ fn validate_predictive(
                         used_escape: false,
                     };
                     let decoded =
-                        decoder.decode(&ex.question, &resolved_candidate, &context, &merged);
+                        decoder.decode(&ex.question, &resolved_candidate, &context, &merged, &config.output_scoring);
 
                     let output_reasonable = !decoded.text.is_empty() && decoded.text.len() < 1000;
                     (

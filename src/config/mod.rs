@@ -61,6 +61,193 @@ pub struct RetrievalThresholds {
     pub freshness_max_value: f32,
 }
 
+/// Configuration for unit level multipliers in candidate scoring.
+/// These weights adjust scoring based on unit granularity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LevelMultiplierConfig {
+    /// Weight multiplier for Char-level units
+    pub char_level: f32,
+    /// Weight multiplier for Subword-level units
+    pub subword_level: f32,
+    /// Weight multiplier for Word-level units
+    pub word_level: f32,
+    /// Weight multiplier for Phrase-level units
+    pub phrase_level: f32,
+    /// Weight multiplier for Pattern-level units
+    pub pattern_level: f32,
+}
+
+impl Default for LevelMultiplierConfig {
+    fn default() -> Self {
+        Self {
+            char_level: 0.15,
+            subword_level: 0.45,
+            word_level: 0.9,
+            phrase_level: 1.0,
+            pattern_level: 0.8,
+        }
+    }
+}
+
+/// Configuration for candidate scoring fit weights.
+/// These control how different fit dimensions contribute to final scores.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CandidateFitConfig {
+    /// Score for merged candidate spatial fit
+    pub merged_spatial_fit: f32,
+    /// Score for non-merged spatial fit
+    pub unmerged_spatial_fit: f32,
+    /// Score for recent unit sequence fit
+    pub recent_sequence_fit: f32,
+    /// Score for task entity sequence fit
+    pub task_entity_sequence_fit: f32,
+    /// Score for default sequence fit
+    pub default_sequence_fit: f32,
+    /// Divisor for transition fit calculation
+    pub transition_fit_divisor: f32,
+    /// Score for exact context match
+    pub context_match_exact: f32,
+    /// Score for summary context match
+    pub context_match_summary: f32,
+    /// Score for no context match
+    pub context_match_none: f32,
+    /// Base score for evidence corroboration
+    pub evidence_corroboration_base: f32,
+    /// Trust multiplier for evidence corroboration
+    pub evidence_trust_multiplier: f32,
+    /// Score for evidence without mention
+    pub evidence_no_mention_multiplier: f32,
+}
+
+impl Default for CandidateFitConfig {
+    fn default() -> Self {
+        Self {
+            merged_spatial_fit: 0.9,
+            unmerged_spatial_fit: 0.35,
+            recent_sequence_fit: 0.95,
+            task_entity_sequence_fit: 0.65,
+            default_sequence_fit: 0.25,
+            transition_fit_divisor: 5.0,
+            context_match_exact: 1.0,
+            context_match_summary: 0.75,
+            context_match_none: 0.3,
+            evidence_corroboration_base: 0.45,
+            evidence_trust_multiplier: 0.4,
+            evidence_no_mention_multiplier: 0.2,
+        }
+    }
+}
+
+/// Configuration for query processing thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueryProcessingConfig {
+    /// Minimum candidates to trigger parallel scoring
+    pub parallel_scoring_threshold: usize,
+    /// Maximum query variants to generate
+    pub max_query_variants: usize,
+    /// Minimum token length for query terms
+    pub min_token_length: usize,
+    /// Minimum length for plural detection
+    pub plural_detection_min_length: usize,
+    /// Maximum documents to hydrate content
+    pub max_hydrate_docs: usize,
+    /// Minimum content length for hydration
+    pub min_hydrate_content_length: usize,
+    /// Minimum word count for substantive document
+    pub substantive_word_count: usize,
+}
+
+impl Default for QueryProcessingConfig {
+    fn default() -> Self {
+        Self {
+            parallel_scoring_threshold: 128,
+            max_query_variants: 5,
+            min_token_length: 2,
+            plural_detection_min_length: 4,
+            max_hydrate_docs: 3,
+            min_hydrate_content_length: 120,
+            substantive_word_count: 40,
+        }
+    }
+}
+
+/// Configuration for resolver mode thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResolverThresholdConfig {
+    /// Temperature threshold for deterministic top_k=1
+    pub deterministic_temp_threshold: f32,
+    /// Temperature threshold for balanced top_k=3
+    pub balanced_temp_threshold: f32,
+    /// Temperature threshold for exploratory top_k=3
+    pub exploratory_temp_low: f32,
+    /// Temperature threshold for exploratory top_k=5
+    pub exploratory_temp_high: f32,
+    /// Confidence floor multiplier for creative mode
+    pub creative_floor_multiplier: f32,
+    /// Minimum confidence floor
+    pub min_confidence_floor_absolute: f32,
+}
+
+impl Default for ResolverThresholdConfig {
+    fn default() -> Self {
+        Self {
+            deterministic_temp_threshold: 0.4,
+            balanced_temp_threshold: 1.0,
+            exploratory_temp_low: 0.7,
+            exploratory_temp_high: 1.25,
+            creative_floor_multiplier: 0.6,
+            min_confidence_floor_absolute: 0.10,
+        }
+    }
+}
+
+/// Configuration for output scoring weights.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputScoringConfig {
+    /// Trust score multiplier for sentence scoring
+    pub trust_score_multiplier: f32,
+    /// Overlap weight for sentence scoring
+    pub overlap_weight: f32,
+    /// Resolved overlap weight for sentence scoring
+    pub resolved_overlap_weight: f32,
+    /// Sentence length divisor for scoring
+    pub sentence_length_divisor: f32,
+    /// Default center position for empty positions
+    pub default_center_position: f32,
+    /// Proximity bonus floor
+    pub proximity_bonus_floor: f32,
+    /// Hub bonus for non-hub nodes
+    pub hub_bonus_non_hub: f32,
+    /// Hub bonus for hub nodes
+    pub hub_bonus_hub: f32,
+    /// Utility bonus base
+    pub utility_bonus_base: f32,
+    /// Utility bonus multiplier
+    pub utility_bonus_multiplier: f32,
+}
+
+impl Default for OutputScoringConfig {
+    fn default() -> Self {
+        Self {
+            trust_score_multiplier: 10.0,
+            overlap_weight: 4.0,
+            resolved_overlap_weight: 3.0,
+            sentence_length_divisor: 80.0,
+            default_center_position: 0.5,
+            proximity_bonus_floor: 0.05,
+            hub_bonus_non_hub: 0.85,
+            hub_bonus_hub: 1.0,
+            utility_bonus_base: 0.5,
+            utility_bonus_multiplier: 0.5,
+        }
+    }
+}
+
 impl Default for RetrievalThresholds {
     fn default() -> Self {
         Self {
@@ -2282,6 +2469,21 @@ pub struct EngineConfig {
     /// Calculation-based classification configuration (replaces heuristics)
     #[serde(default)]
     pub classification: ClassificationConfig,
+    /// Unit level multipliers for candidate scoring
+    #[serde(default)]
+    pub level_multipliers: LevelMultiplierConfig,
+    /// Candidate fit scoring weights
+    #[serde(default)]
+    pub candidate_fit: CandidateFitConfig,
+    /// Query processing thresholds
+    #[serde(default)]
+    pub query_processing: QueryProcessingConfig,
+    /// Resolver mode thresholds
+    #[serde(default)]
+    pub resolver_thresholds: ResolverThresholdConfig,
+    /// Output scoring weights
+    #[serde(default)]
+    pub output_scoring: OutputScoringConfig,
 }
 
 impl Default for EngineConfig {
@@ -2313,6 +2515,11 @@ impl Default for EngineConfig {
             multi_engine: MultiEngineConfig::default(),
             config_sweep: ConfigSweepConfig::default(),
             classification: ClassificationConfig::default(),
+            level_multipliers: LevelMultiplierConfig::default(),
+            candidate_fit: CandidateFitConfig::default(),
+            query_processing: QueryProcessingConfig::default(),
+            resolver_thresholds: ResolverThresholdConfig::default(),
+            output_scoring: OutputScoringConfig::default(),
         }
     }
 }

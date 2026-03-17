@@ -10,6 +10,7 @@
 // Classification System imports
 use crate::classification::{
     input, ClassificationCalculator, ClassificationSignature, SemanticHasher,
+    HierarchicalUnitOrganizer, UnitBuilder,
 };
 
 // Reasoning System imports
@@ -19,20 +20,78 @@ use crate::reasoning::CandidateScorer;
 use crate::predictive::{FineResolver, OutputDecoder};
 
 // Core imports
-use crate::config::{EngineConfig, ScoringWeights as ConfigScoringWeights};
+use crate::config::{EngineConfig, ScoringWeights as ConfigScoringWeights, UnitBuilderConfig};
 use crate::memory::store::MemoryStore;
 use crate::seed::{
     ClassificationDatasetGenerator, PredictiveQAGenerator, ReasoningDatasetGenerator,
     TrainingExample,
 };
 use crate::types::{
-    ContextMatrix, IntentKind, MergedState, ResolverMode, SequenceState, ToneKind, TrainingMetrics,
+    ContextMatrix, IntentKind, InputPacket, MergedState, ResolverMode, SequenceState, SourceKind,
+    ToneKind, TrainingMetrics, UnitHierarchy,
 };
 
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+// ============================================================================
+// Local ingestion helpers (inlined for training-only use)
+// ============================================================================
+
+/// Ingest raw text through the full pipeline: normalize → build → organize → store
+/// Returns the number of active unit IDs created.
+fn ingest_text(
+    memory: &mut MemoryStore,
+    text: &str,
+    source_kind: SourceKind,
+    context: &str,
+    config: &UnitBuilderConfig,
+) -> Vec<uuid::Uuid> {
+    if text.trim().is_empty() {
+        return vec![];
+    }
+
+    let packet = input::ingest_raw(text, !matches!(source_kind, SourceKind::UserInput));
+    let build_output = UnitBuilder::build_units_static(&packet, config);
+    let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, config);
+
+    let context_summary = if context.is_empty() {
+        summarize_packet(&packet)
+    } else {
+        context.to_string()
+    };
+
+    memory.ingest_hierarchy(&hierarchy, source_kind, &context_summary)
+}
+
+/// Batch ingest multiple texts in training mode
+fn ingest_texts_batch(
+    memory: &mut MemoryStore,
+    texts: &[&str],
+    source_kind: SourceKind,
+    context: &str,
+    config: &UnitBuilderConfig,
+) -> usize {
+    memory.set_training_mode(true);
+
+    let mut total = 0;
+    for text in texts {
+        let ids = ingest_text(memory, text, source_kind, context, config);
+        total += ids.len();
+    }
+
+    memory.set_training_mode(false);
+    total
+}
+
+/// Summarize an input packet for context
+fn summarize_packet(packet: &InputPacket) -> String {
+    packet.normalized_text.chars().take(100).collect()
+}
+
+// ============================================================================
 
 /// Classification System Training (§11.2)
 /// Trains intent/tone centroids and optimizes feature weights via Bayesian sweep
@@ -274,13 +333,16 @@ fn validate_reasoning_with_scorer(
     };
 
     for example in val_examples.iter().take(sample_size) {
-        // Use actual CandidateScorer::score
+        // Use actual CandidateScorer::score with default configs for validation
         let scored = CandidateScorer::score(
             &units,
             &context,
             &sequence,
             &merged,
             &scoring_weights,
+            &crate::config::LevelMultiplierConfig::default(),
+            &crate::config::CandidateFitConfig::default(),
+            &crate::config::QueryProcessingConfig::default(),
             None, // intent
             Some(&example.question),
         );
@@ -490,13 +552,16 @@ fn validate_predictive_with_resolver(
     let decoder = OutputDecoder;
 
     for example in val_examples.iter().take(sample_size) {
-        // Score candidates using CandidateScorer
+        // Score candidates using CandidateScorer with default configs
         let scored = CandidateScorer::score(
             &units,
             &context,
             &sequence,
             &merged,
             &weights,
+            &crate::config::LevelMultiplierConfig::default(),
+            &crate::config::CandidateFitConfig::default(),
+            &crate::config::QueryProcessingConfig::default(),
             None,
             Some(&example.question),
         );
@@ -507,7 +572,7 @@ fn validate_predictive_with_resolver(
 
         // Use actual FineResolver::select
         if let Some(selected) =
-            FineResolver::select(&scored, ResolverMode::Balanced, false, &config.resolver)
+            FineResolver::select(&scored, ResolverMode::Balanced, false, &config.resolver, &config.resolver_thresholds)
         {
             // Create ResolvedCandidate from ScoredCandidate
             let resolved = ResolvedCandidate {
@@ -519,7 +584,7 @@ fn validate_predictive_with_resolver(
             };
 
             // Use actual OutputDecoder::decode
-            let output = decoder.decode(&example.question, &resolved, &context, &merged);
+            let output = decoder.decode(&example.question, &resolved, &context, &merged, &config.output_scoring);
 
             // Validate output is non-empty and reasonable
             if !output.text.is_empty() && output.text.len() > 2 {
@@ -1240,9 +1305,6 @@ fn bootstrap_vocabulary(
     memory: &Arc<Mutex<MemoryStore>>,
     config: &EngineConfig,
 ) -> Result<(), String> {
-    use crate::common::ingest_texts_batch;
-    use crate::types::SourceKind;
-
     // Bootstrap sentences that will create word/phrase units via actual pipeline
     let bootstrap_texts: Vec<&str> = vec![
         "The capital city of France is Paris.",
@@ -1259,7 +1321,7 @@ fn bootstrap_vocabulary(
 
     let mut mem = memory.lock().map_err(|e| format!("Lock error: {}", e))?;
 
-    // Use shared helper for batch ingestion
+    // Use local helper for batch ingestion
     ingest_texts_batch(
         &mut mem,
         &bootstrap_texts,
@@ -1277,9 +1339,6 @@ fn form_edges_from_qa(
     examples: &[TrainingExample],
     config: &EngineConfig,
 ) -> Result<u64, String> {
-    use crate::common::ingest_text;
-    use crate::types::SourceKind;
-
     let mut edges_created = 0u64;
     let mut mem = memory.lock().map_err(|e| format!("Lock error: {}", e))?;
 

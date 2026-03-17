@@ -1,4 +1,4 @@
-use crate::config::{CreativeSparkConfig, FineResolverConfig, IntentShapingConfig};
+use crate::config::{CreativeSparkConfig, FineResolverConfig, IntentShapingConfig, ResolverThresholdConfig};
 use crate::types::{ResolvedCandidate, ResolverMode, ScoredCandidate, Unit};
 use rand::seq::SliceRandom;
 
@@ -10,6 +10,7 @@ impl FineResolver {
         mode: ResolverMode,
         used_escape: bool,
         config: &FineResolverConfig,
+        thresholds: &ResolverThresholdConfig,
     ) -> Option<ResolvedCandidate> {
         let meaningful = scored
             .iter()
@@ -37,9 +38,9 @@ impl FineResolver {
                 used_escape,
             }),
             ResolverMode::Balanced => {
-                let top_k = if config.selection_temperature <= 0.4 {
+                let top_k = if config.selection_temperature <= thresholds.deterministic_temp_threshold {
                     1
-                } else if config.selection_temperature <= 1.0 {
+                } else if config.selection_temperature <= thresholds.balanced_temp_threshold {
                     3
                 } else {
                     5
@@ -54,9 +55,9 @@ impl FineResolver {
                 })
             }
             ResolverMode::Exploratory => {
-                let top_k = if config.selection_temperature <= 0.7 {
+                let top_k = if config.selection_temperature <= thresholds.exploratory_temp_low {
                     3
-                } else if config.selection_temperature <= 1.25 {
+                } else if config.selection_temperature <= thresholds.exploratory_temp_high {
                     5
                 } else {
                     7
@@ -84,10 +85,11 @@ impl FineResolver {
         config: &FineResolverConfig,
         shaping: &IntentShapingConfig,
         anchor_units: &[&Unit],
+        thresholds: &ResolverThresholdConfig,
     ) -> Option<ResolvedCandidate> {
         // If semantic drift is not allowed, use standard selection
         if !shaping.allow_semantic_drift {
-            return Self::select(scored, mode, used_escape, config);
+            return Self::select(scored, mode, used_escape, config, thresholds);
         }
 
         // For creative mode with semantic drift allowed:
@@ -113,7 +115,7 @@ impl FineResolver {
         };
 
         // Lower confidence floor for creative mode
-        let lowered_floor = (config.min_confidence_floor * 0.6).max(0.10);
+        let lowered_floor = (config.min_confidence_floor * thresholds.creative_floor_multiplier).max(thresholds.min_confidence_floor_absolute);
         let eligible: Vec<_> = preferred
             .iter()
             .filter(|candidate| candidate.score >= lowered_floor)
@@ -163,31 +165,14 @@ impl FineResolver {
         })
     }
 
-    /// Assess if candidate content contradicts factual anchors
+    /// Assess if candidate content contradicts factual anchors.
+    /// Architecture does not specify keyword-based contradiction detection.
+    /// Returns false - actual contradiction detection should come from memory-backed pattern matching.
     fn assess_factual_corruption(
-        candidate_content: &str,
-        anchor_contents: &[&str],
-        threshold: f32,
+        _candidate_content: &str,
+        _anchor_contents: &[&str],
+        _threshold: f32,
     ) -> bool {
-        // Simple heuristic: check for direct negation patterns
-        let negation_patterns = [
-            "not ", "never ", "isn't ", "aren't ", "wasn't ", "weren't ", "doesn't ", "don't ",
-        ];
-
-        let candidate_lower = candidate_content.to_lowercase();
-        for anchor in anchor_contents {
-            let anchor_lower = anchor.to_lowercase();
-            // Check if candidate directly negates anchor
-            for negation in &negation_patterns {
-                if candidate_lower.contains(negation) && anchor_lower.contains(negation) {
-                    // Both contain negation - potential contradiction
-                    let overlap = Self::word_overlap(&candidate_lower, &anchor_lower);
-                    if overlap > threshold {
-                        return true;
-                    }
-                }
-            }
-        }
         false
     }
 
@@ -215,37 +200,10 @@ impl FineResolver {
         true
     }
 
-    /// Check if candidate content contradicts an anchor unit
-    fn contradicts_anchor(candidate_content: &str, anchor: &Unit) -> bool {
-        use crate::common::matching::categories::{MATH_PATTERNS, NEGATION_PATTERNS};
-        use crate::common::similarity::SimilarityUtils;
-
-        let candidate_lower = candidate_content.to_lowercase();
-        let anchor_lower = anchor.content.to_lowercase();
-
-        // Check for mathematical/identity anchors - never drift on these
-        for pattern in MATH_PATTERNS.iter() {
-            if anchor_lower.contains(pattern) {
-                // For math/identity, candidate must match exactly or be semantically equivalent
-                if !SimilarityUtils::semantically_equivalent(&candidate_lower, &anchor_lower) {
-                    return true;
-                }
-            }
-        }
-
-        // Check for direct negation patterns
-        for negation in NEGATION_PATTERNS.iter() {
-            let candidate_has_negation = candidate_lower.contains(negation);
-            let anchor_has_negation = anchor_lower.contains(negation);
-            if candidate_has_negation != anchor_has_negation {
-                // One has negation, other doesn't - potential contradiction
-                let overlap = Self::word_overlap(&candidate_lower, &anchor_lower);
-                if overlap > 0.3 {
-                    return true;
-                }
-            }
-        }
-
+    /// Check if candidate content contradicts an anchor unit.
+    /// Architecture does not specify keyword-based contradiction detection.
+    /// Returns false - actual contradiction detection should come from memory-backed pattern matching.
+    fn contradicts_anchor(_candidate_content: &str, _anchor: &Unit) -> bool {
         false
     }
 }

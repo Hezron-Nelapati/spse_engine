@@ -783,3 +783,73 @@ config_sweep:
   pollution_ceiling_percent: 1.0       # Pollution ceiling target (%)
   iterations_per_config: 3             # Iterations per config
   pareto_output_path: "benchmarks/pareto_frontier.json"
+
+# ============================================================================
+# Unit Level Multipliers (Candidate Scoring)
+# ============================================================================
+
+level_multipliers:
+  char_level: 0.15                      # Weight for Char-level units
+  subword_level: 0.45                   # Weight for Subword-level units
+  word_level: 0.9                       # Weight for Word-level units
+  phrase_level: 1.0                     # Weight for Phrase-level units
+  pattern_level: 0.8                    # Weight for Pattern-level units
+
+# ============================================================================
+# Candidate Fit Scoring Weights
+# ============================================================================
+
+candidate_fit:
+  merged_spatial_fit: 0.9               # Score for merged candidate spatial fit
+  unmerged_spatial_fit: 0.35            # Score for non-merged spatial fit
+  recent_sequence_fit: 0.95             # Score for recent unit sequence fit
+  task_entity_sequence_fit: 0.65        # Score for task entity sequence fit
+  default_sequence_fit: 0.25            # Score for default sequence fit
+  transition_fit_divisor: 5.0           # Divisor for transition fit calculation
+  context_match_exact: 1.0              # Score for exact context match
+  context_match_summary: 0.75           # Score for summary context match
+  context_match_none: 0.3               # Score for no context match
+  evidence_corroboration_base: 0.45     # Base score for evidence corroboration
+  evidence_trust_multiplier: 0.4        # Trust multiplier for evidence corroboration
+  evidence_no_mention_multiplier: 0.2   # Score for evidence without mention
+
+# ============================================================================
+# Query Processing Thresholds
+# ============================================================================
+
+query_processing:
+  parallel_scoring_threshold: 128       # Minimum candidates to trigger parallel scoring
+  max_query_variants: 5                 # Maximum query variants to generate
+  min_token_length: 2                   # Minimum token length for query terms
+  plural_detection_min_length: 4        # Minimum length for plural detection
+  max_hydrate_docs: 3                   # Maximum documents to hydrate content
+  min_hydrate_content_length: 120       # Minimum content length for hydration
+  substantive_word_count: 40            # Minimum word count for substantive document
+
+# ============================================================================
+# Resolver Mode Thresholds
+# ============================================================================
+
+resolver_thresholds:
+  deterministic_temp_threshold: 0.4     # Temperature threshold for deterministic top_k=1
+  balanced_temp_threshold: 1.0          # Temperature threshold for balanced top_k=3
+  exploratory_temp_low: 0.7             # Temperature threshold for exploratory top_k=3
+  exploratory_temp_high: 1.25           # Temperature threshold for exploratory top_k=5
+  creative_floor_multiplier: 0.6        # Confidence floor multiplier for creative mode
+  min_confidence_floor_absolute: 0.10   # Minimum confidence floor
+
+# ============================================================================
+# Output Scoring Weights
+# ============================================================================
+
+output_scoring:
+  trust_score_multiplier: 10.0          # Trust score multiplier for sentence scoring
+  overlap_weight: 4.0                    # Overlap weight for sentence scoring
+  resolved_overlap_weight: 3.0           # Resolved overlap weight for sentence scoring
+  sentence_length_divisor: 80.0          # Sentence length divisor for scoring
+  default_center_position: 0.5           # Default center position for empty positions
+  proximity_bonus_floor: 0.05            # Proximity bonus floor
+  hub_bonus_non_hub: 0.85                # Hub bonus for non-hub nodes
+  hub_bonus_hub: 1.0                     # Hub bonus for hub nodes
+  utility_bonus_base: 0.5                # Utility bonus base
+  utility_bonus_multiplier: 0.5          # Utility bonus multiplier

@@ -255,29 +255,17 @@ static SEMANTIC_REGISTRY_CACHE: Lazy<Mutex<HashMap<String, SemanticAnchorRegistr
 /// Lightweight semantic hasher for text → 3D coordinate mapping.
 /// Uses trigram frequency hashing - no heavy NLP models.
 #[derive(Debug, Clone, Default)]
-pub struct SemanticHasher {
-    /// Pre-computed anchors for common domains
-    domain_anchors: HashMap<String, [f32; 3]>,
-}
+pub struct SemanticHasher;
 
 impl SemanticHasher {
     pub fn new() -> Self {
-        let mut domain_anchors = HashMap::new();
-
-        // Domain-specific semantic anchors
-        domain_anchors.insert("technology".to_string(), [0.7, 0.3, 0.5]);
-        domain_anchors.insert("finance".to_string(), [0.3, 0.7, 0.4]);
-        domain_anchors.insert("healthcare".to_string(), [0.4, 0.5, 0.8]);
-        domain_anchors.insert("research".to_string(), [0.6, 0.6, 0.6]);
-        domain_anchors.insert("operations".to_string(), [0.5, 0.4, 0.3]);
-        domain_anchors.insert("governance".to_string(), [0.2, 0.8, 0.6]);
-        domain_anchors.insert("marketing".to_string(), [0.8, 0.2, 0.4]);
-        domain_anchors.insert("analytics".to_string(), [0.55, 0.55, 0.55]);
-
-        Self { domain_anchors }
+        Self
     }
 
     /// Hash text to 3D coordinate (microseconds).
+    /// Uses trigram-frequency FNV hashing only - no heuristic domain detection.
+    /// Architecture §3.5 specifies: "deterministic 3D position from text using trigram-frequency FNV hashing
+    /// with domain anchor blending (80% hash / 20% anchor)" but does not specify keyword-based detection.
     pub fn hash(&self, text: &str) -> [f32; 3] {
         let trigram_freq = self.compute_trigram_frequencies(text);
 
@@ -285,18 +273,6 @@ impl SemanticHasher {
         let x = self.hash_dimension(&trigram_freq, 31);
         let y = self.hash_dimension(&trigram_freq, 37);
         let z = self.hash_dimension(&trigram_freq, 41);
-
-        // Apply domain anchor if detected
-        if let Some(domain) = self.detect_domain(text) {
-            if let Some(&anchor) = self.domain_anchors.get(&domain) {
-                // Blend with anchor (80% hash, 20% anchor)
-                return [
-                    x * 0.8 + anchor[0] * 0.2,
-                    y * 0.8 + anchor[1] * 0.2,
-                    z * 0.8 + anchor[2] * 0.2,
-                ];
-            }
-        }
 
         [x, y, z]
     }
@@ -344,110 +320,6 @@ impl SemanticHasher {
         }
 
         freq
-    }
-
-    fn detect_domain(&self, text: &str) -> Option<String> {
-        let lower = text.to_lowercase();
-
-        // Simple keyword-based domain detection
-        let domain_keywords = [
-            (
-                "technology",
-                vec![
-                    "software",
-                    "api",
-                    "code",
-                    "system",
-                    "data",
-                    "algorithm",
-                    "infrastructure",
-                ],
-            ),
-            (
-                "finance",
-                vec![
-                    "budget",
-                    "investment",
-                    "financial",
-                    "portfolio",
-                    "compliance",
-                    "audit",
-                ],
-            ),
-            (
-                "healthcare",
-                vec![
-                    "patient",
-                    "clinical",
-                    "medical",
-                    "health",
-                    "treatment",
-                    "diagnosis",
-                ],
-            ),
-            (
-                "research",
-                vec![
-                    "study",
-                    "analysis",
-                    "hypothesis",
-                    "methodology",
-                    "findings",
-                    "research",
-                ],
-            ),
-            (
-                "operations",
-                vec![
-                    "process",
-                    "workflow",
-                    "efficiency",
-                    "operations",
-                    "logistics",
-                ],
-            ),
-            (
-                "governance",
-                vec![
-                    "policy",
-                    "regulation",
-                    "compliance",
-                    "governance",
-                    "standards",
-                ],
-            ),
-            (
-                "marketing",
-                vec![
-                    "campaign",
-                    "brand",
-                    "customer",
-                    "market",
-                    "engagement",
-                    "conversion",
-                ],
-            ),
-            (
-                "analytics",
-                vec![
-                    "metrics",
-                    "kpi",
-                    "dashboard",
-                    "analytics",
-                    "reporting",
-                    "insights",
-                ],
-            ),
-        ];
-
-        for (domain, keywords) in domain_keywords {
-            let matches = keywords.iter().filter(|k| lower.contains(*k)).count();
-            if matches >= 2 {
-                return Some(domain.to_string());
-            }
-        }
-
-        None
     }
 }
 
@@ -687,140 +559,33 @@ fn compute_punct_vector(text: &str) -> [f32; 3] {
     ]
 }
 
-/// Compute urgency score from markers.
-fn compute_urgency(text: &str) -> f32 {
-    let lower = text.to_lowercase();
-    let urgency_markers = [
-        "urgent",
-        "asap",
-        "immediately",
-        "emergency",
-        "critical",
-        "deadline",
-        "overdue",
-        "priority",
-        "hurry",
-        "quickly",
-        "now",
-        "tonight",
-        "today",
-        "soon",
-        "fast",
-    ];
-
-    let matches = urgency_markers
-        .iter()
-        .filter(|m| lower.contains(*m))
-        .count();
-    (matches as f32 / 3.0).min(1.0)
+/// Compute urgency score.
+/// Architecture specifies this field exists but does not specify heuristic markers.
+/// Returns neutral value (0.0) - actual urgency should come from memory-backed pattern matching.
+fn compute_urgency(_text: &str) -> f32 {
+    0.0
 }
 
-/// Compute formality score from markers.
-fn compute_formality(text: &str) -> f32 {
-    let normalized = normalize_text(text);
-    let tokens = tokenize(&normalized);
-
-    // Formal markers
-    let formal_markers = [
-        "please",
-        "kindly",
-        "would you",
-        "may i",
-        "could you",
-        "sincerely",
-        "respectfully",
-        "dear",
-        "regards",
-        "formally",
-    ];
-
-    // Casual markers
-    let casual_markers = [
-        "hey",
-        "hi there",
-        "what's up",
-        "cool",
-        "awesome",
-        "thanks",
-        "cheers",
-        "lol",
-        "ok",
-        "yeah",
-    ];
-
-    let token_matches = |marker: &str| {
-        if marker.contains(' ') {
-            normalized.contains(marker)
-        } else {
-            tokens.iter().any(|token| *token == marker)
-        }
-    };
-
-    let formal_count = formal_markers
-        .iter()
-        .filter(|marker| token_matches(marker))
-        .count();
-    let casual_count = casual_markers
-        .iter()
-        .filter(|marker| token_matches(marker))
-        .count();
-
-    // Base formality at 0.5, adjust by markers
-    let score = 0.5 + (formal_count as f32 * 0.1) - (casual_count as f32 * 0.1);
-    score.clamp(0.0, 1.0)
+/// Compute formality score.
+/// Architecture specifies this field exists but does not specify heuristic markers.
+/// Returns neutral value (0.5) - actual formality should come from memory-backed pattern matching.
+/// ISSUE-RW1: Social-word detection is handled separately in ClassificationCalculator.
+fn compute_formality(_text: &str) -> f32 {
+    0.5
 }
 
 /// Compute technical domain score.
-fn compute_technical(text: &str) -> f32 {
-    let lower = text.to_lowercase();
-    let technical_markers = [
-        "api",
-        "code",
-        "function",
-        "algorithm",
-        "database",
-        "server",
-        "implementation",
-        "architecture",
-        "debug",
-        "error",
-        "exception",
-        "variable",
-        "method",
-        "class",
-        "interface",
-        "protocol",
-        "configuration",
-        "deployment",
-        "infrastructure",
-        "pipeline",
-    ];
-
-    let matches = technical_markers
-        .iter()
-        .filter(|m| lower.contains(*m))
-        .count();
-    (matches as f32 / 4.0).min(1.0)
+/// Architecture specifies this field exists but does not specify heuristic markers.
+/// Returns neutral value (0.0) - actual technical score should come from memory-backed pattern matching.
+fn compute_technical(_text: &str) -> f32 {
+    0.0
 }
 
 /// Compute domain hint score.
-fn compute_domain_hint(text: &str) -> f32 {
-    // Returns a normalized score based on domain-specific vocabulary density
-    let lower = text.to_lowercase();
-    let domain_markers = [
-        "domain",
-        "field",
-        "industry",
-        "sector",
-        "vertical",
-        "business",
-        "enterprise",
-        "organization",
-        "company",
-    ];
-
-    let matches = domain_markers.iter().filter(|m| lower.contains(*m)).count();
-    (matches as f32 / 3.0).min(1.0)
+/// Architecture specifies this field exists but does not specify heuristic markers.
+/// Returns neutral value (0.0) - actual domain hints should come from memory-backed pattern matching.
+fn compute_domain_hint(_text: &str) -> f32 {
+    0.0
 }
 
 /// Compute creative-task cue used to separate imperative-creative prompts
@@ -878,34 +643,10 @@ fn compute_creative_cue(text: &str) -> f32 {
 }
 
 /// Compute temporal cue score.
-fn compute_temporal_cue(text: &str) -> f32 {
-    let lower = text.to_lowercase();
-    let temporal_markers = [
-        "now",
-        "today",
-        "tomorrow",
-        "yesterday",
-        "week",
-        "month",
-        "year",
-        "quarter",
-        "annual",
-        "monthly",
-        "weekly",
-        "daily",
-        "schedule",
-        "deadline",
-        "due",
-        "when",
-        "time",
-        "date",
-    ];
-
-    let matches = temporal_markers
-        .iter()
-        .filter(|m| lower.contains(*m))
-        .count();
-    (matches as f32 / 3.0).min(1.0)
+/// Architecture specifies this field exists but does not specify heuristic markers.
+/// Returns neutral value (0.0) - actual temporal cues should come from memory-backed pattern matching.
+fn compute_temporal_cue(_text: &str) -> f32 {
+    0.0
 }
 
 // ============================================================================
