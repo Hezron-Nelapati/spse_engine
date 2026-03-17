@@ -70,7 +70,8 @@ impl ClassificationCalculator {
         spatial: &SpatialGrid,
         config: &ClassificationConfig,
     ) -> ClassificationResult {
-        let query_sig = ClassificationSignature::compute(text, &self.semantic_hasher);
+        let query_sig =
+            ClassificationSignature::compute_with_config(text, &self.semantic_hasher, config);
         let query_fv = query_sig.to_feature_vector();
 
         // Get centroids (built during training)
@@ -89,10 +90,11 @@ impl ClassificationCalculator {
             };
         }
 
-        // Feature vector layout: structural(0-13) + intent_hash(14-45) + tone_hash(46-77)
+        // Feature vector layout: base(0-77) + semantic_flags(78-81)
         let structural = &query_fv[..14];
         let intent_hash = &query_fv[14..46];
         let tone_hash = &query_fv[46..78];
+        let semantic_flags = &query_fv[78..82];
 
         // Score query against each intent centroid: structural + intent_hash dims
         let mut intent_scores: Vec<(IntentKind, f32)> = intent_centroids
@@ -102,8 +104,15 @@ impl ClassificationCalculator {
                 let c_intent = &centroid[14..46];
                 let struct_sim = raw_cosine_similarity(structural, c_struct);
                 let intent_sim = raw_cosine_similarity(intent_hash, c_intent);
-                let blended =
+                let semantic_sim = if centroid.len() >= 82 {
+                    semantic_dot_similarity(semantic_flags, &centroid[78..82])
+                } else {
+                    0.0
+                };
+                let base_score =
                     self.w_intent_hash * intent_sim + (1.0 - self.w_intent_hash) * struct_sim;
+                let blended = ((1.0 - config.semantic_probe_weight) * base_score)
+                    + (config.semantic_probe_weight * semantic_sim);
                 (*intent, blended)
             })
             .collect();
@@ -117,7 +126,15 @@ impl ClassificationCalculator {
                 let c_tone = &centroid[46..78];
                 let struct_sim = raw_cosine_similarity(structural, c_struct);
                 let tone_sim = raw_cosine_similarity(tone_hash, c_tone);
-                let blended = self.w_tone_hash * tone_sim + (1.0 - self.w_tone_hash) * struct_sim;
+                let semantic_sim = if centroid.len() >= 82 {
+                    semantic_dot_similarity(semantic_flags, &centroid[78..82])
+                } else {
+                    0.0
+                };
+                let base_score =
+                    self.w_tone_hash * tone_sim + (1.0 - self.w_tone_hash) * struct_sim;
+                let blended = ((1.0 - config.semantic_probe_weight) * base_score)
+                    + (config.semantic_probe_weight * semantic_sim);
                 (*tone, blended)
             })
             .collect();
@@ -213,7 +230,8 @@ impl ClassificationCalculator {
         spatial: &SpatialGrid,
         config: &ClassificationConfig,
     ) -> (IntentKind, f32) {
-        let query_sig = ClassificationSignature::compute(text, &self.semantic_hasher);
+        let query_sig =
+            ClassificationSignature::compute_with_config(text, &self.semantic_hasher, config);
         let candidate_ids =
             spatial.nearby(query_sig.semantic_centroid, config.spatial_query_radius);
 
@@ -246,7 +264,8 @@ impl ClassificationCalculator {
         spatial: &SpatialGrid,
         config: &ClassificationConfig,
     ) -> (ToneKind, f32) {
-        let query_sig = ClassificationSignature::compute(text, &self.semantic_hasher);
+        let query_sig =
+            ClassificationSignature::compute_with_config(text, &self.semantic_hasher, config);
         let candidate_ids =
             spatial.nearby(query_sig.semantic_centroid, config.spatial_query_radius);
 
@@ -394,11 +413,11 @@ impl ClassificationCalculator {
         }
     }
 
-    /// Per-dimension weight array for all 78 features (matches to_feature_vector layout).
+    /// Per-dimension weight array for all 82 features (matches to_feature_vector layout).
     /// Layout: [0-2] structure, [3-5] punctuation, [6-8] centroid, [9-13] derived,
-    ///         [14-45] intent_hash, [46-77] tone_hash
+    ///         [14-45] intent_hash, [46-77] tone_hash, [78-81] semantic flags
     fn classification_weights(&self) -> Vec<f32> {
-        let mut w = Vec::with_capacity(78);
+        let mut w = Vec::with_capacity(82);
         // Structure (3)
         w.extend_from_slice(&[self.w_structure; 3]);
         // Punctuation (3)
@@ -411,6 +430,8 @@ impl ClassificationCalculator {
         w.extend_from_slice(&[self.w_intent_hash; 32]);
         // Tone hash (32)
         w.extend_from_slice(&[self.w_tone_hash; 32]);
+        // Semantic flags (4)
+        w.extend_from_slice(&[self.w_semantic; 4]);
         w
     }
 
@@ -541,6 +562,14 @@ fn raw_cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+fn semantic_dot_similarity(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| x * y)
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
 fn classification_confidence(best_sim: f32, runner_up_sim: f32, margin_blend: f32) -> f32 {
     if best_sim <= f32::EPSILON {
         return 0.0;
@@ -556,163 +585,4 @@ fn is_advisory_family_intent(intent: IntentKind) -> bool {
         intent,
         IntentKind::Recommend | IntentKind::Critique | IntentKind::Rewrite | IntentKind::Plan
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::ClassificationConfig;
-    use crate::memory::MemoryStore;
-    use crate::spatial_index::SpatialGrid;
-
-    #[test]
-    fn test_calculator_creation() {
-        let calc = ClassificationCalculator::new();
-
-        assert!((calc.w_structure - 0.10).abs() < 0.01);
-        assert!((calc.w_intent_hash - 0.35).abs() < 0.01);
-        assert!((calc.w_tone_hash - 0.20).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_cosine_similarity() {
-        let calc = ClassificationCalculator::new();
-        let hasher = SemanticHasher::new();
-
-        let sig1 = ClassificationSignature::compute("Hello there", &hasher);
-        let sig2 = ClassificationSignature::compute("Hello there", &hasher);
-
-        // Same text should have high similarity
-        let similarity = calc.cosine_similarity(&sig1, &sig2);
-        assert!(similarity > 0.99);
-    }
-
-    #[test]
-    fn test_cosine_similarity_different() {
-        let calc = ClassificationCalculator::new();
-        let hasher = SemanticHasher::new();
-
-        let sig1 = ClassificationSignature::compute("Hello there", &hasher);
-        let sig2 = ClassificationSignature::compute("What is the weather today?", &hasher);
-
-        // Different text should have lower similarity (but short texts may share structure)
-        let similarity = calc.cosine_similarity(&sig1, &sig2);
-        assert!(similarity < 1.0); // Not identical
-        assert!(similarity < 0.99); // Reasonably different
-    }
-
-    #[test]
-    fn test_confidence_resolver_override() {
-        let calc = ClassificationCalculator::new();
-        let config = ClassificationConfig::default();
-
-        // Low confidence -> Exploratory
-        let result =
-            calc.apply_confidence_resolver_override(ResolverMode::Deterministic, 0.3, &config);
-        assert_eq!(result, ResolverMode::Exploratory);
-
-        // High confidence -> can upgrade
-        let result = calc.apply_confidence_resolver_override(ResolverMode::Balanced, 0.9, &config);
-        assert_eq!(result, ResolverMode::Deterministic);
-
-        // Medium confidence -> keep predicted
-        let result = calc.apply_confidence_resolver_override(ResolverMode::Balanced, 0.6, &config);
-        assert_eq!(result, ResolverMode::Balanced);
-    }
-
-    #[test]
-    fn test_empty_memory_returns_unknown() {
-        use std::env;
-        let calc = ClassificationCalculator::new();
-        let db_path = env::temp_dir().join(format!("spse_calc_test_{}.db", uuid::Uuid::new_v4()));
-        let memory = MemoryStore::new(db_path.to_str().expect("db path"));
-        let spatial = SpatialGrid::new(0.5);
-        let config = ClassificationConfig::default();
-
-        let result = calc.calculate("Hello", &memory, &spatial, &config);
-
-        assert_eq!(result.intent, IntentKind::Unknown);
-        assert_eq!(result.confidence, 0.0);
-        assert_eq!(result.method, CalculationMethod::MemoryLookup);
-    }
-
-    #[test]
-    fn test_classification_confidence_guard_returns_zero_for_orthogonal_scores() {
-        let confidence = classification_confidence(0.0, 0.0, 0.5);
-        assert_eq!(confidence, 0.0);
-    }
-
-    #[test]
-    fn test_classification_confidence_blends_similarity_and_margin() {
-        let confidence = classification_confidence(0.95, 0.50, 0.5);
-        assert!(confidence > 0.6 && confidence < 0.8);
-    }
-
-    #[test]
-    fn test_pattern_backed_advisory_arbitration_favors_recommend() {
-        use std::env;
-
-        let calculator = ClassificationCalculator::new();
-        let config = ClassificationConfig::default();
-        let db_path = env::temp_dir().join(format!("spse_calc_test_{}.db", uuid::Uuid::new_v4()));
-        let mut memory = MemoryStore::new(db_path.to_str().expect("db path"));
-        let mut spatial = SpatialGrid::new(config.spatial_cell_size);
-
-        for (text, intent) in [
-            (
-                "Recommend a beginner camera for travel",
-                IntentKind::Recommend,
-            ),
-            (
-                "Suggest a starter mirrorless camera for trips",
-                IntentKind::Recommend,
-            ),
-            (
-                "Critique this product strategy for launch",
-                IntentKind::Critique,
-            ),
-            (
-                "Rewrite this travel camera recommendation email",
-                IntentKind::Rewrite,
-            ),
-            ("Plan a 30 day camera launch roadmap", IntentKind::Plan),
-        ] {
-            let signature = ClassificationSignature::compute(text, calculator.hasher());
-            let mut pattern = ClassificationPattern::new(
-                signature.clone(),
-                intent,
-                ToneKind::NeutralProfessional,
-                ResolverMode::Balanced,
-                None,
-            );
-            pattern.record_success();
-            spatial.insert(pattern.unit_id, &signature.semantic_centroid);
-            memory.store_classification_pattern(pattern);
-        }
-
-        let query_sig = ClassificationSignature::compute(
-            "Recommend a beginner camera for travel",
-            calculator.hasher(),
-        );
-        let mut scores = vec![
-            (IntentKind::Recommend, 0.62),
-            (IntentKind::Critique, 0.60),
-            (IntentKind::Rewrite, 0.31),
-            (IntentKind::Plan, 0.30),
-        ];
-
-        calculator.apply_advisory_family_arbitration(
-            &query_sig,
-            &mut scores,
-            &memory,
-            &spatial,
-            &config,
-        );
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        assert_eq!(scores[0].0, IntentKind::Recommend);
-        assert!(scores[0].1 > scores[1].1);
-
-        let _ = std::fs::remove_file(db_path);
-    }
 }

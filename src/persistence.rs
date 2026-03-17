@@ -1,6 +1,5 @@
 use crate::types::{
-    CandidateStatus, MemoryChannel, MemoryType, SequenceState, TrainingJobStatus, Unit,
-    UnitCandidate, UnitLevel,
+    CandidateStatus, MemoryChannel, MemoryType, SequenceState, Unit, UnitCandidate, UnitLevel,
 };
 use rusqlite::{params, Connection, Result as SqlResult, Row};
 use serde::{Deserialize, Serialize};
@@ -32,8 +31,6 @@ pub struct Db {
     conn: Mutex<Connection>,
     snapshot_path: PathBuf,
     legacy_snapshot_path: PathBuf,
-    jobs_path: PathBuf,
-    jobs_dir: PathBuf,
 }
 
 impl Db {
@@ -210,8 +207,6 @@ impl Db {
             conn: Mutex::new(conn),
             snapshot_path: parent.join("memory_snapshot.msgpack"),
             legacy_snapshot_path: parent.join("memory_snapshot.json"),
-            jobs_path: parent.join("training_jobs.json"),
-            jobs_dir: parent.join("training_jobs"),
         })
     }
 
@@ -417,59 +412,6 @@ impl Db {
         let mut file = File::create(&self.snapshot_path)?;
         file.write_all(&bytes)?;
         Ok(self.snapshot_path.clone())
-    }
-
-    pub fn save_training_jobs(&self, jobs: &[TrainingJobStatus]) -> std::io::Result<PathBuf> {
-        // Write per-job status.json into training_jobs/<job_id>/
-        let _ = fs::create_dir_all(&self.jobs_dir);
-        for job in jobs {
-            let job_dir = self.jobs_dir.join(&job.job_id);
-            let _ = fs::create_dir_all(&job_dir);
-            let status_path = job_dir.join("status.json");
-            let tmp = status_path.with_extension("json.tmp");
-            let mut file = File::create(&tmp)?;
-            let json = serde_json::to_string_pretty(job).unwrap_or_else(|_| "{}".to_string());
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
-            fs::rename(&tmp, &status_path)?;
-        }
-        Ok(self.jobs_dir.clone())
-    }
-
-    pub fn load_training_jobs(&self) -> std::io::Result<Vec<TrainingJobStatus>> {
-        let mut jobs = Vec::new();
-
-        // Load from folder-based structure
-        if self.jobs_dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(&self.jobs_dir) {
-                for entry in entries.flatten() {
-                    let status_path = entry.path().join("status.json");
-                    if status_path.exists() {
-                        if let Ok(raw) = fs::read_to_string(&status_path) {
-                            if let Ok(job) = serde_json::from_str::<TrainingJobStatus>(&raw) {
-                                jobs.push(job);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Backward compat: also load from legacy training_jobs.json
-        if jobs.is_empty() && self.jobs_path.exists() {
-            if let Ok(raw) = fs::read_to_string(&self.jobs_path) {
-                if let Ok(legacy) = serde_json::from_str::<Vec<TrainingJobStatus>>(&raw) {
-                    jobs = legacy;
-                }
-            }
-        }
-
-        Ok(jobs)
-    }
-
-    /// Return the base directory (parent of db file) for training run logger.
-    pub fn base_dir(&self) -> &Path {
-        self.jobs_dir.parent().unwrap_or_else(|| Path::new("."))
     }
 
     pub fn snapshot_path(&self) -> PathBuf {
@@ -860,7 +802,12 @@ fn candidate_status_from_str(value: &str) -> CandidateStatus {
 
 impl Db {
     /// Save intent centroid to database
-    pub fn save_intent_centroid(&self, intent: &str, centroid: &[f32], example_count: u64) -> SqlResult<()> {
+    pub fn save_intent_centroid(
+        &self,
+        intent: &str,
+        centroid: &[f32],
+        example_count: u64,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let centroid_json = serde_json::to_string(centroid).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
@@ -874,7 +821,8 @@ impl Db {
     /// Load all intent centroids from database
     pub fn load_intent_centroids(&self) -> SqlResult<Vec<(String, Vec<f32>, u64)>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare("SELECT intent, centroid_json, example_count FROM intent_centroids")?;
+        let mut stmt =
+            conn.prepare("SELECT intent, centroid_json, example_count FROM intent_centroids")?;
         let rows = stmt.query_map([], |row| {
             let intent: String = row.get(0)?;
             let centroid_json: String = row.get(1)?;
@@ -886,13 +834,23 @@ impl Db {
     }
 
     /// Save tone centroid to database
-    pub fn save_tone_centroid(&self, tone: &str, centroid: &[f32], example_count: u64) -> SqlResult<()> {
+    pub fn save_tone_centroid(
+        &self,
+        tone: &str,
+        centroid: &[f32],
+        example_count: u64,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let centroid_json = serde_json::to_string(centroid).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
             "INSERT OR REPLACE INTO tone_centroids (tone, centroid_json, example_count, updated_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![tone, centroid_json, example_count as i64, chrono::Utc::now().to_rfc3339()],
+            params![
+                tone,
+                centroid_json,
+                example_count as i64,
+                chrono::Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -900,7 +858,8 @@ impl Db {
     /// Load all tone centroids from database
     pub fn load_tone_centroids(&self) -> SqlResult<Vec<(String, Vec<f32>, u64)>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare("SELECT tone, centroid_json, example_count FROM tone_centroids")?;
+        let mut stmt =
+            conn.prepare("SELECT tone, centroid_json, example_count FROM tone_centroids")?;
         let rows = stmt.query_map([], |row| {
             let tone: String = row.get(0)?;
             let centroid_json: String = row.get(1)?;
@@ -987,7 +946,11 @@ impl Db {
             "SELECT target_word, weight, traversal_count FROM word_graph_edges WHERE source_word = ?1 ORDER BY weight DESC"
         )?;
         let rows = stmt.query_map(params![source], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32, row.get::<_, i64>(2)? as u64))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)? as f32,
+                row.get::<_, i64>(2)? as u64,
+            ))
         })?;
         Ok(rows.filter_map(Result::ok).collect())
     }
@@ -995,12 +958,19 @@ impl Db {
     /// Get total edge count
     pub fn word_edge_count(&self) -> SqlResult<u64> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM word_graph_edges", [], |row| row.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM word_graph_edges", [], |row| {
+            row.get(0)
+        })?;
         Ok(count as u64)
     }
 
     /// Save highway to database
-    pub fn save_highway(&self, id: &str, sequence: &[String], traversal_count: u64) -> SqlResult<()> {
+    pub fn save_highway(
+        &self,
+        id: &str,
+        sequence: &[String],
+        traversal_count: u64,
+    ) -> SqlResult<()> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let sequence_json = serde_json::to_string(sequence).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
@@ -1014,7 +984,8 @@ impl Db {
     /// Load all highways
     pub fn load_highways(&self) -> SqlResult<Vec<(String, Vec<String>, u64)>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare("SELECT id, sequence_json, traversal_count FROM word_graph_highways")?;
+        let mut stmt =
+            conn.prepare("SELECT id, sequence_json, traversal_count FROM word_graph_highways")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let sequence_json: String = row.get(1)?;

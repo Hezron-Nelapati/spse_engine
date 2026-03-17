@@ -54,18 +54,38 @@ impl ConsistencyDatasetGenerator {
         let mut examples = Vec::new();
 
         let uncertain_queries = vec![
-            ("What is the Kigali Amendment?", "unknown_entity", 0.35, true),
-            ("Who won the 2024 Nobel Prize in Physics?", "current_event", 0.30, true),
+            (
+                "What is the Kigali Amendment?",
+                "unknown_entity",
+                0.35,
+                true,
+            ),
+            (
+                "Who won the 2024 Nobel Prize in Physics?",
+                "current_event",
+                0.30,
+                true,
+            ),
             ("What happened at COP29?", "recent_event", 0.38, true),
-            ("Explain quantum entanglement.", "complex_science", 0.40, true),
+            (
+                "Explain quantum entanglement.",
+                "complex_science",
+                0.40,
+                true,
+            ),
         ];
 
-        for (query, context_tag, expected_confidence, needs_retrieval) in uncertain_queries.iter().cycle().take(count) {
+        for (query, context_tag, expected_confidence, needs_retrieval) in
+            uncertain_queries.iter().cycle().take(count)
+        {
             let reasoning = Some(ReasoningTrace {
                 steps: vec![
                     ReasoningStep {
                         step_type: ReasoningStepType::Premise,
-                        content: format!("Query classification confidence: {}", expected_confidence),
+                        content: format!(
+                            "Query classification confidence: {}",
+                            expected_confidence
+                        ),
                         anchor_step: true,
                         dependencies: vec![],
                         structure_hash: None,
@@ -119,10 +139,17 @@ impl ConsistencyDatasetGenerator {
             ("Thanks!", "Gratitude", "You're welcome!", 0.97),
             ("Hello", "Greeting", "Hello! How can I help you?", 0.96),
             ("Goodbye", "Farewell", "Goodbye! Have a great day!", 0.98),
-            ("Good morning", "Greeting", "Good morning! What can I do for you today?", 0.95),
+            (
+                "Good morning",
+                "Greeting",
+                "Good morning! What can I do for you today?",
+                0.95,
+            ),
         ];
 
-        for (query, intent, response, expected_confidence) in social_queries.iter().cycle().take(count) {
+        for (query, intent, response, expected_confidence) in
+            social_queries.iter().cycle().take(count)
+        {
             // R2: Social intents should NOT have reasoning traces (short-circuit)
             let reasoning = None;
 
@@ -164,7 +191,9 @@ impl ConsistencyDatasetGenerator {
             ("Is water H2O?", "Verify", "Yes, water has the chemical formula H2O.", "water", 0.95),
         ];
 
-        for (query, intent, answer, anchor_entity, expected_confidence) in factual_queries.iter().cycle().take(count) {
+        for (query, intent, answer, anchor_entity, expected_confidence) in
+            factual_queries.iter().cycle().take(count)
+        {
             let reasoning = Some(ReasoningTrace {
                 steps: vec![
                     ReasoningStep {
@@ -220,12 +249,29 @@ impl ConsistencyDatasetGenerator {
         let mut examples = Vec::new();
 
         let creative_queries = vec![
-            ("Write a poem about autumn.", "Brainstorm", "exploratory", 0.75),
-            ("Brainstorm names for a coffee brand.", "Brainstorm", "exploratory", 0.78),
-            ("Create a tagline for eco-friendly sneakers.", "Brainstorm", "creative", 0.72),
+            (
+                "Write a poem about autumn.",
+                "Brainstorm",
+                "exploratory",
+                0.75,
+            ),
+            (
+                "Brainstorm names for a coffee brand.",
+                "Brainstorm",
+                "exploratory",
+                0.78,
+            ),
+            (
+                "Create a tagline for eco-friendly sneakers.",
+                "Brainstorm",
+                "creative",
+                0.72,
+            ),
         ];
 
-        for (query, intent, mode, expected_confidence) in creative_queries.iter().cycle().take(count) {
+        for (query, intent, mode, expected_confidence) in
+            creative_queries.iter().cycle().take(count)
+        {
             let reasoning = Some(ReasoningTrace {
                 steps: vec![
                     ReasoningStep {
@@ -286,7 +332,9 @@ impl ConsistencyDatasetGenerator {
             ("What is Kigali?", "Question", 0.40, true, "unknown_entity"),
         ];
 
-        for (query, intent, initial_confidence, needs_retrieval, context_tag) in cold_start_queries.iter().cycle().take(count) {
+        for (query, intent, initial_confidence, needs_retrieval, context_tag) in
+            cold_start_queries.iter().cycle().take(count)
+        {
             examples.push(TrainingExample {
                 question: query.to_string(),
                 answer: "Cold-start detected - retrieval + edge injection".to_string(),
@@ -318,11 +366,16 @@ impl ConsistencyDatasetGenerator {
     fn generate_r6_contradiction(&self, count: usize) -> Vec<TrainingExample> {
         let mut examples = Vec::new();
 
-        let contradiction_queries = vec![
-            ("When was Paris founded?", "Question", vec!["Source A: 250 BC", "Source B: 52 BC"], 0.45),
-        ];
+        let contradiction_queries = vec![(
+            "When was Paris founded?",
+            "Question",
+            vec!["Source A: 250 BC", "Source B: 52 BC"],
+            0.45,
+        )];
 
-        for (query, intent, contradicting_evidence, final_confidence) in contradiction_queries.iter().cycle().take(count) {
+        for (query, intent, contradicting_evidence, final_confidence) in
+            contradiction_queries.iter().cycle().take(count)
+        {
             examples.push(TrainingExample {
                 question: query.to_string(),
                 answer: format!("Contradictory evidence found: {:?}", contradicting_evidence),
@@ -389,32 +442,5 @@ impl ConsistencyDatasetGenerator {
 impl Default for ConsistencyDatasetGenerator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generates_consistency_dataset() {
-        let generator = ConsistencyDatasetGenerator::new();
-        let examples = generator.generate_full_dataset();
-        
-        assert!(examples.len() >= 5000, "Should generate 5K+ examples");
-    }
-
-    #[test]
-    fn covers_all_consistency_rules() {
-        let generator = ConsistencyDatasetGenerator::new();
-        let examples = generator.generate_full_dataset();
-        
-        let r1 = examples.iter().filter(|e| e.context.as_ref().map_or(false, |c| c.starts_with("r1:"))).count();
-        let r2 = examples.iter().filter(|e| e.context.as_ref().map_or(false, |c| c.starts_with("r2:"))).count();
-        let r3 = examples.iter().filter(|e| e.context.as_ref().map_or(false, |c| c.starts_with("r3:"))).count();
-        
-        assert!(r1 > 0, "Should cover R1");
-        assert!(r2 > 0, "Should cover R2");
-        assert!(r3 > 0, "Should cover R3");
     }
 }

@@ -4,8 +4,8 @@
 //! category. Acts as the gatekeeper that determines what the input means and
 //! whether external help is needed.
 //!
-//! Core Mechanism: Nearest Centroid Classifier using 78-float POS-based feature
-//! vectors with configurable feature weights.
+//! Core Mechanism: Nearest Centroid Classifier using 82-float POS-based feature
+//! vectors (78 base + 4 semantic probe flags) with configurable feature weights.
 
 pub mod builder;
 pub mod hierarchy;

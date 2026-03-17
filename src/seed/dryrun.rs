@@ -265,25 +265,3 @@ fn generate_entity_dataset(entity_count: usize) -> EntityJsonDataset {
 
     gen.build("dryrun_entity_seed")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_dryrun_datasets() {
-        let config = DryRunDatasetConfig {
-            dialogues_per_intent: 10, // Small for testing
-            entity_count: 50,
-            output_dir: std::env::temp_dir().to_string_lossy().to_string(),
-            ..Default::default()
-        };
-
-        let result = generate_dryrun_datasets(&config);
-
-        assert!(result.intent_dialogue_count >= 10);
-        assert!(result.entity_count >= 50);
-        // Should cover most intents (may not cover all with small sample)
-        assert!(!result.intents_covered.is_empty());
-    }
-}

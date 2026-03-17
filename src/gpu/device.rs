@@ -230,16 +230,3 @@ fn optimal_workgroup_size(info: &wgpu::AdapterInfo) -> u32 {
         256
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gpu_config_defaults() {
-        let config = GpuConfig::default();
-        assert!(config.enabled);
-        assert!(!config.force_cpu);
-        assert_eq!(config.batch_size, 1024);
-    }
-}

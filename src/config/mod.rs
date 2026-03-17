@@ -103,6 +103,10 @@ pub struct TrustConfig {
     pub require_https: bool,
     #[serde(default = "default_allowlist_domains")]
     pub allowlist_domains: Vec<String>,
+    #[serde(default = "default_unsafe_pattern_penalty")]
+    pub unsafe_pattern_penalty: f32,
+    #[serde(default = "default_unsafe_patterns")]
+    pub unsafe_patterns: Vec<String>,
     #[serde(default)]
     pub format_trust_adjustments: BTreeMap<String, f32>,
     #[serde(default)]
@@ -125,6 +129,8 @@ impl Default for TrustConfig {
             min_corroborating_sources: default_min_corroborating_sources(),
             require_https: default_require_https(),
             allowlist_domains: default_allowlist_domains(),
+            unsafe_pattern_penalty: default_unsafe_pattern_penalty(),
+            unsafe_patterns: default_unsafe_patterns(),
             format_trust_adjustments: default_format_trust_adjustments(),
             content_quality_thresholds: ContentQualityThresholds::default(),
             promotion_rules: PromotionRules::default(),
@@ -171,12 +177,27 @@ fn default_allowlist_domains() -> Vec<String> {
     ]
 }
 
+fn default_unsafe_pattern_penalty() -> f32 {
+    0.12
+}
+
+fn default_unsafe_patterns() -> Vec<String> {
+    vec![
+        "ignore previous instructions".to_string(),
+        "act as".to_string(),
+        "<script".to_string(),
+        "buy now".to_string(),
+        "sponsored".to_string(),
+    ]
+}
+
 fn default_format_trust_adjustments() -> BTreeMap<String, f32> {
     BTreeMap::from([
         ("html_raw".to_string(), -0.30),
         ("qa_json_schema_keys".to_string(), -0.40),
         ("structured_entity".to_string(), 0.20),
         ("code_syntax".to_string(), -0.10),
+        ("plain_text".to_string(), 0.0),
     ])
 }
 
@@ -280,6 +301,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.20,
                     beam_width: 7,
+                    max_steps: 100,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.70,
@@ -304,6 +326,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.10,
                     beam_width: 5,
+                    max_steps: 200,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.30,
@@ -328,6 +351,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.05,
                     beam_width: 3,
+                    max_steps: 50,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.10,
@@ -352,6 +376,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.08,
                     beam_width: 4,
+                    max_steps: 150,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.22,
@@ -376,6 +401,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.22,
                     beam_width: 6,
+                    max_steps: 200,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.75,
@@ -405,6 +431,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.35,
                     beam_width: 10,
+                    max_steps: 300,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.90,
@@ -434,6 +461,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.12,
                     beam_width: 5,
+                    max_steps: 200,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.35,
@@ -463,6 +491,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.08,
                     beam_width: 4,
+                    max_steps: 100,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.25,
@@ -492,6 +521,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.10,
                     beam_width: 5,
+                    max_steps: 150,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.30,
@@ -521,6 +551,7 @@ impl Default for AdaptiveBehaviorConfig {
                 escape: EscapeProfile {
                     stochastic_jump_prob: 0.09,
                     beam_width: 4,
+                    max_steps: 150,
                 },
                 resolver: AdaptiveResolverProfile {
                     selection_temperature: 0.26,
@@ -913,6 +944,7 @@ impl Default for IntentAdaptiveProfile {
 pub struct EscapeProfile {
     pub stochastic_jump_prob: f32,
     pub beam_width: usize,
+    pub max_steps: usize,
 }
 
 impl Default for EscapeProfile {
@@ -920,6 +952,7 @@ impl Default for EscapeProfile {
         Self {
             stochastic_jump_prob: 0.0,
             beam_width: 5,
+            max_steps: 150,
         }
     }
 }
@@ -1596,6 +1629,12 @@ pub struct UnitBuilderConfig {
     pub phrase_entity_promotion_frequency: u64,
     pub phrase_entity_promotion_salience: f32,
     pub phrase_entity_promotion_confidence: f32,
+    /// Utility threshold used during training-mode discovery
+    pub training_min_utility_threshold: f32,
+    /// Utility threshold floor used during live inference discovery
+    pub inference_min_utility_threshold: f32,
+    /// Governance-derived inference utility threshold scale
+    pub inference_utility_threshold_scale: f32,
     /// Number of JSONL lines to parse+build in parallel per training batch
     pub training_batch_size: Option<u32>,
 }
@@ -1637,6 +1676,9 @@ impl Default for UnitBuilderConfig {
             phrase_entity_promotion_frequency: 4,
             phrase_entity_promotion_salience: 0.70,
             phrase_entity_promotion_confidence: 0.55,
+            training_min_utility_threshold: 0.06,
+            inference_min_utility_threshold: 0.08,
+            inference_utility_threshold_scale: 0.90,
             training_batch_size: Some(500),
         }
     }
@@ -1656,6 +1698,17 @@ pub struct SemanticMapConfig {
     pub max_layout_units: usize,
     pub spatial_cell_size: f32,
     pub neighbor_radius: f32,
+    pub tier1_confidence_threshold: f32,
+    pub tier2_confidence_threshold: f32,
+    pub distance_decay: f32,
+    pub minimum_edge_weight: f32,
+    pub pathfind_max_hops: usize,
+    pub pathfind_max_explored_nodes: usize,
+    pub hub_link_threshold: usize,
+    pub highway_formation_threshold: u32,
+    pub highway_min_frequency: u32,
+    pub highway_max_length: usize,
+    pub highway_confidence_boost: f32,
 }
 
 impl Default for SemanticMapConfig {
@@ -1672,6 +1725,17 @@ impl Default for SemanticMapConfig {
             max_layout_units: 256,
             spatial_cell_size: 4.0,
             neighbor_radius: 6.0,
+            tier1_confidence_threshold: 0.60,
+            tier2_confidence_threshold: 0.30,
+            distance_decay: 0.85,
+            minimum_edge_weight: 0.05,
+            pathfind_max_hops: 4,
+            pathfind_max_explored_nodes: 500,
+            hub_link_threshold: 16,
+            highway_formation_threshold: 5,
+            highway_min_frequency: 3,
+            highway_max_length: 7,
+            highway_confidence_boost: 0.15,
         }
     }
 }
@@ -1868,6 +1932,16 @@ pub struct ClassificationConfig {
     pub training_target_accuracy: f32,
     /// Maximum training iterations
     pub training_max_iterations: usize,
+    /// Minimum repeated observations before common-noun compounds are merged at L1
+    pub compound_noun_min_frequency: u32,
+    /// Separate weight applied to the four semantic probe flags in centroid comparisons
+    pub semantic_probe_weight: f32,
+    /// Fuzzy distance threshold used when matching semantic anchors
+    pub anchor_fuzzy_threshold: f32,
+    /// Maximum number of semantic anchors loaded from the registry
+    pub semantic_anchor_count: usize,
+    /// Bundled semantic anchor registry path
+    pub semantic_anchor_path: String,
     /// Advisory-family arbitration knobs for Recommend/Critique/Rewrite/Plan collisions
     pub recommendation_sharpening: RecommendationSharpeningConfig,
 }
@@ -1891,6 +1965,11 @@ impl Default for ClassificationConfig {
             top_k_candidates: 32,
             training_target_accuracy: 0.85,
             training_max_iterations: 10,
+            compound_noun_min_frequency: 3,
+            semantic_probe_weight: 0.15,
+            anchor_fuzzy_threshold: 0.25,
+            semantic_anchor_count: 500,
+            semantic_anchor_path: "config/semantic_anchors.yaml".to_string(),
             recommendation_sharpening: RecommendationSharpeningConfig::default(),
         }
     }
@@ -2384,6 +2463,58 @@ impl EngineConfig {
             5.0,
         )?;
         validate_range(
+            "layer_5_semantic_map.tier1_confidence_threshold",
+            self.semantic_map.tier1_confidence_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_5_semantic_map.tier2_confidence_threshold",
+            self.semantic_map.tier2_confidence_threshold,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_5_semantic_map.distance_decay",
+            self.semantic_map.distance_decay,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_5_semantic_map.minimum_edge_weight",
+            self.semantic_map.minimum_edge_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "layer_5_semantic_map.highway_confidence_boost",
+            self.semantic_map.highway_confidence_boost,
+            0.0,
+            1.0,
+        )?;
+        if self.semantic_map.pathfind_max_hops == 0 {
+            return Err("layer_5_semantic_map.pathfind_max_hops must be >= 1".to_string());
+        }
+        if self.semantic_map.pathfind_max_explored_nodes == 0 {
+            return Err(
+                "layer_5_semantic_map.pathfind_max_explored_nodes must be >= 1".to_string(),
+            );
+        }
+        if self.semantic_map.hub_link_threshold == 0 {
+            return Err("layer_5_semantic_map.hub_link_threshold must be >= 1".to_string());
+        }
+        if self.semantic_map.highway_formation_threshold == 0 {
+            return Err(
+                "layer_5_semantic_map.highway_formation_threshold must be >= 1".to_string(),
+            );
+        }
+        if self.semantic_map.highway_min_frequency == 0 {
+            return Err("layer_5_semantic_map.highway_min_frequency must be >= 1".to_string());
+        }
+        if self.semantic_map.highway_max_length < 2 {
+            return Err("layer_5_semantic_map.highway_max_length must be >= 2".to_string());
+        }
+        validate_range(
             "layer_21_memory_governance.daily_growth_limit_mb",
             self.governance.daily_growth_limit_mb,
             0.1,
@@ -2478,6 +2609,11 @@ impl EngineConfig {
             if profile.escape.beam_width == 0 {
                 return Err(format!(
                     "adaptive_behavior.intent_profiles.{profile_name}.escape.beam_width must be >= 1"
+                ));
+            }
+            if profile.escape.max_steps == 0 {
+                return Err(format!(
+                    "adaptive_behavior.intent_profiles.{profile_name}.escape.max_steps must be >= 1"
                 ));
             }
             validate_range(

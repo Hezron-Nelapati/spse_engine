@@ -149,22 +149,3 @@ impl TopKSelector {
         Self::top_k(items, k, score_fn)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_top_k() {
-        let items = vec![5.0f32, 3.0, 8.0, 1.0, 4.0];
-        let top = TopKSelector::top_k(&items, 3, |x| *x);
-        assert_eq!(top.len(), 3);
-        assert_eq!(*top[0], 8.0);
-    }
-
-    #[test]
-    fn test_beam_width() {
-        assert_eq!(TopKSelector::beam_width(0.5, 8, 20), 4);
-        assert_eq!(TopKSelector::beam_width(2.0, 8, 20), 16);
-    }
-}

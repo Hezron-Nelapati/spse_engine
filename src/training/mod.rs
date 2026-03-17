@@ -4,12 +4,12 @@
 //! with its own loss function, data pipeline, and optimization loop.
 
 pub mod consistency;
-mod pipeline;
 mod system_training;
 
 pub use consistency::{
-    apply_consistency_corrections, run_consistency_check, ConsistencyCorrection,
-    ConsistencyReport, ConsistencyRule,
+    apply_consistency_corrections, run_consistency_check, ConsistencyCorrection, ConsistencyReport,
+    ConsistencyRule,
 };
-pub use pipeline::*;
-pub use system_training::{train_classification, train_predictive, train_reasoning};
+pub use system_training::{
+    train_classification, train_full_pipeline, train_predictive, train_reasoning,
+};

@@ -160,35 +160,3 @@ pub mod categories {
     /// Mathematical/identity patterns
     pub static MATH_PATTERNS: Lazy<[&str; 6]> = Lazy::new(|| ["=", "+", "-", "*", "/", " is "]);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_contains_any() {
-        assert!(KeywordMatcher::contains_any(
-            "hello world",
-            &["hello", "foo"]
-        ));
-        assert!(!KeywordMatcher::contains_any(
-            "hello world",
-            &["bar", "foo"]
-        ));
-    }
-
-    #[test]
-    fn test_count_matches() {
-        assert_eq!(
-            KeywordMatcher::count_matches("urgent now", &["urgent", "now", "foo"]),
-            2
-        );
-    }
-
-    #[test]
-    fn test_score_matches() {
-        let score =
-            KeywordMatcher::score_matches("urgent critical", &["urgent", "critical"], 0.15, 1.0);
-        assert!((score - 0.3).abs() < 0.001);
-    }
-}

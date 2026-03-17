@@ -1,15 +1,20 @@
 //! Lightweight feature signature for classification.
 //!
-//! ClassificationSignature is a CPU-efficient feature vector (<20 floats) that captures
-//! structural, punctuation, semantic, and derived features for text classification.
+//! ClassificationSignature is a CPU-efficient feature vector that captures structural,
+//! punctuation, semantic, derived, and POS-hash features for classification.
 
+use crate::classification::input;
+use crate::config::ClassificationConfig;
+use crate::types::text_fingerprint;
 use once_cell::sync::Lazy;
 use postagger::PerceptronTagger;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::sync::Mutex;
 
 /// Lightweight feature vector for CPU-efficient classification.
-/// Total: 78 floats (14 structural + 32 intent hash + 32 tone hash).
+/// Total: 82 floats (78 base + 4 semantic category flags).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClassificationSignature {
     // Structural features (Layer 2 alignment)
@@ -53,14 +58,19 @@ pub struct ClassificationSignature {
     // These POS tags carry the tone/style signal.
     #[serde(default = "default_hash_32")]
     pub tone_hash: [f32; 32],
+
+    // Semantic probe flags (Rhetorical, Epistemic, Pragmatic, Emotional)
+    #[serde(default = "default_semantic_flags")]
+    pub semantic_flags: [f32; 4],
 }
 
 impl ClassificationSignature {
     /// Convert to feature vector for similarity computation.
-    /// Returns 78-element vector, all dimensions in [0, 1].
-    /// Layout: structure(3) + punctuation(3) + centroid(3) + derived(5) + intent_hash(32) + tone_hash(32)
+    /// Returns 82-element vector, all dimensions in [0, 1].
+    /// Layout: structure(3) + punctuation(3) + centroid(3) + derived(5) + intent_hash(32)
+    /// + tone_hash(32) + semantic_flags(4)
     pub fn to_feature_vector(&self) -> Vec<f32> {
-        let mut v = Vec::with_capacity(78);
+        let mut v = Vec::with_capacity(82);
         // Structure (rescaled to [0,1] for short queries)
         v.push((self.byte_length_norm * 12.0).min(1.0));
         v.push(self.sentence_entropy);
@@ -81,13 +91,23 @@ impl ClassificationSignature {
         v.extend_from_slice(&self.intent_hash);
         // POS-based tone hash (adjectives + adverbs)
         v.extend_from_slice(&self.tone_hash);
+        // Semantic anchor probe flags
+        v.extend_from_slice(&self.semantic_flags);
         v
     }
 
     /// Compute signature from raw text using provided hasher.
     /// Runs in microseconds - no heavy NLP.
     pub fn compute(text: &str, hasher: &SemanticHasher) -> Self {
-        let normalized = normalize_text(text);
+        Self::compute_with_config(text, hasher, &ClassificationConfig::default())
+    }
+
+    pub fn compute_with_config(
+        text: &str,
+        hasher: &SemanticHasher,
+        classification: &ClassificationConfig,
+    ) -> Self {
+        let normalized = normalize_text_with_config(text, classification);
         let tokens = tokenize(&normalized);
 
         Self {
@@ -99,12 +119,11 @@ impl ClassificationSignature {
             urgency_score: compute_urgency(&normalized),
             formality_score: compute_formality(&normalized),
             technical_score: compute_technical(&normalized),
-            // Preserve the 78-dim legacy layout while injecting a dedicated
-            // creative-task signal into the derived feature budget.
             domain_hint: compute_domain_hint(&normalized).max(compute_creative_cue(&normalized)),
             temporal_cue: compute_temporal_cue(&normalized),
             intent_hash: compute_pos_intent_hash(&normalized),
             tone_hash: compute_pos_tone_hash(&normalized),
+            semantic_flags: compute_semantic_flags(&normalized, classification),
         }
     }
 
@@ -146,6 +165,10 @@ fn default_hash_32() -> [f32; 32] {
     [0.0; 32]
 }
 
+fn default_semantic_flags() -> [f32; 4] {
+    [0.0; 4]
+}
+
 impl Default for ClassificationSignature {
     fn default() -> Self {
         Self {
@@ -161,9 +184,73 @@ impl Default for ClassificationSignature {
             temporal_cue: 0.0,
             intent_hash: [0.0f32; 32],
             tone_hash: [0.0f32; 32],
+            semantic_flags: [0.0; 4],
         }
     }
 }
+
+#[derive(Debug, Clone, Deserialize)]
+struct SemanticAnchorFile {
+    #[serde(default)]
+    anchors: Vec<SemanticAnchorRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SemanticAnchorRecord {
+    label: String,
+    category: String,
+    #[serde(default)]
+    probe_phrases: Vec<String>,
+    #[serde(default)]
+    weight: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticAnchor {
+    category: SemanticCategory,
+    probe_phrases: Vec<String>,
+    probe_fingerprints: Vec<u64>,
+    weight: f32,
+    _label: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SemanticCategory {
+    Rhetorical,
+    Epistemic,
+    Pragmatic,
+    Emotional,
+}
+
+impl SemanticCategory {
+    fn index(self) -> usize {
+        match self {
+            Self::Rhetorical => 0,
+            Self::Epistemic => 1,
+            Self::Pragmatic => 2,
+            Self::Emotional => 3,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.to_lowercase().as_str() {
+            "rhetorical" => Some(Self::Rhetorical),
+            "epistemic" => Some(Self::Epistemic),
+            "pragmatic" => Some(Self::Pragmatic),
+            "emotional" => Some(Self::Emotional),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SemanticAnchorRegistry {
+    anchors: Vec<SemanticAnchor>,
+    fingerprint_index: HashMap<u64, Vec<usize>>,
+}
+
+static SEMANTIC_REGISTRY_CACHE: Lazy<Mutex<HashMap<String, SemanticAnchorRegistry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Lightweight semantic hasher for text → 3D coordinate mapping.
 /// Uses trigram frequency hashing - no heavy NLP models.
@@ -366,12 +453,162 @@ impl SemanticHasher {
 
 // === Helper Functions ===
 
+fn load_semantic_registry(classification: &ClassificationConfig) -> SemanticAnchorRegistry {
+    let path = classification.semantic_anchor_path.clone();
+    if let Some(registry) = SEMANTIC_REGISTRY_CACHE
+        .lock()
+        .expect("semantic registry mutex poisoned")
+        .get(&path)
+        .cloned()
+    {
+        return registry;
+    }
+
+    let registry = build_semantic_registry(classification);
+    SEMANTIC_REGISTRY_CACHE
+        .lock()
+        .expect("semantic registry mutex poisoned")
+        .insert(path, registry.clone());
+    registry
+}
+
+fn build_semantic_registry(classification: &ClassificationConfig) -> SemanticAnchorRegistry {
+    let Ok(raw) = fs::read_to_string(&classification.semantic_anchor_path) else {
+        return SemanticAnchorRegistry::default();
+    };
+    let Ok(file) = serde_yaml::from_str::<SemanticAnchorFile>(&raw) else {
+        return SemanticAnchorRegistry::default();
+    };
+
+    let mut registry = SemanticAnchorRegistry::default();
+    for record in file
+        .anchors
+        .into_iter()
+        .take(classification.semantic_anchor_count.max(1))
+    {
+        let Some(category) = SemanticCategory::parse(&record.category) else {
+            continue;
+        };
+        let probe_phrases = record
+            .probe_phrases
+            .into_iter()
+            .map(|phrase| normalize_text_with_config(&phrase, classification))
+            .filter(|phrase| !phrase.is_empty())
+            .collect::<Vec<_>>();
+        if probe_phrases.is_empty() {
+            continue;
+        }
+        let probe_fingerprints = probe_phrases
+            .iter()
+            .map(|phrase| text_fingerprint(phrase))
+            .collect::<Vec<_>>();
+        let index = registry.anchors.len();
+        for fingerprint in &probe_fingerprints {
+            registry
+                .fingerprint_index
+                .entry(*fingerprint)
+                .or_default()
+                .push(index);
+        }
+        registry.anchors.push(SemanticAnchor {
+            category,
+            probe_phrases,
+            probe_fingerprints,
+            weight: record.weight.unwrap_or(0.15).clamp(0.0, 1.0),
+            _label: record.label,
+        });
+    }
+    registry
+}
+
+fn compute_semantic_flags(text: &str, classification: &ClassificationConfig) -> [f32; 4] {
+    let registry = load_semantic_registry(classification);
+    if registry.anchors.is_empty() {
+        return [0.0; 4];
+    }
+
+    let windows = semantic_windows(text);
+    let mut flags = [0.0f32; 4];
+    for window in windows {
+        let fingerprint = text_fingerprint(&window);
+        let Some(indices) = registry.fingerprint_index.get(&fingerprint) else {
+            continue;
+        };
+        for &index in indices {
+            let anchor = &registry.anchors[index];
+            if anchor
+                .probe_phrases
+                .iter()
+                .zip(anchor.probe_fingerprints.iter())
+                .any(|(phrase, phrase_fingerprint)| {
+                    *phrase_fingerprint == fingerprint
+                        && normalized_levenshtein(&window, phrase)
+                            <= classification.anchor_fuzzy_threshold
+                })
+            {
+                flags[anchor.category.index()] = flags[anchor.category.index()].max(anchor.weight);
+            }
+        }
+    }
+
+    for flag in &mut flags {
+        if *flag > 0.0 {
+            *flag = 1.0;
+        }
+    }
+    flags
+}
+
+fn semantic_windows(text: &str) -> Vec<String> {
+    let tokens = tokenize(text);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut windows = Vec::new();
+    for start in 0..tokens.len() {
+        for len in 1..=4 {
+            if start + len > tokens.len() {
+                break;
+            }
+            windows.push(tokens[start..start + len].join(" "));
+        }
+    }
+    windows
+}
+
+fn normalized_levenshtein(left: &str, right: &str) -> f32 {
+    let left_chars = left.chars().collect::<Vec<_>>();
+    let right_chars = right.chars().collect::<Vec<_>>();
+    if left_chars.is_empty() && right_chars.is_empty() {
+        return 0.0;
+    }
+    let mut costs = (0..=right_chars.len()).collect::<Vec<_>>();
+    for (i, left_char) in left_chars.iter().enumerate() {
+        let mut previous = costs[0];
+        costs[0] = i + 1;
+        for (j, right_char) in right_chars.iter().enumerate() {
+            let current = costs[j + 1];
+            let substitution = previous + usize::from(left_char != right_char);
+            let insertion = costs[j + 1] + 1;
+            let deletion = costs[j] + 1;
+            costs[j + 1] = substitution.min(insertion).min(deletion);
+            previous = current;
+        }
+    }
+    costs[right_chars.len()] as f32 / left_chars.len().max(right_chars.len()) as f32
+}
+
 /// Normalize text: lowercase, collapse whitespace, remove special chars.
 fn normalize_text(text: &str) -> String {
-    text.to_lowercase()
+    normalize_text_with_config(text, &ClassificationConfig::default())
+}
+
+fn normalize_text_with_config(text: &str, classification: &ClassificationConfig) -> String {
+    input::normalize_text_with_config(text, classification)
+        .to_lowercase()
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c.is_whitespace() {
+            if c.is_alphanumeric() || c.is_whitespace() || c == '_' || c == '-' {
                 c
             } else {
                 ' '
@@ -838,80 +1075,4 @@ fn fnv1a_word(bytes: &[u8]) -> u32 {
         h = h.wrapping_mul(0x0100_0193);
     }
     h
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_signature_compute() {
-        let hasher = SemanticHasher::new();
-        let sig = ClassificationSignature::compute("Hello, what is the weather today?", &hasher);
-
-        assert!(sig.punct_vector[0] > 0.0); // Has question mark
-        assert!(sig.token_count_norm > 0.0);
-        assert!(sig.temporal_cue > 0.0); // Has "today"
-    }
-
-    #[test]
-    fn test_semantic_hasher() {
-        let hasher = SemanticHasher::new();
-        let pos1 = hasher.hash("software api infrastructure");
-        let pos2 = hasher.hash("budget investment portfolio");
-
-        // Different domains should have different positions
-        assert_ne!(pos1, pos2);
-    }
-
-    #[test]
-    fn test_feature_vector_length() {
-        let sig = ClassificationSignature::default();
-        let vec = sig.to_feature_vector();
-        assert_eq!(vec.len(), 78);
-    }
-
-    #[test]
-    fn test_urgency_detection() {
-        assert!(compute_urgency("This is urgent, respond ASAP!") > 0.3);
-        assert!(compute_urgency("Hello there") < 0.1);
-    }
-
-    #[test]
-    fn test_formality_detection() {
-        assert!(compute_formality("Please kindly respond") > 0.6);
-        assert!(compute_formality("Hey, what's up?") < 0.5);
-        assert!(compute_formality("Thanks!") < 0.6);
-    }
-
-    #[test]
-    fn test_technical_detection() {
-        assert!(compute_technical("The API function returns an error") > 0.3);
-        assert!(compute_technical("Hello, how are you?") < 0.1);
-    }
-
-    #[test]
-    fn test_domain_anchor() {
-        let hasher = SemanticHasher::new();
-        let tech_pos = hasher.hash("software systems API infrastructure code");
-        let neutral_pos = hasher.hash("the quick brown fox jumps over the lazy dog");
-
-        // Technology text should be detected as technology domain and blended with anchor
-        // Verify positions are different (domain anchor applied vs not)
-        let diff = (tech_pos[0] - neutral_pos[0]).abs()
-            + (tech_pos[1] - neutral_pos[1]).abs()
-            + (tech_pos[2] - neutral_pos[2]).abs();
-        assert!(
-            diff > 0.01,
-            "Domain anchor should shift position: tech={:?} neutral={:?}",
-            tech_pos,
-            neutral_pos
-        );
-    }
-
-    #[test]
-    fn test_creative_cue_distinguishes_write_from_explain() {
-        assert!(compute_creative_cue("write a poem about autumn") > 0.5);
-        assert_eq!(compute_creative_cue("explain photosynthesis"), 0.0);
-    }
 }

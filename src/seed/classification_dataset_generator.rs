@@ -19,52 +19,144 @@ impl ClassificationDatasetGenerator {
     /// Uses intent-specific templates for diverse coverage
     pub fn generate_full_dataset(&self) -> Vec<TrainingExample> {
         let mut examples = Vec::with_capacity(110000);
-        
+
         // Generate examples for each intent kind
         let intents = [
-            (IntentKind::Question, QUESTION_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Explain, EXPLAIN_TEMPLATES, ResolverMode::Balanced),
-            (IntentKind::Compare, COMPARE_TEMPLATES, ResolverMode::Balanced),
-            (IntentKind::Analyze, ANALYZE_TEMPLATES, ResolverMode::Balanced),
+            (
+                IntentKind::Question,
+                QUESTION_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Explain,
+                EXPLAIN_TEMPLATES,
+                ResolverMode::Balanced,
+            ),
+            (
+                IntentKind::Compare,
+                COMPARE_TEMPLATES,
+                ResolverMode::Balanced,
+            ),
+            (
+                IntentKind::Analyze,
+                ANALYZE_TEMPLATES,
+                ResolverMode::Balanced,
+            ),
             (IntentKind::Plan, PLAN_TEMPLATES, ResolverMode::Balanced),
             (IntentKind::Debug, DEBUG_TEMPLATES, ResolverMode::Balanced),
-            (IntentKind::Verify, VERIFY_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Summarize, SUMMARIZE_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Classify, CLASSIFY_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Recommend, RECOMMEND_TEMPLATES, ResolverMode::Balanced),
-            (IntentKind::Extract, EXTRACT_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Critique, CRITIQUE_TEMPLATES, ResolverMode::Exploratory),
-            (IntentKind::Brainstorm, BRAINSTORM_TEMPLATES, ResolverMode::Exploratory),
+            (
+                IntentKind::Verify,
+                VERIFY_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Summarize,
+                SUMMARIZE_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Classify,
+                CLASSIFY_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Recommend,
+                RECOMMEND_TEMPLATES,
+                ResolverMode::Balanced,
+            ),
+            (
+                IntentKind::Extract,
+                EXTRACT_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Critique,
+                CRITIQUE_TEMPLATES,
+                ResolverMode::Exploratory,
+            ),
+            (
+                IntentKind::Brainstorm,
+                BRAINSTORM_TEMPLATES,
+                ResolverMode::Exploratory,
+            ),
             (IntentKind::Help, HELP_TEMPLATES, ResolverMode::Balanced),
-            (IntentKind::Greeting, GREETING_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Farewell, FAREWELL_TEMPLATES, ResolverMode::Deterministic),
-            (IntentKind::Gratitude, GRATITUDE_TEMPLATES, ResolverMode::Deterministic),
+            (
+                IntentKind::Greeting,
+                GREETING_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Farewell,
+                FAREWELL_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
+            (
+                IntentKind::Gratitude,
+                GRATITUDE_TEMPLATES,
+                ResolverMode::Deterministic,
+            ),
         ];
-        
-        let domains = ["science", "technology", "business", "healthcare", "education", 
-                       "finance", "engineering", "mathematics", "history", "arts",
-                       "physics", "chemistry", "biology", "computing", "economics",
-                       "psychology", "sociology", "philosophy", "literature", "music"];
-        let topics = ["algorithms", "processes", "systems", "methods", "concepts",
-                      "principles", "frameworks", "models", "theories", "techniques",
-                      "strategies", "patterns", "architectures", "implementations", "solutions",
-                      "approaches", "paradigms", "mechanisms", "protocols", "standards"];
-        
+
+        let domains = [
+            "science",
+            "technology",
+            "business",
+            "healthcare",
+            "education",
+            "finance",
+            "engineering",
+            "mathematics",
+            "history",
+            "arts",
+            "physics",
+            "chemistry",
+            "biology",
+            "computing",
+            "economics",
+            "psychology",
+            "sociology",
+            "philosophy",
+            "literature",
+            "music",
+        ];
+        let topics = [
+            "algorithms",
+            "processes",
+            "systems",
+            "methods",
+            "concepts",
+            "principles",
+            "frameworks",
+            "models",
+            "theories",
+            "techniques",
+            "strategies",
+            "patterns",
+            "architectures",
+            "implementations",
+            "solutions",
+            "approaches",
+            "paradigms",
+            "mechanisms",
+            "protocols",
+            "standards",
+        ];
+
         // Target ~6K examples per intent (17 intents * 6K = 102K)
         let per_intent = 6000;
-        
+
         for (intent, templates, resolver) in intents {
             for i in 0..per_intent {
                 let template = templates[i % templates.len()];
                 let domain = domains[i % domains.len()];
                 let topic = topics[i % topics.len()];
-                
+
                 let question = template
                     .replace("{topic}", topic)
                     .replace("{domain}", domain);
-                
+
                 let answer = format!("Response about {} in the context of {}.", topic, domain);
-                
+
                 examples.push(TrainingExample {
                     question,
                     answer,
@@ -90,7 +182,7 @@ impl ClassificationDatasetGenerator {
                 });
             }
         }
-        
+
         examples
     }
 }
@@ -253,13 +345,7 @@ const HELP_TEMPLATES: &[&str] = &[
     "I need help figuring out {topic}.",
 ];
 
-const GREETING_TEMPLATES: &[&str] = &[
-    "Hello!",
-    "Hi there!",
-    "Good morning!",
-    "Hey!",
-    "Greetings!",
-];
+const GREETING_TEMPLATES: &[&str] = &["Hello!", "Hi there!", "Good morning!", "Hey!", "Greetings!"];
 
 const FAREWELL_TEMPLATES: &[&str] = &[
     "Goodbye!",

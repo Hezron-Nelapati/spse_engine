@@ -7,11 +7,13 @@
 //   training_benchmark --system predictive     - Test predictive only
 //   training_benchmark --system all            - Same as no args
 
-use spse_engine::classification::{ClassificationCalculator, ClassificationSignature, SemanticHasher};
+use spse_engine::classification::{
+    ClassificationCalculator, ClassificationSignature, SemanticHasher,
+};
 use spse_engine::config::EngineConfig;
 use spse_engine::memory::store::MemoryStore;
 use spse_engine::predictive::{FineResolver, OutputDecoder};
-use spse_engine::reasoning::retrieval::{SearxNGClient, SearxCategory};
+use spse_engine::reasoning::retrieval::{SearxCategory, SearxNGClient};
 use spse_engine::reasoning::search::CandidateScorer;
 use spse_engine::seed::{
     ClassificationDatasetGenerator, ConsistencyDatasetGenerator, PredictiveQAGenerator,
@@ -63,7 +65,7 @@ struct ValidationResult {
 
 fn parse_args() -> SystemMode {
     let args: Vec<String> = env::args().collect();
-    
+
     for i in 0..args.len() {
         if args[i] == "--system" && i + 1 < args.len() {
             return match args[i + 1].to_lowercase().as_str() {
@@ -84,9 +86,9 @@ fn parse_args() -> SystemMode {
 
 fn main() {
     let mode = parse_args();
-    
+
     println!("=== SPSE Training Benchmark ===\n");
-    
+
     match mode {
         SystemMode::All => {
             println!("Mode: Full benchmark (all systems)\n");
@@ -141,13 +143,23 @@ fn run_full_benchmark() {
 
     println!("\n=== Benchmark Complete ===");
     println!("\nSummary:");
-    println!("  Classification: {:.1}% accuracy", classification_result.accuracy * 100.0);
-    println!("  Reasoning: {:.1}% accuracy", reasoning_result.accuracy * 100.0);
-    println!("  Predictive: {:.1}% accuracy", predictive_result.accuracy * 100.0);
-    println!("\nTotal training time: {:.1}s", 
-        classification_result.training_time_secs + 
-        reasoning_result.training_time_secs + 
-        predictive_result.training_time_secs
+    println!(
+        "  Classification: {:.1}% accuracy",
+        classification_result.accuracy * 100.0
+    );
+    println!(
+        "  Reasoning: {:.1}% accuracy",
+        reasoning_result.accuracy * 100.0
+    );
+    println!(
+        "  Predictive: {:.1}% accuracy",
+        predictive_result.accuracy * 100.0
+    );
+    println!(
+        "\nTotal training time: {:.1}s",
+        classification_result.training_time_secs
+            + reasoning_result.training_time_secs
+            + predictive_result.training_time_secs
     );
 }
 
@@ -157,7 +169,7 @@ fn run_classification_benchmark() {
     let _ = fs::remove_file(db_path);
 
     println!("=== Classification System Benchmark ===\n");
-    
+
     // Stage 1: Train
     println!("Stage 1: Training\n");
     let result = benchmark_classification_training(&config, db_path);
@@ -168,7 +180,7 @@ fn run_classification_benchmark() {
     test_classification_inference(&config, db_path);
 
     // Keep trained data in actual database (no cleanup)
-    
+
     println!("\n=== Classification Benchmark Complete ===");
     println!("Final Accuracy: {:.1}%", result.accuracy * 100.0);
 }
@@ -179,7 +191,7 @@ fn run_reasoning_benchmark() {
     let _ = fs::remove_file(db_path);
 
     println!("=== Reasoning System Benchmark ===\n");
-    
+
     // Stage 1: Train
     println!("Stage 1: Training\n");
     let result = benchmark_reasoning_training(&config, db_path);
@@ -190,7 +202,7 @@ fn run_reasoning_benchmark() {
     test_reasoning_inference(&config, db_path);
 
     // Keep trained data in actual database (no cleanup)
-    
+
     println!("\n=== Reasoning Benchmark Complete ===");
     println!("Final Accuracy: {:.1}%", result.accuracy * 100.0);
 }
@@ -201,7 +213,7 @@ fn run_predictive_benchmark() {
     let _ = fs::remove_file(db_path);
 
     println!("=== Predictive System Benchmark ===\n");
-    
+
     // Stage 1: Train
     println!("Stage 1: Training\n");
     let result = benchmark_predictive_training(&config, db_path);
@@ -212,7 +224,7 @@ fn run_predictive_benchmark() {
     test_predictive_inference(&config, db_path);
 
     // Keep trained data in actual database (no cleanup)
-    
+
     println!("\n=== Predictive Benchmark Complete ===");
     println!("Final Accuracy: {:.1}%", result.accuracy * 100.0);
 }
@@ -222,12 +234,12 @@ async fn run_retrieval_benchmark() {
     let config = EngineConfig::load_default_file();
 
     println!("=== Retrieval System (L11 SearXNG) Benchmark ===\n");
-    
+
     // Stage 1: Check SearXNG availability
     println!("Stage 1: SearXNG Health Check\n");
     let searxng_url = &config.retrieval_io.searxng_url;
     let client = SearxNGClient::new(searxng_url, config.retrieval_io.retrieval_timeout_ms);
-    
+
     let is_available = client.health_check().await;
     if is_available {
         println!("  ✓ SearXNG available at {}", searxng_url);
@@ -241,10 +253,22 @@ async fn run_retrieval_benchmark() {
     // Stage 2: Test queries
     println!("\nStage 2: Query Testing\n");
     let test_queries = vec![
-        ("What is the capital of France?", vec![SearxCategory::General]),
-        ("Python programming tutorial", vec![SearxCategory::General, SearxCategory::IT]),
-        ("Climate change research", vec![SearxCategory::General, SearxCategory::Science]),
-        ("Latest technology news", vec![SearxCategory::General, SearxCategory::News]),
+        (
+            "What is the capital of France?",
+            vec![SearxCategory::General],
+        ),
+        (
+            "Python programming tutorial",
+            vec![SearxCategory::General, SearxCategory::IT],
+        ),
+        (
+            "Climate change research",
+            vec![SearxCategory::General, SearxCategory::Science],
+        ),
+        (
+            "Latest technology news",
+            vec![SearxCategory::General, SearxCategory::News],
+        ),
     ];
 
     let mut passed = 0;
@@ -261,7 +285,8 @@ async fn run_retrieval_benchmark() {
                     println!("✓ {} results", docs.len());
                     // Print first result
                     if let Some(doc) = docs.first() {
-                        println!("    First: {} (trust: {:.2})", 
+                        println!(
+                            "    First: {} (trust: {:.2})",
                             doc.title.chars().take(50).collect::<String>(),
                             doc.trust_score
                         );
@@ -323,14 +348,22 @@ fn test_classification_inference(config: &EngineConfig, db_path: &str) {
         let matched = best_intent == *expected;
         if matched {
             correct += 1;
-            println!("  ✓ \"{}\" → {} (conf: {:.2})", query, best_intent, best_sim);
+            println!(
+                "  ✓ \"{}\" → {} (conf: {:.2})",
+                query, best_intent, best_sim
+            );
         } else {
-            println!("  ✗ \"{}\" → {} (expected: {}, conf: {:.2})", query, best_intent, expected, best_sim);
+            println!(
+                "  ✗ \"{}\" → {} (expected: {}, conf: {:.2})",
+                query, best_intent, expected, best_sim
+            );
         }
     }
 
-    println!("\n  Inference accuracy: {}/{} ({:.1}%)", 
-        correct, test_cases.len(), 
+    println!(
+        "\n  Inference accuracy: {}/{} ({:.1}%)",
+        correct,
+        test_cases.len(),
         (correct as f32 / test_cases.len() as f32) * 100.0
     );
 }
@@ -345,12 +378,12 @@ fn test_reasoning_inference(_config: &EngineConfig, db_path: &str) {
     )));
 
     let mem = memory.lock().expect("memory lock");
-    
+
     // Check unit count as proxy for reasoning capacity
     let unit_count = mem.unit_count();
     println!("  Memory units: {}", unit_count);
     println!("  Reasoning configuration loaded from config.yaml");
-    
+
     drop(mem);
     println!("\n  ✓ Reasoning system configuration verified.");
 }
@@ -364,25 +397,26 @@ fn test_predictive_inference(config: &EngineConfig, db_path: &str) {
     )));
 
     let mem = memory.lock().expect("memory lock");
-    
+
     // Check unit statistics
     let unit_count = mem.unit_count();
     let all_units = mem.all_units();
-    
+
     println!("  Predictive System Statistics:");
     println!("    Units: {}", unit_count);
     println!("    Sample units: {}", all_units.len().min(5));
-    
+
     // Show sample unit content
     for unit in all_units.iter().take(3) {
-        println!("      - \"{}\" (conf: {:.2})", 
+        println!(
+            "      - \"{}\" (conf: {:.2})",
             unit.content.chars().take(40).collect::<String>(),
             unit.confidence
         );
     }
-    
+
     drop(mem);
-    
+
     if unit_count > 100 {
         println!("\n  ✓ Predictive system has sufficient data");
     } else {
@@ -409,15 +443,19 @@ fn benchmark_classification_training(config: &EngineConfig, db_path: &str) -> Be
 
     match train_result {
         Ok(metrics) => {
-            println!("  ✓ Training completed: {} examples in {:.1}s", metrics.examples_ingested, training_time);
-            
+            println!(
+                "  ✓ Training completed: {} examples in {:.1}s",
+                metrics.examples_ingested, training_time
+            );
+
             // Validate on test set
             let test_examples = &examples[..100.min(examples.len())];
             let validations = validate_classification(&memory, test_examples);
-            
+
             let correct = validations.iter().filter(|v| v.matched).count();
             let accuracy = correct as f32 / validations.len() as f32;
-            let avg_confidence: f32 = validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
+            let avg_confidence: f32 =
+                validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
 
             BenchmarkResult {
                 system: "Classification".to_string(),
@@ -463,14 +501,18 @@ fn benchmark_reasoning_training(config: &EngineConfig, db_path: &str) -> Benchma
 
     match train_result {
         Ok(metrics) => {
-            println!("  ✓ Training completed: {} examples in {:.1}s", metrics.examples_ingested, training_time);
-            
+            println!(
+                "  ✓ Training completed: {} examples in {:.1}s",
+                metrics.examples_ingested, training_time
+            );
+
             let test_examples = &examples[..100.min(examples.len())];
             let validations = validate_reasoning(&memory, test_examples);
-            
+
             let correct = validations.iter().filter(|v| v.matched).count();
             let accuracy = correct as f32 / validations.len() as f32;
-            let avg_confidence: f32 = validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
+            let avg_confidence: f32 =
+                validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
 
             BenchmarkResult {
                 system: "Reasoning".to_string(),
@@ -516,14 +558,18 @@ fn benchmark_predictive_training(config: &EngineConfig, db_path: &str) -> Benchm
 
     match train_result {
         Ok(metrics) => {
-            println!("  ✓ Training completed: {} examples in {:.1}s", metrics.examples_ingested, training_time);
-            
+            println!(
+                "  ✓ Training completed: {} examples in {:.1}s",
+                metrics.examples_ingested, training_time
+            );
+
             let test_examples = &examples[..100.min(examples.len())];
             let validations = validate_predictive(&memory, test_examples);
-            
+
             let correct = validations.iter().filter(|v| v.matched).count();
             let accuracy = correct as f32 / validations.len() as f32;
-            let avg_confidence: f32 = validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
+            let avg_confidence: f32 =
+                validations.iter().map(|v| v.confidence).sum::<f32>() / validations.len() as f32;
 
             BenchmarkResult {
                 system: "Predictive".to_string(),
@@ -566,8 +612,11 @@ fn benchmark_consistency(config: &EngineConfig, db_path: &str) {
             println!("    Total examples: {}", report.total_examples);
             println!("    Violations: {}", report.violations.len());
             println!("    L_consistency: {:.3}", report.l_consistency);
-            println!("    Corrections needed: {}", report.corrections_applied.len());
-            
+            println!(
+                "    Corrections needed: {}",
+                report.corrections_applied.len()
+            );
+
             for (rule, count) in &report.per_rule_violations {
                 println!("    {:?}: {} violations", rule, count);
             }
@@ -580,7 +629,7 @@ fn benchmark_consistency(config: &EngineConfig, db_path: &str) {
 
 fn benchmark_end_to_end(config: &EngineConfig, db_path: &str) {
     println!("  Testing full pipeline integration...");
-    
+
     // Test queries covering all 3 systems
     let test_queries = vec![
         ("What is the capital of France?", "Paris"),
@@ -591,7 +640,7 @@ fn benchmark_end_to_end(config: &EngineConfig, db_path: &str) {
 
     let total_tests = test_queries.len();
     println!("  Running {} end-to-end tests...", total_tests);
-    
+
     let mut passed = 0;
     for (query, _expected_keyword) in test_queries {
         // Would run through full engine pipeline here
@@ -611,27 +660,27 @@ fn validate_classification(
 ) -> Vec<ValidationResult> {
     let calculator = ClassificationCalculator::new();
     let hasher = SemanticHasher::new();
-    
+
     // Get memory store for centroid lookup
     let mem = memory.lock().expect("memory lock");
     let intent_centroids = mem.intent_centroids();
     let tone_centroids = mem.tone_centroids();
     drop(mem);
-    
+
     examples
         .iter()
         .enumerate()
         .map(|(id, ex)| {
             let expected_intent = ex.intent.clone().unwrap_or_default();
-            
+
             // Compute signature for the question
             let signature = ClassificationSignature::compute(&ex.question, &hasher);
             let fv = signature.to_feature_vector();
-            
+
             // Find nearest centroid
             let mut best_intent = "Unknown".to_string();
             let mut best_sim = f32::MIN;
-            
+
             for (intent, centroid) in &intent_centroids {
                 let sim = cosine_similarity(&fv, centroid);
                 if sim > best_sim {
@@ -639,10 +688,10 @@ fn validate_classification(
                     best_intent = format!("{:?}", intent);
                 }
             }
-            
+
             let matched = best_intent == expected_intent;
             let confidence = best_sim.max(0.0).min(1.0);
-            
+
             ValidationResult {
                 example_id: id,
                 question: ex.question.clone(),
@@ -661,13 +710,13 @@ fn validate_reasoning(
     examples: &[TrainingExample],
 ) -> Vec<ValidationResult> {
     let config = EngineConfig::load_default_file();
-    
+
     examples
         .iter()
         .enumerate()
         .map(|(id, ex)| {
             let mem = memory.lock().expect("memory lock");
-            
+
             // Get candidates from memory
             let all_units = mem.all_units();
             if all_units.is_empty() {
@@ -681,11 +730,11 @@ fn validate_reasoning(
                     confidence: 0.0,
                 };
             }
-            
+
             // Take a sample of units as candidates
             let candidates: Vec<Unit> = all_units.iter().take(20).cloned().collect();
             drop(mem);
-            
+
             // Build context from question
             let context = ContextMatrix {
                 summary: ex.question.clone(),
@@ -693,7 +742,7 @@ fn validate_reasoning(
             };
             let sequence = SequenceState::default();
             let merged = MergedState::default();
-            
+
             // ACTUALLY INVOKE THE REASONING SYSTEM (7D scoring)
             let scored = CandidateScorer::score(
                 &candidates,
@@ -704,21 +753,25 @@ fn validate_reasoning(
                 None,
                 Some(&ex.question),
             );
-            
+
             // Check if scoring produced reasonable results
             let has_scores = !scored.is_empty();
             let top_score = scored.first().map(|s| s.score).unwrap_or(0.0);
             let scores_reasonable = top_score > 0.0 && top_score < 10.0;
-            
+
             let matched = has_scores && scores_reasonable;
             let confidence = top_score.clamp(0.0, 1.0);
-            
+
             let actual = if matched {
                 format!("Scored {} candidates, top={:.3}", scored.len(), top_score)
             } else {
-                format!("Scoring failed: {} candidates, top={:.3}", scored.len(), top_score)
+                format!(
+                    "Scoring failed: {} candidates, top={:.3}",
+                    scored.len(),
+                    top_score
+                )
             };
-            
+
             ValidationResult {
                 example_id: id,
                 question: ex.question.clone(),
@@ -738,13 +791,13 @@ fn validate_predictive(
 ) -> Vec<ValidationResult> {
     let config = EngineConfig::load_default_file();
     let decoder = OutputDecoder;
-    
+
     examples
         .iter()
         .enumerate()
         .map(|(id, ex)| {
             let mem = memory.lock().expect("memory lock");
-            
+
             // Get units from memory
             let all_units = mem.all_units();
             if all_units.is_empty() {
@@ -759,7 +812,7 @@ fn validate_predictive(
                 };
             }
             drop(mem);
-            
+
             // Build context and score candidates
             let context = ContextMatrix {
                 summary: ex.question.clone(),
@@ -767,10 +820,10 @@ fn validate_predictive(
             };
             let sequence = SequenceState::default();
             let merged = MergedState::default();
-            
+
             // Take candidates
             let candidates: Vec<Unit> = all_units.iter().take(20).cloned().collect();
-            
+
             // Score with reasoning system
             let scored = CandidateScorer::score(
                 &candidates,
@@ -781,7 +834,7 @@ fn validate_predictive(
                 None,
                 Some(&ex.question),
             );
-            
+
             if scored.is_empty() {
                 return ValidationResult {
                     example_id: id,
@@ -792,15 +845,11 @@ fn validate_predictive(
                     confidence: 0.0,
                 };
             }
-            
+
             // ACTUALLY INVOKE THE PREDICTIVE SYSTEM (resolver)
-            let resolved = FineResolver::select(
-                &scored,
-                ResolverMode::Balanced,
-                false,
-                &config.resolver,
-            );
-            
+            let resolved =
+                FineResolver::select(&scored, ResolverMode::Balanced, false, &config.resolver);
+
             let (matched, actual, confidence) = match resolved {
                 Some(candidate) => {
                     // ACTUALLY INVOKE THE OUTPUT DECODER
@@ -811,18 +860,22 @@ fn validate_predictive(
                         mode: ResolverMode::Balanced,
                         used_escape: false,
                     };
-                    let decoded = decoder.decode(&ex.question, &resolved_candidate, &context, &merged);
-                    
+                    let decoded =
+                        decoder.decode(&ex.question, &resolved_candidate, &context, &merged);
+
                     let output_reasonable = !decoded.text.is_empty() && decoded.text.len() < 1000;
                     (
                         output_reasonable,
-                        format!("Decoded: \"{}\"", decoded.text.chars().take(50).collect::<String>()),
+                        format!(
+                            "Decoded: \"{}\"",
+                            decoded.text.chars().take(50).collect::<String>()
+                        ),
                         candidate.score.clamp(0.0, 1.0),
                     )
                 }
                 None => (false, "Resolver returned None".to_string(), 0.0),
             };
-            
+
             ValidationResult {
                 example_id: id,
                 question: ex.question.clone(),
@@ -851,7 +904,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 fn print_benchmark_result(result: &BenchmarkResult) {
     println!("  Results:");
     println!("    Accuracy: {:.1}%", result.accuracy * 100.0);
-    println!("    Correct: {}/{}", result.correct_predictions, result.total_examples);
+    println!(
+        "    Correct: {}/{}",
+        result.correct_predictions, result.total_examples
+    );
     println!("    Avg Confidence: {:.2}", result.avg_confidence);
     println!("    Training Time: {:.1}s", result.training_time_secs);
 }

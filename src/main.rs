@@ -1,13 +1,9 @@
 use clap::{Parser, Subcommand};
 use spse_engine::api;
 use spse_engine::engine::Engine;
-use spse_engine::seed::{generate_dryrun_datasets, DryRunDatasetConfig};
-use spse_engine::training::TrainingScope;
-use spse_engine::types::{DryRunReport, JobState, TrainingExecutionMode, TrainingJobStatus};
+use spse_engine::types::TrainingExecutionMode;
 use std::io::{self, Write};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "spse_engine")]
@@ -32,13 +28,6 @@ enum Commands {
         json: bool,
         #[arg(long, default_value = "development")]
         execution_mode: String,
-        #[arg(long, default_value = "full")]
-        scope: String,
-        #[arg(long, help = "Train only a single source by name, e.g. seed_entities")]
-        source: Option<String>,
-    },
-    TrainStatus {
-        job_id: String,
     },
     AuditPollution {
         #[arg(long, default_value_t = 50)]
@@ -49,14 +38,6 @@ enum Commands {
     Serve {
         #[arg(long, default_value_t = 3000)]
         port: u16,
-    },
-    GenerateSeed {
-        #[arg(long, default_value = "dryrun")]
-        phase: String,
-        #[arg(long, default_value = "datasets/dryrun")]
-        output_dir: String,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -86,55 +67,19 @@ async fn main() {
         Commands::Train {
             json,
             execution_mode,
-            scope,
-            source,
         } => {
-            let execution_mode = parse_execution_mode(&execution_mode);
-            let scope = parse_training_scope(&scope);
-            if matches!(scope, TrainingScope::DryRun) {
-                let dry_run_db =
-                    std::env::temp_dir().join(format!("spse_phase0_dry_run_{}.db", Uuid::new_v4()));
-                let dry_run_db = dry_run_db.display().to_string();
-                let engine = Arc::new(Engine::new_with_db_path(&dry_run_db));
-                if json {
-                    let report = engine.run_phase0_dry_run(execution_mode).await;
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&report).expect("serialize dry run report")
-                    );
-                } else {
-                    let job_id = engine
-                        .clone()
-                        .start_train_with_scope(execution_mode, TrainingScope::DryRun);
-                    let status = wait_for_training_completion(&engine, &job_id).await;
-                    let report = engine.finalize_phase0_dry_run(status).await;
-                    print_dry_run_report(&report);
-                }
-            } else {
-                let engine = Arc::new(Engine::new());
-                let status = engine
-                    .train_with_scope(execution_mode, scope, source.as_deref())
-                    .await;
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&status).expect("serialize training status")
-                    );
-                } else {
-                    print_training_status(&status);
-                }
-            }
-        }
-        Commands::TrainStatus { job_id } => {
             let engine = Engine::new();
-            let status = engine.training_status(&job_id);
-            match status {
-                Some(status) => println!(
+            let metrics = engine
+                .train_with_execution_mode(parse_execution_mode(&execution_mode))
+                .await;
+            match metrics {
+                Ok(metrics) if json => println!(
                     "{}",
-                    serde_json::to_string_pretty(&status).expect("serialize training status")
+                    serde_json::to_string_pretty(&metrics).expect("serialize training metrics")
                 ),
-                None => {
-                    eprintln!("training job not found: {job_id}");
+                Ok(metrics) => print_training_metrics(&metrics),
+                Err(error) => {
+                    eprintln!("training failed: {error}");
                     std::process::exit(1);
                 }
             }
@@ -171,59 +116,11 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::GenerateSeed {
-            phase,
-            output_dir,
-            json,
-        } => match phase.as_str() {
-            "dryrun" => {
-                let config = DryRunDatasetConfig {
-                    output_dir,
-                    ..Default::default()
-                };
-                let result = generate_dryrun_datasets(&config);
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&result).expect("serialize result")
-                    );
-                } else {
-                    println!("Generated DryRun datasets:");
-                    println!(
-                        "  Intent dataset: {} ({} dialogues)",
-                        result.intent_dataset_path, result.intent_dialogue_count
-                    );
-                    println!(
-                        "  Entity dataset: {} ({} entities)",
-                        result.entity_dataset_path, result.entity_count
-                    );
-                    println!("  Intents covered: {}", result.intents_covered.len());
-                    if result.quality_passed {
-                        println!("  Quality: PASSED");
-                    } else {
-                        println!("  Quality: NEEDS ATTENTION");
-                    }
-                    if !result.warnings.is_empty() {
-                        println!("  Warnings:");
-                        for w in &result.warnings {
-                            println!("    - {}", w);
-                        }
-                    }
-                }
-                if !result.quality_passed {
-                    std::process::exit(1);
-                }
-            }
-            other => {
-                eprintln!("Unknown phase: {}. Supported phases: dryrun", other);
-                std::process::exit(1);
-            }
-        },
     }
 }
 
 async fn run_interactive(engine: &Engine) {
-    println!("--- SPSE Engine (Full Architecture) ---");
+    println!("--- SPSE Engine ---");
     println!("Type a question, paste a local .docx/.pdf path, use '/train', '/clear', '/debug <text>', '/trace <text>', or 'exit'.");
 
     loop {
@@ -244,34 +141,17 @@ async fn run_interactive(engine: &Engine) {
         }
 
         if input == "/train" {
-            let status = engine
+            match engine
                 .train_with_execution_mode(TrainingExecutionMode::Development)
-                .await;
-            println!(
-                "System > Training status={:?}, phases={}, sources={}, new_units={}",
-                status.status,
-                status.phase_statuses.len(),
-                status.progress.sources_total,
-                status.learning_metrics.new_units_discovered
-            );
-            for phase in &status.phase_statuses {
-                println!(
-                    "System >   {:?}: status={:?}, sources={}/{}, unit_efficiency={:.3}, routing_accuracy={:.3}",
-                    phase.phase,
-                    phase.status,
-                    phase.sources_processed,
-                    phase.sources_total,
-                    phase.metrics.unit_discovery_efficiency,
-                    phase.metrics.semantic_routing_accuracy
-                );
+                .await
+            {
+                Ok(metrics) => {
+                    print!("System > ");
+                    io::stdout().flush().expect("stdout flush");
+                    print_training_metrics(&metrics);
+                }
+                Err(error) => println!("System > training failed: {error}"),
             }
-            continue;
-        }
-
-        if input.starts_with("/train ") {
-            println!(
-                "System > Direct source training is disabled. Use '/train' to run the full ordered training pipeline."
-            );
             continue;
         }
 
@@ -337,180 +217,21 @@ fn print_debug_result(result: &spse_engine::types::ProcessResult, prefix: Option
     }
 }
 
-async fn wait_for_training_completion(engine: &Arc<Engine>, job_id: &str) -> TrainingJobStatus {
-    let mut last_render = String::new();
-    loop {
-        if let Some(status) = engine.training_status(job_id) {
-            let render = render_live_training_progress(&status);
-            if render != last_render {
-                println!("{render}");
-                last_render = render;
-            }
-            if !matches!(status.status, JobState::Queued | JobState::Processing) {
-                return status;
-            }
-        }
-        sleep(Duration::from_secs(1)).await;
-    }
-}
-
-fn render_live_training_progress(status: &TrainingJobStatus) -> String {
-    let state = match status.status {
-        JobState::Queued => "queued",
-        JobState::Processing => "processing",
-        JobState::Completed => "completed",
-        JobState::Failed => "failed",
-    };
-    let phase = status
-        .active_phase
-        .map(|phase| format!("{phase:?}").to_lowercase())
-        .unwrap_or_else(|| "idle".to_string());
-    let source = status
-        .progress
-        .active_source
-        .clone()
-        .unwrap_or_else(|| "-".to_string());
-    format!(
-        "live status={} phase={} source={}/{} active_source={} chunks={} bytes={} workers={}/{} queued={} prepared={} batches={} new_units={} mem_delta_kb={}",
-        state,
-        phase,
-        status.progress.sources_processed,
-        status.progress.sources_total,
-        source,
-        status.progress.chunks_processed,
-        status.progress.bytes_processed,
-        status.progress.active_workers,
-        status.progress.worker_count,
-        status.progress.queued_chunks,
-        status.progress.prepared_chunks,
-        status.progress.committed_batches,
-        status.learning_metrics.new_units_discovered,
-        status.learning_metrics.memory_delta_kb,
-    )
-}
-
-fn print_training_status(status: &TrainingJobStatus) {
+fn print_training_metrics(metrics: &spse_engine::types::TrainingMetrics) {
     println!(
-        "training status={}, phases={}, sources={}, new_units={}",
-        match status.status {
-            JobState::Queued => "queued",
-            JobState::Processing => "processing",
-            JobState::Completed => "completed",
-            JobState::Failed => "failed",
-        },
-        status.phase_statuses.len(),
-        status.progress.sources_total,
-        status.learning_metrics.new_units_discovered
-    );
-    if let Some(active_source) = status.progress.active_source.as_deref() {
-        if !active_source.is_empty() {
-            println!(
-                "  progress active_source={} chunks={} bytes={} workers={}/{} queued={} prepared={} batches={}",
-                active_source,
-                status.progress.chunks_processed,
-                status.progress.bytes_processed,
-                status.progress.active_workers,
-                status.progress.worker_count,
-                status.progress.queued_chunks,
-                status.progress.prepared_chunks,
-                status.progress.committed_batches
-            );
-        }
-    }
-    println!(
-        "  health stage={:?} total_units={} core={} episodic={} anchors={} efficiency(units_per_kb={:.2}, pruned={:.2}, anchor_density={:.2})",
-        status.learning_metrics.database_health.maturity_stage,
-        status.learning_metrics.database_health.total_units,
-        status.learning_metrics.database_health.core_units,
-        status.learning_metrics.database_health.episodic_units,
-        status.learning_metrics.database_health.anchor_units,
-        status.learning_metrics.efficiency.units_discovered_per_kb,
-        status.learning_metrics.efficiency.pruned_units_percent,
-        status.learning_metrics.efficiency.anchor_density,
-    );
-    for phase in &status.phase_statuses {
-        println!(
-            "  {:?}: status={:?} sources={}/{} batches={}/{} unit_efficiency={:.3} routing_accuracy={:.3}",
-            phase.phase,
-            phase.status,
-            phase.sources_processed,
-            phase.sources_total,
-            phase.batches_completed,
-            phase.batches_target,
-            phase.metrics.unit_discovery_efficiency,
-            phase.metrics.semantic_routing_accuracy
-        );
-    }
-    if let Some(event) = status.learning_metrics.pruning_events.last() {
-        println!(
-            "  pruning trigger={} pruned_units={} pruned_candidates={} polluted_units={} polluted_candidates={} reasons={}",
-            event.trigger,
-            event.pruned_units,
-            event.pruned_candidates,
-            event.purged_polluted_units,
-            event.purged_polluted_candidates,
-            if event.reasons.is_empty() {
-                "none".to_string()
-            } else {
-                event.reasons.join("|")
-            }
-        );
-        for finding in event.pollution_findings.iter().take(3) {
-            println!(
-                "    pollution polluted={} -> canonical={} overlap={:.2} delta={:.2} reason={}",
-                finding.polluted_normalized,
-                finding.canonical_normalized,
-                finding.overlap_ratio,
-                finding.quality_delta,
-                finding.reason
-            );
-        }
-        for reference in event.pruned_references.iter().take(5) {
-            println!(
-                "    pruned normalized={} level={:?} utility={:.3} freq={} reason={}",
-                reference.normalized,
-                reference.level,
-                reference.utility_score,
-                reference.frequency,
-                reference.reason
-            );
-        }
-    }
-    if !status.warnings.is_empty() {
-        println!("  warnings={}", status.warnings.join(", "));
-    }
-}
-
-fn print_dry_run_report(report: &DryRunReport) {
-    print_training_status(&report.status);
-    println!(
-        "  dry_run snapshot_readable={} map_stable={} inference_ok={} latency_ms={} latency_per_token_ms={}",
-        report.snapshot_readable,
-        report.map_stable,
-        report.inference_ok,
-        report.inference_latency_ms,
-        report.latency_per_token_ms,
+        "training examples={} units={} efficiency={:.3} routing={:.3} error={:.3}",
+        metrics.examples_ingested,
+        metrics.units_created,
+        metrics.unit_discovery_efficiency,
+        metrics.semantic_routing_accuracy,
+        metrics.prediction_error
     );
 }
 
 fn parse_execution_mode(value: &str) -> TrainingExecutionMode {
     match value.trim().to_ascii_lowercase().as_str() {
         "user" => TrainingExecutionMode::User,
-        "development" | "dev" => TrainingExecutionMode::Development,
-        other => panic!("invalid execution mode `{other}`; expected `user` or `development`"),
-    }
-}
-
-fn parse_training_scope(value: &str) -> TrainingScope {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "full" => TrainingScope::Full,
-        "bootstrap" => TrainingScope::Bootstrap,
-        "dry-run" | "dry_run" | "dryrun" => TrainingScope::DryRun,
-        "huggingface" | "hf" => TrainingScope::HuggingFace,
-        other => {
-            panic!(
-                "invalid training scope `{other}`; expected `full`, `bootstrap`, `dry-run`, or `huggingface`"
-            )
-        }
+        "development" | "dev" | "" => TrainingExecutionMode::Development,
+        _ => TrainingExecutionMode::Development,
     }
 }

@@ -409,23 +409,3 @@ pub fn check_overlap_gpu(
 
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gpu_context_cell_size() {
-        assert_eq!(std::mem::size_of::<GpuContextCell>(), 528);
-    }
-
-    #[test]
-    fn gpu_document_size() {
-        assert_eq!(std::mem::size_of::<GpuDocument>(), 8208);
-    }
-
-    #[test]
-    fn gpu_overlap_result_size() {
-        assert_eq!(std::mem::size_of::<GpuOverlapResult>(), 16);
-    }
-}

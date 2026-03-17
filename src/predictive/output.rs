@@ -215,7 +215,8 @@ fn overlap_score(lhs: &[String], rhs: &[String]) -> i32 {
 }
 
 fn finalize_answer(text: &str) -> String {
-    let cleaned = text.trim();
+    let cleaned = text.trim().replace('_', " ");
+    let cleaned = cleaned.trim();
     if cleaned.is_empty() {
         return "I don't have enough signal yet.".to_string();
     }

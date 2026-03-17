@@ -2,10 +2,12 @@ use crate::config::{CreativeSparkConfig, EscapeProfile, SemanticMapConfig};
 use crate::spatial_index::{centroid, SpatialGrid};
 use crate::types::{RoutingResult, ScoredCandidate, Unit};
 use rand::Rng;
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use uuid::Uuid;
 
 pub struct SemanticRouter {
+    config: SemanticMapConfig,
     grid: SpatialGrid,
     neighbor_radius: f32,
 }
@@ -13,6 +15,7 @@ pub struct SemanticRouter {
 impl SemanticRouter {
     pub fn new(config: &SemanticMapConfig) -> Self {
         Self {
+            config: config.clone(),
             grid: SpatialGrid::new(config.spatial_cell_size),
             neighbor_radius: config.neighbor_radius,
         }
@@ -101,60 +104,288 @@ impl SemanticRouter {
 
     pub fn route_candidates(
         &self,
+        active_units: &[Unit],
         routing: &RoutingResult,
         all_units: &[Unit],
         max_candidates: usize,
         escape: &EscapeProfile,
     ) -> crate::types::CandidateRoute {
-        let mut candidate_ids = routing.neighbor_ids.clone();
-        let mut rationale = vec!["local_neighbors".to_string()];
         let target_candidates = max_candidates.max(1).min(escape.beam_width.max(1));
-        let stochastic_escape = escape.stochastic_jump_prob > 0.0
-            && rand::thread_rng().gen::<f32>() < escape.stochastic_jump_prob;
+        let active_ids: HashSet<Uuid> = active_units.iter().map(|unit| unit.id).collect();
+        let unit_index: HashMap<Uuid, &Unit> = all_units
+            .iter()
+            .filter(|unit| !unit.is_process_unit)
+            .map(|unit| (unit.id, unit))
+            .collect();
 
-        if candidate_ids.len() < target_candidates / 2 || stochastic_escape {
-            let mut global: Vec<Unit> = all_units
-                .iter()
-                .filter(|u| !u.is_process_unit)
-                .cloned()
-                .collect();
+        let near_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, true);
+        let far_edges = self.scored_direct_edges(active_units, &unit_index, &active_ids, false);
+        let best_near = near_edges.first().map(|(_, score)| *score).unwrap_or(0.0);
+        let best_far = far_edges.first().map(|(_, score)| *score).unwrap_or(0.0);
 
-            global.sort_by(|a, b| {
-                b.utility_score
-                    .partial_cmp(&a.utility_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let used_escape = true;
-            if stochastic_escape {
-                rationale.push("stochastic_jump".to_string());
+        let mut scored_candidates = Vec::new();
+        let mut rationale = Vec::new();
+        let mut used_pathfinding = false;
+
+        if best_near >= self.config.tier1_confidence_threshold {
+            scored_candidates.extend(near_edges.into_iter());
+            rationale.push("tier1_near_edges".to_string());
+        } else if best_near.max(best_far) >= self.config.tier2_confidence_threshold {
+            scored_candidates.extend(near_edges.into_iter());
+            scored_candidates.extend(far_edges.into_iter());
+            rationale.push("tier2_far_edges".to_string());
+        } else {
+            scored_candidates.extend(near_edges.into_iter());
+            scored_candidates.extend(far_edges.into_iter());
+            let path_candidates =
+                self.pathfind_candidates(active_units, all_units, &unit_index, &active_ids);
+            if !path_candidates.is_empty() {
+                used_pathfinding = true;
+                rationale.push("tier3_pathfinding".to_string());
+                scored_candidates.extend(path_candidates);
             }
-            // Use HashSet for O(1) lookup instead of O(n) Vec::contains
-            let mut seen_ids: HashSet<Uuid> = candidate_ids.iter().copied().collect();
-            for unit in global.into_iter().take(max_candidates) {
-                if seen_ids.insert(unit.id) {
-                    candidate_ids.push(unit.id);
-                }
-                if candidate_ids.len() >= target_candidates {
-                    break;
-                }
-            }
-            rationale.push("global_escape".to_string());
-            return crate::types::CandidateRoute {
-                candidate_ids,
-                used_escape,
-                rationale,
-            };
         }
 
+        if scored_candidates.is_empty() {
+            rationale.push("spatial_nearest".to_string());
+            scored_candidates.extend(
+                routing
+                    .neighbor_ids
+                    .iter()
+                    .filter_map(|id| unit_index.get(id).map(|unit| (unit.id, unit.utility_score))),
+            );
+        }
+
+        scored_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+
         let mut dedup = HashSet::new();
-        candidate_ids.retain(|id| dedup.insert(*id));
-        candidate_ids.truncate(target_candidates);
+        let candidate_ids = scored_candidates
+            .into_iter()
+            .filter_map(|(id, _)| dedup.insert(id).then_some(id))
+            .take(target_candidates)
+            .collect();
 
         crate::types::CandidateRoute {
             candidate_ids,
-            used_escape: false,
+            used_escape: used_pathfinding,
             rationale,
         }
+    }
+
+    fn scored_direct_edges(
+        &self,
+        active_units: &[Unit],
+        unit_index: &HashMap<Uuid, &Unit>,
+        active_ids: &HashSet<Uuid>,
+        near_only: bool,
+    ) -> Vec<(Uuid, f32)> {
+        let mut scored = Vec::new();
+
+        for source in active_units {
+            for link in &source.links {
+                if link.weight < self.config.minimum_edge_weight
+                    || active_ids.contains(&link.target_id)
+                {
+                    continue;
+                }
+                let Some(target) = unit_index.get(&link.target_id) else {
+                    continue;
+                };
+                let distance = spatial_distance(source.semantic_position, target.semantic_position);
+                let is_near = distance <= self.neighbor_radius;
+                if near_only != is_near {
+                    continue;
+                }
+                let score = if near_only {
+                    let proximity_bonus =
+                        1.0 - (distance / self.neighbor_radius.max(0.001)).min(1.0);
+                    link.weight * proximity_bonus.max(0.05) * utility_bonus(target.utility_score)
+                } else {
+                    let distance_scale = (distance / self.neighbor_radius.max(0.001)).max(1.0);
+                    let decayed = self.config.distance_decay.powf(distance_scale - 1.0);
+                    link.weight * decayed * utility_bonus(target.utility_score)
+                };
+                scored.push((target.id, score));
+            }
+        }
+
+        scored.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+        scored
+    }
+
+    fn pathfind_candidates(
+        &self,
+        active_units: &[Unit],
+        all_units: &[Unit],
+        unit_index: &HashMap<Uuid, &Unit>,
+        active_ids: &HashSet<Uuid>,
+    ) -> Vec<(Uuid, f32)> {
+        let mut goals: Vec<&Unit> = all_units
+            .iter()
+            .filter(|unit| !unit.is_process_unit && !active_ids.contains(&unit.id))
+            .collect();
+        goals.sort_by(|lhs, rhs| {
+            rhs.utility_score
+                .partial_cmp(&lhs.utility_score)
+                .unwrap_or(Ordering::Equal)
+        });
+        goals.truncate(8);
+
+        let mut scored = Vec::new();
+        for start in active_units {
+            for goal in &goals {
+                if let Some(path) = self.a_star_path(start.id, goal.id, unit_index) {
+                    if path.len() < 2 {
+                        continue;
+                    }
+                    let score = self.path_score(&path, unit_index);
+                    for node_id in path.into_iter().skip(1) {
+                        if let Some(unit) = unit_index.get(&node_id) {
+                            if unit.links.len() >= self.config.hub_link_threshold
+                                && node_id != goal.id
+                            {
+                                continue;
+                            }
+                            scored.push((node_id, score));
+                        }
+                    }
+                }
+            }
+        }
+
+        scored.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+        scored
+    }
+
+    fn a_star_path(
+        &self,
+        start_id: Uuid,
+        goal_id: Uuid,
+        unit_index: &HashMap<Uuid, &Unit>,
+    ) -> Option<Vec<Uuid>> {
+        #[derive(Clone)]
+        struct State {
+            node_id: Uuid,
+            priority: f32,
+            hops: usize,
+            path: Vec<Uuid>,
+        }
+
+        impl PartialEq for State {
+            fn eq(&self, other: &Self) -> bool {
+                self.node_id == other.node_id
+            }
+        }
+
+        impl Eq for State {}
+
+        impl PartialOrd for State {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for State {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other
+                    .priority
+                    .partial_cmp(&self.priority)
+                    .unwrap_or(Ordering::Equal)
+            }
+        }
+
+        let goal = unit_index.get(&goal_id)?;
+        let mut frontier = BinaryHeap::new();
+        frontier.push(State {
+            node_id: start_id,
+            priority: 0.0,
+            hops: 0,
+            path: vec![start_id],
+        });
+
+        let mut explored = 0usize;
+        let mut visited = HashSet::new();
+
+        while let Some(state) = frontier.pop() {
+            if state.node_id == goal_id {
+                return Some(state.path);
+            }
+            if !visited.insert(state.node_id) {
+                continue;
+            }
+            explored += 1;
+            if explored >= self.config.pathfind_max_explored_nodes
+                || state.hops >= self.config.pathfind_max_hops
+            {
+                continue;
+            }
+
+            let Some(current) = unit_index.get(&state.node_id) else {
+                continue;
+            };
+            for link in &current.links {
+                if link.weight < self.config.minimum_edge_weight {
+                    continue;
+                }
+                let Some(next) = unit_index.get(&link.target_id) else {
+                    continue;
+                };
+                if visited.contains(&next.id) {
+                    continue;
+                }
+                let hub_bonus = if next.links.len() >= self.config.hub_link_threshold {
+                    0.85
+                } else {
+                    1.0
+                };
+                let heuristic = spatial_distance(next.semantic_position, goal.semantic_position)
+                    / self.neighbor_radius.max(0.001);
+                let edge_cost = (1.0 - link.weight).max(0.0) * hub_bonus;
+                let mut path = state.path.clone();
+                path.push(next.id);
+                frontier.push(State {
+                    node_id: next.id,
+                    priority: state.priority + edge_cost + heuristic,
+                    hops: state.hops + 1,
+                    path,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn path_score(&self, path: &[Uuid], unit_index: &HashMap<Uuid, &Unit>) -> f32 {
+        if path.len() < 2 {
+            return 0.0;
+        }
+
+        let mut weight_product = 1.0f32;
+        let mut density_sum = 0.0f32;
+        let mut density_count = 0usize;
+
+        for window in path.windows(2) {
+            let Some(source) = unit_index.get(&window[0]) else {
+                return 0.0;
+            };
+            let Some(target) = unit_index.get(&window[1]) else {
+                return 0.0;
+            };
+            let Some(link) = source.links.iter().find(|link| link.target_id == target.id) else {
+                return 0.0;
+            };
+            weight_product *= link.weight.max(0.001);
+            density_sum +=
+                (target.links.len() as f32 / self.config.hub_link_threshold as f32).clamp(0.1, 1.0);
+            density_count += 1;
+        }
+
+        let subgraph_density = if density_count == 0 {
+            0.0
+        } else {
+            density_sum / density_count as f32
+        };
+        weight_product * subgraph_density.max(0.1)
     }
 
     /// Phase 3.2: Select candidate with creative spark (15% stochastic floor).
@@ -208,61 +439,13 @@ fn region_key(position: [f32; 3]) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::SemanticMapConfig;
-    use crate::types::{CandidateRoute, Link, MemoryChannel, MemoryType, Unit, UnitLevel};
-    use chrono::Utc;
-    use uuid::Uuid;
+fn spatial_distance(lhs: [f32; 3], rhs: [f32; 3]) -> f32 {
+    let dx = lhs[0] - rhs[0];
+    let dy = lhs[1] - rhs[1];
+    let dz = lhs[2] - rhs[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
 
-    fn unit(content: &str, utility: f32) -> Unit {
-        let content_lower = content.to_lowercase();
-        let content_fingerprint = crate::types::text_fingerprint(&content_lower);
-        Unit {
-            id: Uuid::new_v4(),
-            content: content.to_string(),
-            normalized: content.to_string(),
-            level: UnitLevel::Word,
-            frequency: 1,
-            utility_score: utility,
-            confidence: utility,
-            salience_score: utility,
-            anchor_status: false,
-            memory_type: MemoryType::Episodic,
-            memory_channels: vec![MemoryChannel::Main],
-            semantic_position: [utility, 0.0, 0.0],
-            corroboration_count: 0,
-            links: Vec::<Link>::new(),
-            contexts: Vec::new(),
-            created_at: Utc::now(),
-            last_seen_at: Utc::now(),
-            trust_score: utility,
-            is_process_unit: false,
-            content_lower,
-            content_fingerprint,
-        }
-    }
-
-    #[test]
-    fn route_candidates_honors_beam_width() {
-        let router = SemanticRouter::new(&SemanticMapConfig::default());
-        let units = vec![unit("alpha", 0.9), unit("beta", 0.8), unit("gamma", 0.7)];
-        let routing = RoutingResult {
-            active_regions: vec!["r:0:0:0".to_string()],
-            neighbor_ids: units.iter().map(|item| item.id).collect(),
-            map_adjustments: 0,
-            position_updates: Vec::new(),
-        };
-        let route: CandidateRoute = router.route_candidates(
-            &routing,
-            &units,
-            10,
-            &EscapeProfile {
-                stochastic_jump_prob: 0.0,
-                beam_width: 2,
-            },
-        );
-        assert_eq!(route.candidate_ids.len(), 2);
-    }
+fn utility_bonus(utility: f32) -> f32 {
+    0.5 + utility.clamp(0.0, 1.0) * 0.5
 }

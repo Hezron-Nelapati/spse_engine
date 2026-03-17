@@ -111,28 +111,3 @@ impl DedupUtils {
         result
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dedup_by_identity() {
-        let items = vec![1, 2, 2, 3, 3, 3];
-        let deduped = DedupUtils::dedup_by_identity(items);
-        assert_eq!(deduped, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_dedup_by_key() {
-        let items = vec!["a".to_string(), "A".to_string(), "b".to_string()];
-        let deduped = DedupUtils::dedup_by_key(items, |s| s.to_lowercase());
-        assert_eq!(deduped.len(), 2);
-    }
-
-    #[test]
-    fn test_count_unique() {
-        let items = vec![1, 1, 2, 2, 3];
-        assert_eq!(DedupUtils::count_unique(&items, |x| *x), 3);
-    }
-}

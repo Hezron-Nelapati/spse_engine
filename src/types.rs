@@ -87,15 +87,6 @@ pub enum ResolverMode {
     Exploratory,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum JobState {
-    Queued,
-    Processing,
-    Completed,
-    Failed,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingExecutionMode {
@@ -151,6 +142,7 @@ pub enum IntentFallbackMode {
     #[default]
     None,
     DocumentScope,
+    ClarifyHelp,
     RetrieveUnknown,
 }
 
@@ -859,25 +851,6 @@ fn default_memory_channels() -> Vec<MemoryChannel> {
     vec![MemoryChannel::Main]
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TrainBatchRequest {
-    pub mode: String,
-    pub sources: Vec<TrainingSource>,
-    pub options: TrainingOptions,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct TrainRequest {
-    #[serde(default = "default_train_mode")]
-    pub mode: String,
-    #[serde(default)]
-    pub execution_mode: TrainingExecutionMode,
-}
-
-fn default_train_mode() -> String {
-    "silent".to_string()
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TrainingMetrics {
     pub new_unit_rate: f32,
@@ -891,105 +864,6 @@ pub struct TrainingMetrics {
     pub examples_ingested: u64,
     #[serde(default)]
     pub units_created: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TrainingPhaseStatus {
-    pub phase: TrainingPhaseKind,
-    pub status: JobState,
-    pub batches_completed: usize,
-    pub batches_target: usize,
-    pub sources_processed: usize,
-    pub sources_total: usize,
-    pub metrics: TrainingMetrics,
-}
-
-impl TrainingPhaseStatus {
-    pub fn new(phase: TrainingPhaseKind, batches_target: usize, sources_total: usize) -> Self {
-        Self {
-            phase,
-            status: JobState::Queued,
-            batches_completed: 0,
-            batches_target,
-            sources_processed: 0,
-            sources_total,
-            metrics: TrainingMetrics::default(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct TrainingProgress {
-    pub percent_complete: f32,
-    pub sources_processed: usize,
-    pub sources_total: usize,
-    #[serde(default)]
-    pub active_source: Option<String>,
-    #[serde(default)]
-    pub chunks_processed: u64,
-    #[serde(default)]
-    pub bytes_processed: u64,
-    #[serde(default)]
-    pub worker_count: usize,
-    #[serde(default)]
-    pub active_workers: usize,
-    #[serde(default)]
-    pub queued_chunks: usize,
-    #[serde(default)]
-    pub prepared_chunks: u64,
-    #[serde(default)]
-    pub committed_batches: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct LearningMetrics {
-    pub new_units_discovered: u64,
-    pub units_pruned: u64,
-    pub memory_delta_kb: i64,
-    pub map_adjustments: u64,
-    pub anchors_protected: u64,
-    #[serde(default)]
-    pub efficiency: TrainingEfficiencyMetrics,
-    #[serde(default)]
-    pub database_health: DatabaseHealthMetrics,
-    #[serde(default)]
-    pub memory_governance: MemoryGovernanceMetrics,
-    #[serde(default)]
-    pub pruning_events: Vec<PruningEventLog>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct PruningEventLog {
-    pub trigger: String,
-    pub pruned_units: u64,
-    #[serde(default)]
-    pub pruned_candidates: u64,
-    #[serde(default)]
-    pub purged_polluted_units: u64,
-    #[serde(default)]
-    pub purged_polluted_candidates: u64,
-    pub anchors_protected: u64,
-    pub snapshot_path: String,
-    #[serde(default)]
-    pub reasons: Vec<String>,
-    #[serde(default)]
-    pub pruned_references: Vec<PrunedUnitReference>,
-    #[serde(default)]
-    pub pollution_findings: Vec<PollutionFinding>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct TrainingEfficiencyMetrics {
-    pub units_discovered_per_mb: f32,
-    pub units_discovered_per_kb: f32,
-    pub pruned_units_percent: f32,
-    pub anchor_density: f32,
-    pub candidate_to_active_ratio: f32,
-    pub pruned_candidates_percent: f32,
-    pub avg_observations_to_promotion: f32,
-    pub map_rebuild_frequency: f32,
-    pub cache_hit_rate: f32,
-    pub bloom_filter_false_positive_rate: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -1029,73 +903,10 @@ pub struct QueueDepths {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct PerformanceMetrics {
-    pub avg_ms_per_source: u64,
-    #[serde(default)]
-    pub queue_depths: QueueDepths,
-    #[serde(default)]
-    pub snapshot_age_ms: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TrainingJobStatus {
-    pub job_id: String,
-    pub status: JobState,
-    pub active_phase: Option<TrainingPhaseKind>,
-    pub phase_statuses: Vec<TrainingPhaseStatus>,
-    pub progress: TrainingProgress,
-    pub learning_metrics: LearningMetrics,
-    pub performance: PerformanceMetrics,
-    pub intent_distribution: BTreeMap<String, u64>,
-    pub warnings: Vec<String>,
-}
-
-impl TrainingJobStatus {
-    pub fn queued(job_id: String, total_sources: usize) -> Self {
-        Self {
-            job_id,
-            status: JobState::Queued,
-            active_phase: None,
-            phase_statuses: Vec::new(),
-            progress: TrainingProgress {
-                percent_complete: 0.0,
-                sources_processed: 0,
-                sources_total: total_sources,
-                active_source: None,
-                chunks_processed: 0,
-                bytes_processed: 0,
-                worker_count: 0,
-                active_workers: 0,
-                queued_chunks: 0,
-                prepared_chunks: 0,
-                committed_batches: 0,
-            },
-            learning_metrics: LearningMetrics::default(),
-            performance: PerformanceMetrics::default(),
-            intent_distribution: BTreeMap::new(),
-            warnings: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CandidateRoute {
     pub candidate_ids: Vec<Uuid>,
     pub used_escape: bool,
     pub rationale: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DryRunReport {
-    pub status: TrainingJobStatus,
-    pub snapshot_path: String,
-    pub snapshot_readable: bool,
-    pub map_stable: bool,
-    pub inference_ok: bool,
-    pub inference_latency_ms: u128,
-    pub latency_per_token_ms: u128,
-    pub query_result: String,
-    pub memory_summary: String,
 }
 
 // ============================================================================

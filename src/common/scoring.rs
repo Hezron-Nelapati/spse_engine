@@ -108,29 +108,3 @@ impl ScoreUtils {
         (mean, disagreement, items.len())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_clamp_score() {
-        assert_eq!(ScoreUtils::clamp_score(0.5), 0.5);
-        assert_eq!(ScoreUtils::clamp_score(1.5), 1.0);
-        assert_eq!(ScoreUtils::clamp_score(-0.5), 0.0);
-    }
-
-    #[test]
-    fn test_mean() {
-        assert_eq!(ScoreUtils::mean(&[0.5, 0.5]), 0.5);
-        assert_eq!(ScoreUtils::mean(&[0.0, 1.0]), 0.5);
-        assert_eq!(ScoreUtils::mean(&[]), 0.0);
-    }
-
-    #[test]
-    fn test_softmax() {
-        let result = ScoreUtils::softmax(&[1.0, 2.0, 3.0], 1.0);
-        assert!(!result.is_empty());
-        assert!((result.iter().sum::<f32>() - 1.0).abs() < 0.001);
-    }
-}

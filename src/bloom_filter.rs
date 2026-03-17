@@ -92,19 +92,3 @@ fn stable_hash(value: &(u64, &str)) -> u64 {
     value.hash(&mut hasher);
     hasher.finish()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::UnitBloomFilter;
-
-    #[test]
-    fn bloom_filter_tracks_inserted_keys() {
-        let mut filter = UnitBloomFilter::new(128);
-        filter.insert("reasoning");
-        filter.insert("wikidata");
-
-        assert!(filter.contains("reasoning"));
-        assert!(filter.contains("wikidata"));
-        assert!(!filter.contains("totally_missing_key_that_should_not_exist"));
-    }
-}

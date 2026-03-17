@@ -36,6 +36,9 @@ layer_2_unit_builder:
   phrase_entity_promotion_frequency: 4
   phrase_entity_promotion_salience: 0.70
   phrase_entity_promotion_confidence: 0.55
+  training_min_utility_threshold: 0.06
+  inference_min_utility_threshold: 0.08
+  inference_utility_threshold_scale: 0.90
   training_batch_size: 500
 
 layer_5_semantic_map:
@@ -50,6 +53,17 @@ layer_5_semantic_map:
   max_layout_units: 256
   spatial_cell_size: 4.0
   neighbor_radius: 6.0
+  tier1_confidence_threshold: 0.60
+  tier2_confidence_threshold: 0.30
+  distance_decay: 0.85
+  minimum_edge_weight: 0.05
+  pathfind_max_hops: 4
+  pathfind_max_explored_nodes: 500
+  hub_link_threshold: 16
+  highway_formation_threshold: 5
+  highway_min_frequency: 3
+  highway_max_length: 7
+  highway_confidence_boost: 0.15
 
 layer_9_retrieval_gating:
   entropy_threshold: 0.72
@@ -108,11 +122,19 @@ layer_19_trust_heuristics:
     - "openstreetmap.org"
     - "dbpedia.org"
     - "gutenberg.org"
+  unsafe_pattern_penalty: 0.12
+  unsafe_patterns:
+    - "ignore previous instructions"
+    - "act as"
+    - "<script"
+    - "buy now"
+    - "sponsored"
   format_trust_adjustments:
     html_raw: -0.30
     qa_json_schema_keys: -0.40
     structured_entity: 0.20
     code_syntax: -0.10
+    plain_text: 0.0
   content_quality_thresholds:
     min_readability_score: 0.60
     max_boilerplate_ratio: 0.40
@@ -178,6 +200,11 @@ classification:
   top_k_candidates: 32
   training_target_accuracy: 0.85
   training_max_iterations: 10
+  compound_noun_min_frequency: 3
+  semantic_probe_weight: 0.15
+  anchor_fuzzy_threshold: 0.25
+  semantic_anchor_count: 500
+  semantic_anchor_path: "config/semantic_anchors.yaml"
   recommendation_sharpening:
     enabled: true
     advisory_margin_threshold: 0.10
@@ -197,6 +224,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.05
         beam_width: 3
+        max_steps: 50
       resolver:
         selection_temperature: 0.10
         min_confidence_floor: 0.30
@@ -213,6 +241,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.10
         beam_width: 5
+        max_steps: 200
       resolver:
         selection_temperature: 0.30
         min_confidence_floor: 0.24
@@ -229,6 +258,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.08
         beam_width: 4
+        max_steps: 150
       resolver:
         selection_temperature: 0.22
         min_confidence_floor: 0.28
@@ -245,6 +275,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.22
         beam_width: 6
+        max_steps: 200
       resolver:
         selection_temperature: 0.75
         min_confidence_floor: 0.18
@@ -266,6 +297,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.35
         beam_width: 10
+        max_steps: 300
       resolver:
         selection_temperature: 0.90
         min_confidence_floor: 0.12
@@ -287,6 +319,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.12
         beam_width: 5
+        max_steps: 200
       resolver:
         selection_temperature: 0.35
         min_confidence_floor: 0.22
@@ -308,6 +341,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.08
         beam_width: 4
+        max_steps: 100
       resolver:
         selection_temperature: 0.25
         min_confidence_floor: 0.25
@@ -329,6 +363,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.10
         beam_width: 5
+        max_steps: 150
       resolver:
         selection_temperature: 0.30
         min_confidence_floor: 0.24
@@ -350,6 +385,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.09
         beam_width: 4
+        max_steps: 150
       resolver:
         selection_temperature: 0.26
         min_confidence_floor: 0.26
@@ -366,6 +402,7 @@ adaptive_behavior:
       escape:
         stochastic_jump_prob: 0.20
         beam_width: 7
+        max_steps: 100
       resolver:
         selection_temperature: 0.70
         min_confidence_floor: 0.20

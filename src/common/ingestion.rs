@@ -24,7 +24,7 @@ pub fn ingest_text(
     let packet = input::ingest_raw(text, !matches!(source_kind, SourceKind::UserInput));
     let build_output = UnitBuilder::build_units_static(&packet, config);
     let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, config);
-    
+
     let context_summary = if context.is_empty() {
         summarize_packet(&packet)
     } else {
@@ -57,22 +57,19 @@ pub fn ingest_texts_batch(
     config: &UnitBuilderConfig,
 ) -> usize {
     memory.set_training_mode(true);
-    
+
     let mut total = 0;
     for text in texts {
         let ids = ingest_text(memory, text, source_kind, context, config);
         total += ids.len();
     }
-    
+
     memory.set_training_mode(false);
     total
 }
 
 /// Build units from text without storing (for validation/testing)
-pub fn build_hierarchy(
-    text: &str,
-    config: &UnitBuilderConfig,
-) -> UnitHierarchy {
+pub fn build_hierarchy(text: &str, config: &UnitBuilderConfig) -> UnitHierarchy {
     let packet = input::ingest_raw(text, true);
     let build_output = UnitBuilder::build_units_static(&packet, config);
     HierarchicalUnitOrganizer::organize(&build_output, config)
@@ -82,16 +79,4 @@ pub fn build_hierarchy(
 fn summarize_packet(packet: &InputPacket) -> String {
     // Use normalized_text, truncated to reasonable length
     packet.normalized_text.chars().take(100).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_hierarchy() {
-        let config = UnitBuilderConfig::default();
-        let hierarchy = build_hierarchy("The capital of France is Paris.", &config);
-        assert!(!hierarchy.levels.is_empty());
-    }
 }

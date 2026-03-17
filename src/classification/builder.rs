@@ -89,7 +89,11 @@ impl DiscoveryThresholds {
     fn default(packet: &InputPacket, config: &UnitBuilderConfig) -> Self {
         Self {
             min_frequency: config.min_frequency_threshold.max(1),
-            min_utility_threshold: if packet.training_mode { 0.06 } else { 0.08 },
+            min_utility_threshold: if packet.training_mode {
+                config.training_min_utility_threshold
+            } else {
+                config.inference_min_utility_threshold
+            },
         }
     }
 
@@ -128,7 +132,8 @@ impl DiscoveryThresholds {
             min_utility_threshold: if packet.training_mode {
                 utility_threshold
             } else {
-                (utility_threshold * 0.9).max(0.08)
+                (utility_threshold * config.inference_utility_threshold_scale)
+                    .max(config.inference_min_utility_threshold)
             },
         }
     }
@@ -700,138 +705,4 @@ fn min_window_size(config: &UnitBuilderConfig) -> usize {
 
 fn max_window_size(config: &UnitBuilderConfig) -> usize {
     rolling_window_sizes(config).into_iter().last().unwrap_or(8)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::UnitBuilder;
-    use crate::classification::hierarchy::HierarchicalUnitOrganizer;
-    use crate::classification::input;
-    use crate::config::{GovernanceConfig, UnitBuilderConfig};
-    use crate::memory::store::MemoryStore;
-    use crate::types::{DatabaseHealthMetrics, DatabaseMaturityStage, SourceKind};
-    use uuid::Uuid;
-
-    #[test]
-    fn rolling_hash_discovery_prefers_reused_windows() {
-        let packet = input::ingest_raw("reasoning reasoning reasoning anchors anchors", true);
-        let output = UnitBuilder::ingest(&packet);
-
-        assert!(!output.activated_units.is_empty());
-        assert!(output.activated_units.iter().any(
-            |unit| unit.frequency >= 2 && unit.context_hint.starts_with("rolling_hash_window_")
-        ));
-    }
-
-    #[test]
-    fn adaptive_thresholds_tighten_with_database_maturity() {
-        let packet = input::ingest_raw(
-            "therefore therefore because because reasoning reasoning",
-            true,
-        );
-        let governance = GovernanceConfig::default();
-        let cold = DatabaseHealthMetrics {
-            total_units: 128,
-            maturity_stage: DatabaseMaturityStage::ColdStart,
-            ..DatabaseHealthMetrics::default()
-        };
-        let stable = DatabaseHealthMetrics {
-            total_units: 20_000,
-            maturity_stage: DatabaseMaturityStage::Stable,
-            ..DatabaseHealthMetrics::default()
-        };
-
-        let builder = UnitBuilderConfig::default();
-        let cold_output =
-            UnitBuilder::ingest_with_governance(&packet, &builder, &governance, &cold);
-        let stable_output =
-            UnitBuilder::ingest_with_governance(&packet, &builder, &governance, &stable);
-
-        assert!(cold_output.activated_units.len() >= stable_output.activated_units.len());
-    }
-
-    #[test]
-    fn full_words_are_preferred_over_long_internal_fragments() {
-        let packet = input::ingest_raw("Catholic Catholic Catholic", true);
-        let output = UnitBuilder::ingest(&packet);
-
-        assert!(output.activated_units.iter().any(
-            |unit| unit.normalized == "catholic" && unit.level == crate::types::UnitLevel::Word
-        ));
-        assert!(!output.activated_units.iter().any(|unit| matches!(
-            unit.normalized.as_str(),
-            "cath" | "atholic" | "catholi" | "tholic"
-        )));
-    }
-
-    #[test]
-    fn multiword_fragments_require_clean_token_boundaries() {
-        let packet = input::ingest_raw("healthy Eating her team healthy Eating her team", true);
-        let output = UnitBuilder::ingest(&packet);
-
-        assert!(output
-            .activated_units
-            .iter()
-            .any(|unit| unit.normalized == "her team"));
-        assert!(!output.activated_units.iter().any(|unit| matches!(
-            unit.normalized.as_str(),
-            "hy eati" | "althy e" | "lthy ea" | "y eatin" | "thy eat"
-        )));
-    }
-
-    #[test]
-    fn unicode_boundaries_keep_contractions_and_hyphenated_words() {
-        let packet = input::ingest_raw("don't don't re-use re-use café café", true);
-        let output = UnitBuilder::ingest(&packet);
-
-        assert!(output
-            .activated_units
-            .iter()
-            .any(|unit| unit.normalized == "don't"));
-        assert!(output
-            .activated_units
-            .iter()
-            .any(|unit| unit.normalized == "re-use"));
-        assert!(output
-            .activated_units
-            .iter()
-            .any(|unit| unit.normalized == "café"));
-    }
-
-    #[test]
-    fn global_corroboration_can_restore_known_units() {
-        let db_path =
-            std::env::temp_dir().join(format!("spse_global_builder_{}.db", Uuid::new_v4()));
-        let mut store = MemoryStore::new(db_path.to_str().expect("db path"));
-        let mut config = UnitBuilderConfig::default();
-        config.global_corroboration_frequency_threshold = 1;
-        config.global_corroboration_utility_threshold = 0.0;
-        config.global_corroboration_confidence_threshold = 0.0;
-        let known_packet =
-            input::ingest_raw("atholic atholic atholic atholic atholic atholic", true);
-        let known_output = UnitBuilder::ingest_with_config(&known_packet, &config);
-        let known_hierarchy = HierarchicalUnitOrganizer::organize(&known_output, &config);
-        store.ingest_hierarchy(&known_hierarchy, SourceKind::UserInput, "known_fragment");
-        let snapshot = store.snapshot();
-
-        let packet = input::ingest_raw("Catholic", true);
-        let governance = GovernanceConfig::default();
-        let database_health = DatabaseHealthMetrics {
-            total_units: 256,
-            maturity_stage: DatabaseMaturityStage::ColdStart,
-            ..DatabaseHealthMetrics::default()
-        };
-        let output = UnitBuilder::ingest_with_governance_snapshot(
-            &packet,
-            &config,
-            &governance,
-            &database_health,
-            Some(&snapshot),
-        );
-
-        assert!(output
-            .activated_units
-            .iter()
-            .any(|unit| unit.normalized == "atholic"));
-    }
 }

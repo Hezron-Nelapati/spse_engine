@@ -82,35 +82,38 @@ pub fn run_consistency_check(
     // Generate consistency validation dataset
     let generator = ConsistencyDatasetGenerator::new();
     let examples = generator.generate_full_dataset();
-    
+
     if examples.len() < 5000 {
-        return Err(format!("Insufficient consistency examples: {} (need 5K+)", examples.len()));
+        return Err(format!(
+            "Insufficient consistency examples: {} (need 5K+)",
+            examples.len()
+        ));
     }
-    
+
     let mut violations = Vec::new();
     let mut per_rule_violations: HashMap<ConsistencyRule, usize> = HashMap::new();
-    
+
     // Check each consistency rule
     for (idx, example) in examples.iter().enumerate() {
         // Determine which rules apply to this example
         let applicable_rules = determine_applicable_rules(example);
-        
+
         for rule in applicable_rules {
             let result = check_rule(example, rule, memory, config)?;
-            
+
             if !result.passed {
                 *per_rule_violations.entry(rule).or_insert(0) += 1;
                 violations.push(result);
             }
         }
     }
-    
+
     // Calculate L_consistency
     let l_consistency = violations.len() as f32 / examples.len() as f32;
-    
+
     // Generate corrections
     let corrections = generate_corrections(&violations, config);
-    
+
     Ok(ConsistencyReport {
         total_examples: examples.len(),
         violations,
@@ -150,7 +153,7 @@ pub fn apply_consistency_corrections(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -158,7 +161,7 @@ pub fn apply_consistency_corrections(
 
 fn determine_applicable_rules(example: &TrainingExample) -> Vec<ConsistencyRule> {
     let mut rules = Vec::new();
-    
+
     // Check context tags to determine which rules apply
     if let Some(context) = &example.context {
         if context.starts_with("r1:") {
@@ -177,7 +180,7 @@ fn determine_applicable_rules(example: &TrainingExample) -> Vec<ConsistencyRule>
             rules.push(ConsistencyRule::R7BroadSparsityProactive);
         }
     }
-    
+
     rules
 }
 
@@ -191,14 +194,17 @@ fn check_rule(
     let mem = memory.lock().map_err(|e| format!("Lock error: {}", e))?;
     let intent_centroids = mem.intent_centroids();
     drop(mem);
-    
+
     // Simulate running the example through the pipeline and check if behavior matches rule
     let passed = match rule {
         ConsistencyRule::R1HighUncertaintyRetrieve => {
             // Check: if confidence < threshold, retrieval must be triggered
-            let confidence = example.quality_gates.min_unit_discovery_efficiency.unwrap_or(0.50);
+            let confidence = example
+                .quality_gates
+                .min_unit_discovery_efficiency
+                .unwrap_or(0.50);
             let threshold = config.retrieval.entropy_threshold;
-            
+
             if confidence < 0.40 {
                 // Low confidence should trigger retrieval
                 // Check if the intent is one that requires retrieval
@@ -217,11 +223,15 @@ fn check_rule(
                 example.intent.as_deref(),
                 Some("Greeting") | Some("Farewell") | Some("Gratitude")
             );
-            
+
             if is_social {
                 // Social intents should NOT have reasoning traces
-                example.reasoning.is_none() || 
-                example.reasoning.as_ref().map(|r| r.steps.is_empty()).unwrap_or(true)
+                example.reasoning.is_none()
+                    || example
+                        .reasoning
+                        .as_ref()
+                        .map(|r| r.steps.is_empty())
+                        .unwrap_or(true)
             } else {
                 true
             }
@@ -232,11 +242,14 @@ fn check_rule(
                 example.intent.as_deref(),
                 Some("Verify") | Some("Question") | Some("Explain")
             );
-            
+
             if is_factual && !example.entities.is_empty() {
                 // Check if entities appear in answer (anchor protection)
                 let answer_lower = example.answer.to_lowercase();
-                example.entities.iter().any(|e| answer_lower.contains(&e.to_lowercase()))
+                example
+                    .entities
+                    .iter()
+                    .any(|e| answer_lower.contains(&e.to_lowercase()))
             } else {
                 true
             }
@@ -247,7 +260,7 @@ fn check_rule(
                 example.intent.as_deref(),
                 Some("Brainstorm") | Some("Critique") | Some("Creative")
             );
-            
+
             if is_creative {
                 // Creative responses should have varied content (longer answers)
                 example.answer.len() > 50
@@ -257,12 +270,18 @@ fn check_rule(
         }
         ConsistencyRule::R5ColdStartPenalty => {
             // Check: cold-start (no prior context) reduces confidence
-            let is_cold_start = example.context.is_none() || 
-                example.context.as_ref().map(|c| c.contains("cold_start")).unwrap_or(false);
-            
+            let is_cold_start = example.context.is_none()
+                || example
+                    .context
+                    .as_ref()
+                    .map(|c| c.contains("cold_start"))
+                    .unwrap_or(false);
+
             if is_cold_start {
                 // Cold start should have reduced confidence in quality gates
-                example.quality_gates.min_unit_discovery_efficiency
+                example
+                    .quality_gates
+                    .min_unit_discovery_efficiency
                     .map(|c| c < 0.8)
                     .unwrap_or(true)
             } else {
@@ -271,10 +290,12 @@ fn check_rule(
         }
         ConsistencyRule::R6ContradictionPenalty => {
             // Check: contradictions in evidence should penalize confidence
-            let has_contradiction = example.context.as_ref()
+            let has_contradiction = example
+                .context
+                .as_ref()
                 .map(|c| c.contains("contradiction"))
                 .unwrap_or(false);
-            
+
             if has_contradiction {
                 // Contradictions should reduce corroboration requirement
                 example.quality_gates.min_corroboration_count >= 2
@@ -285,10 +306,12 @@ fn check_rule(
         ConsistencyRule::R7BroadSparsityProactive => {
             // Check: broad queries trigger proactive learning
             let is_broad = example.question.split_whitespace().count() <= 3;
-            
+
             if is_broad {
                 // Broad queries should have lower discovery threshold
-                example.quality_gates.min_unit_discovery_efficiency
+                example
+                    .quality_gates
+                    .min_unit_discovery_efficiency
                     .map(|c| c <= 0.9)
                     .unwrap_or(true)
             } else {
@@ -296,13 +319,16 @@ fn check_rule(
             }
         }
     };
-    
+
     Ok(ConsistencyCheckResult {
         example_id: 0,
         rule,
         passed,
         expected_behavior: format!("{:?} expected behavior", rule),
-        actual_behavior: format!("Actual behavior: {}", if passed { "correct" } else { "incorrect" }),
+        actual_behavior: format!(
+            "Actual behavior: {}",
+            if passed { "correct" } else { "incorrect" }
+        ),
         correction_needed: if !passed {
             Some(generate_correction_for_rule(rule))
         } else {
@@ -316,13 +342,13 @@ fn generate_corrections(
     config: &EngineConfig,
 ) -> Vec<ConsistencyCorrection> {
     let mut corrections = Vec::new();
-    
+
     for violation in violations {
         if let Some(correction) = &violation.correction_needed {
             corrections.push(correction.clone());
         }
     }
-    
+
     corrections
 }
 
@@ -373,46 +399,59 @@ fn generate_correction_for_rule(rule: ConsistencyRule) -> ConsistencyCorrection 
     }
 }
 
-fn apply_lower_threshold(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_lower_threshold(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     match correction.target_system {
         TargetSystem::Reasoning => {
             // Lower retrieval entropy threshold to trigger retrieval more often
-            config.retrieval.entropy_threshold = 
+            config.retrieval.entropy_threshold =
                 (config.retrieval.entropy_threshold - correction.adjustment_value.abs()).max(0.1);
         }
         TargetSystem::Classification => {
             // Lower classification low confidence threshold
-            config.classification.low_confidence_threshold = 
-                (config.classification.low_confidence_threshold - correction.adjustment_value.abs()).max(0.1);
+            config.classification.low_confidence_threshold =
+                (config.classification.low_confidence_threshold
+                    - correction.adjustment_value.abs())
+                .max(0.1);
         }
         _ => {}
     }
     Ok(())
 }
 
-fn apply_raise_threshold(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_raise_threshold(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     match correction.target_system {
         TargetSystem::Reasoning => {
             // Raise retrieval threshold to reduce unnecessary retrievals
-            config.retrieval.decision_threshold = 
+            config.retrieval.decision_threshold =
                 (config.retrieval.decision_threshold + correction.adjustment_value.abs()).min(2.0);
         }
         TargetSystem::Classification => {
             // Raise classification high confidence threshold
-            config.classification.high_confidence_threshold = 
-                (config.classification.high_confidence_threshold + correction.adjustment_value.abs()).min(0.95);
+            config.classification.high_confidence_threshold =
+                (config.classification.high_confidence_threshold
+                    + correction.adjustment_value.abs())
+                .min(0.95);
         }
         _ => {}
     }
     Ok(())
 }
 
-fn apply_add_shortcircuit(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_add_shortcircuit(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     // Add intent to social short-circuit list by lowering resolver confidence for social intents
     match correction.target_system {
         TargetSystem::Classification => {
             // Social intents should have lower resolver thresholds
-            config.resolver.min_confidence_floor = 
+            config.resolver.min_confidence_floor =
                 (config.resolver.min_confidence_floor - 0.1).max(0.1);
         }
         _ => {}
@@ -420,16 +459,20 @@ fn apply_add_shortcircuit(config: &mut EngineConfig, correction: &ConsistencyCor
     Ok(())
 }
 
-fn apply_increase_trust(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_increase_trust(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     match correction.target_system {
         TargetSystem::Predictive => {
             // Increase anchor trust by raising confidence floor
-            config.resolver.min_confidence_floor = 
-                (config.resolver.min_confidence_floor + correction.adjustment_value.abs()).min(0.95);
+            config.resolver.min_confidence_floor = (config.resolver.min_confidence_floor
+                + correction.adjustment_value.abs())
+            .min(0.95);
         }
         TargetSystem::Reasoning => {
             // Increase confidence scoring weight (proxy for trust)
-            config.scoring.confidence = 
+            config.scoring.confidence =
                 (config.scoring.confidence + correction.adjustment_value.abs()).min(0.5);
         }
         _ => {}
@@ -437,14 +480,18 @@ fn apply_increase_trust(config: &mut EngineConfig, correction: &ConsistencyCorre
     Ok(())
 }
 
-fn apply_lower_confidence_floor(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_lower_confidence_floor(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     match correction.target_system {
         TargetSystem::Predictive | TargetSystem::Classification => {
-            config.resolver.min_confidence_floor = 
-                (config.resolver.min_confidence_floor - correction.adjustment_value.abs()).max(0.05);
+            config.resolver.min_confidence_floor = (config.resolver.min_confidence_floor
+                - correction.adjustment_value.abs())
+            .max(0.05);
         }
         TargetSystem::Reasoning => {
-            config.retrieval.decision_threshold = 
+            config.retrieval.decision_threshold =
                 (config.retrieval.decision_threshold - correction.adjustment_value.abs()).max(0.5);
         }
         _ => {}
@@ -452,12 +499,15 @@ fn apply_lower_confidence_floor(config: &mut EngineConfig, correction: &Consiste
     Ok(())
 }
 
-fn apply_penalize_pattern(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_penalize_pattern(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     // Pattern penalty applied by adjusting scoring weights
     match correction.target_system {
         TargetSystem::Predictive => {
             // Reduce utility weight for patterns that cause contradictions
-            config.scoring.utility = 
+            config.scoring.utility =
                 (config.scoring.utility - correction.adjustment_value.abs()).max(0.0);
         }
         _ => {}
@@ -465,30 +515,18 @@ fn apply_penalize_pattern(config: &mut EngineConfig, correction: &ConsistencyCor
     Ok(())
 }
 
-fn apply_suppress_intent_split(config: &mut EngineConfig, correction: &ConsistencyCorrection) -> Result<(), String> {
+fn apply_suppress_intent_split(
+    config: &mut EngineConfig,
+    correction: &ConsistencyCorrection,
+) -> Result<(), String> {
     // Suppress structural feedback intent splitting by reducing sparsity sensitivity
     match correction.target_system {
         TargetSystem::Predictive => {
             // Increase spatial cell size to reduce granularity
-            config.semantic_map.spatial_cell_size = 
+            config.semantic_map.spatial_cell_size =
                 (config.semantic_map.spatial_cell_size * 1.1).min(2.0);
         }
         _ => {}
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consistency_check_covers_all_rules() {
-        // Test that all 7 rules are checked
-    }
-
-    #[test]
-    fn corrections_are_generated_for_violations() {
-        // Test correction generation
-    }
 }

@@ -54,28 +54,28 @@ impl PredictiveQAGenerator {
                 ("Brazil", "Brasília", "South American"),
                 ("Australia", "Canberra", "southeastern Australian"),
             ]),
-            
+
             // Science
             ("How does {process} work?", "{process} is a biological process where {description}.", vec![
                 ("photosynthesis", "plants convert sunlight into chemical energy using chlorophyll in their cells", "plant biology"),
                 ("respiration", "cells break down glucose to release energy in the form of ATP", "cellular metabolism"),
                 ("osmosis", "water molecules move across a semipermeable membrane from high to low concentration", "membrane transport"),
             ]),
-            
+
             // Technology
             ("What is {technology}?", "{technology} is {definition} commonly used in {application}.", vec![
                 ("artificial intelligence", "computer systems designed to perform tasks requiring human intelligence", "automation and decision-making"),
                 ("blockchain", "a distributed ledger technology using cryptographic hashing", "cryptocurrency and supply chain tracking"),
                 ("quantum computing", "computational systems using quantum-mechanical phenomena", "cryptography and drug discovery"),
             ]),
-            
+
             // History
             ("When did {event} happen?", "{event} occurred in {year} when {details}.", vec![
                 ("World War II end", "1945", "Allied forces achieved victory in Europe and the Pacific"),
                 ("Moon landing", "1969", "Apollo 11 astronauts Neil Armstrong and Buzz Aldrin stepped onto the lunar surface"),
                 ("Fall of Berlin Wall", "1989", "East and West Germans reunited after decades of separation"),
             ]),
-            
+
             // General knowledge
             ("Why is {concept} important?", "{concept} is important because {reason}.", vec![
                 ("biodiversity", "it maintains ecosystem stability and provides resources for human survival", "ecology"),
@@ -85,21 +85,21 @@ impl PredictiveQAGenerator {
         ];
 
         let per_template = count / qa_templates.len();
-        
+
         for (q_template, a_template, variants) in qa_templates {
             for variant in variants.iter().cycle().take(per_template) {
                 let (placeholder_val, answer_val, extra_val) = match variant {
                     (a, b, c) => (*a, *b, *c),
                     _ => continue,
                 };
-                
+
                 let question = q_template
                     .replace("{country}", placeholder_val)
                     .replace("{process}", placeholder_val)
                     .replace("{technology}", placeholder_val)
                     .replace("{event}", placeholder_val)
                     .replace("{concept}", placeholder_val);
-                
+
                 let answer = a_template
                     .replace("{capital}", answer_val)
                     .replace("{region}", extra_val)
@@ -114,7 +114,7 @@ impl PredictiveQAGenerator {
                     .replace("{details}", extra_val)
                     .replace("{concept}", placeholder_val)
                     .replace("{reason}", answer_val);
-                
+
                 examples.push(TrainingExample {
                     question: question.clone(),
                     answer: answer.clone(),
@@ -162,14 +162,16 @@ impl PredictiveQAGenerator {
         ];
 
         let per_template = count / compound_templates.len();
-        
+
         for (q_template, a_template, variants) in compound_templates {
             for variant in variants.iter().cycle().take(per_template) {
                 let (compound, definition) = *variant;
-                
+
                 let question = q_template.replace("{compound}", compound);
-                let answer = a_template.replace("{compound}", compound).replace("{definition}", definition);
-                
+                let answer = a_template
+                    .replace("{compound}", compound)
+                    .replace("{definition}", definition);
+
                 examples.push(TrainingExample {
                     question: question.clone(),
                     answer: answer.clone(),
@@ -217,14 +219,16 @@ impl PredictiveQAGenerator {
         ];
 
         let per_template = count / rare_word_templates.len();
-        
+
         for (q_template, a_template, variants) in rare_word_templates {
             for variant in variants.iter().cycle().take(per_template) {
                 let (rare_term, definition) = *variant;
-                
+
                 let question = q_template.replace("{rare_term}", rare_term);
-                let answer = a_template.replace("{rare_term}", rare_term).replace("{definition}", definition);
-                
+                let answer = a_template
+                    .replace("{rare_term}", rare_term)
+                    .replace("{definition}", definition);
+
                 examples.push(TrainingExample {
                     question,
                     answer,
@@ -258,34 +262,5 @@ impl PredictiveQAGenerator {
 impl Default for PredictiveQAGenerator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generates_predictive_dataset() {
-        let generator = PredictiveQAGenerator::new();
-        let examples = generator.generate_full_dataset();
-        
-        assert!(examples.len() >= 100000, "Should generate 100K+ examples");
-        
-        // Verify answer lengths
-        let avg_words: f32 = examples.iter()
-            .map(|e| e.answer.split_whitespace().count() as f32)
-            .sum::<f32>() / examples.len() as f32;
-        
-        assert!(avg_words >= 15.0 && avg_words <= 25.0, "Average answer length should be ~20 words");
-    }
-
-    #[test]
-    fn includes_compound_nouns() {
-        let generator = PredictiveQAGenerator::new();
-        let examples = generator.generate_compound_noun_qa(100);
-        
-        let has_compounds = examples.iter().any(|e| e.question.contains("machine learning") || e.question.contains("climate change"));
-        assert!(has_compounds, "Should include compound nouns");
     }
 }

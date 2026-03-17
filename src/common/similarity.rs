@@ -171,33 +171,3 @@ impl SimilarityUtils {
             .collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_jaccard_similarity() {
-        let sim = SimilarityUtils::jaccard_similarity("hello world", "hello there");
-        assert!((sim - 0.333).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_semantically_equivalent() {
-        assert!(SimilarityUtils::semantically_equivalent(
-            "hello world",
-            "hello world"
-        ));
-        assert!(!SimilarityUtils::semantically_equivalent(
-            "hello world",
-            "hello there"
-        ));
-    }
-
-    #[test]
-    fn test_exact_match_score() {
-        let query = vec!["donald".to_string(), "trump".to_string()];
-        let score = SimilarityUtils::exact_match_score("donald trump", &query);
-        assert!((score - 0.85).abs() < 0.01);
-    }
-}

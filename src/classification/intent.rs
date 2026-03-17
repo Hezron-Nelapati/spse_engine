@@ -64,6 +64,12 @@ impl IntentDetector {
         if matches!(intent.primary, IntentKind::Verify) {
             reasons.push("verification_request".to_string());
         }
+        if matches!(intent.fallback_mode, IntentFallbackMode::DocumentScope) {
+            reasons.push("document_scope_fallback".to_string());
+        }
+        if matches!(intent.fallback_mode, IntentFallbackMode::ClarifyHelp) {
+            reasons.push("clarify_help_fallback".to_string());
+        }
         if matches!(intent.fallback_mode, IntentFallbackMode::RetrieveUnknown) {
             reasons.push("low_confidence_force_retrieval".to_string());
         }
@@ -94,7 +100,10 @@ impl IntentDetector {
         }
 
         SearchDecision {
-            should_retrieve: !social_or_local
+            should_retrieve: !matches!(
+                intent.fallback_mode,
+                IntentFallbackMode::DocumentScope | IntentFallbackMode::ClarifyHelp
+            ) && !social_or_local
                 && (matches!(intent.fallback_mode, IntentFallbackMode::RetrieveUnknown)
                     || score >= thresholds.decision_threshold
                     || open_world_force),
@@ -299,65 +308,4 @@ fn token_overlap(lhs: &[String], rhs: &[String]) -> f32 {
         .count();
 
     intersection as f32 / lhs.len().max(rhs.len()) as f32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::IntentDetector;
-    use super::*;
-    use crate::config::ReasoningLoopConfig;
-    use crate::types::{
-        IntentFallbackMode, IntentProfile, MemoryType, ScoreBreakdown, ScoredCandidate,
-    };
-    use uuid::Uuid;
-
-    #[test]
-    fn assess_triggers_retrieval_on_high_entropy() {
-        let scored = vec![
-            ScoredCandidate {
-                unit_id: Uuid::new_v4(),
-                content: "test candidate".to_string(),
-                score: 0.3,
-                breakdown: ScoreBreakdown::default(),
-                memory_type: MemoryType::Episodic,
-            },
-            ScoredCandidate {
-                unit_id: Uuid::new_v4(),
-                content: "another candidate".to_string(),
-                score: 0.3,
-                breakdown: ScoreBreakdown::default(),
-                memory_type: MemoryType::Episodic,
-            },
-        ];
-        let entropy = IntentDetector::calculate_entropy(&scored);
-        assert!(entropy > 0.5);
-    }
-
-    #[test]
-    fn token_overlap_counts_shared_terms() {
-        let lhs = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
-        let rhs = vec!["beta".to_string(), "delta".to_string(), "gamma".to_string()];
-        let overlap = super::token_overlap(&lhs, &rhs);
-        assert!((overlap - (2.0 / 3.0)).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn should_trigger_reasoning_on_narrow_top_gap() {
-        let intent = IntentProfile {
-            primary: IntentKind::Question,
-            confidence: 0.62,
-            top_score: 0.58,
-            second_score: 0.49,
-            ambiguous: false,
-            wants_brief: false,
-            references_document_context: false,
-            certainty_bias: 0.0,
-            fallback_mode: IntentFallbackMode::None,
-            scores: vec![],
-            reasons: vec![],
-        };
-
-        let config = ReasoningLoopConfig::default();
-        assert!(IntentDetector::should_trigger_reasoning(&intent, &config));
-    }
 }

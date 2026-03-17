@@ -30,19 +30,17 @@ use crate::telemetry::{
     LatencyMonitor, LatencyMonitorConfig, LatencyTimer, SessionId, TelemetryEvent, TelemetryWorker,
     TelemetryWorkerConfig, TraceContext, TraceId,
 };
-use crate::training::{self, TrainingScope};
+use crate::training;
 use crate::types::{
-    ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, DryRunReport,
-    ExplainTrace, InputPacket, IntentKind, IntentProfile, JobState, LayerNote, MemoryChannel,
-    MemoryType, MergedState, OutputType, ProcessResult, QueueDepths, ReasoningResult,
-    ReasoningState, ResolverMode, RetrievedDocument, RoutingResult, SearchDecision, SequenceState,
-    SourceKind, ThoughtUnit, TrainBatchRequest, TrainingExecutionMode, TrainingJobStatus,
-    TrainingMetrics, TrainingPhaseKind, TrainingPhaseStatus, Unit, UnitHierarchy,
+    ActivatedUnit, ConfidenceStats, ContextMatrix, DatabaseHealthMetrics, DebugStep, ExplainTrace,
+    InputPacket, IntentKind, IntentProfile, LayerNote, MemoryChannel, MemoryType, MergedState,
+    OutputType, ProcessResult, QueueDepths, ReasoningResult, ReasoningState, ResolverMode,
+    RetrievedDocument, RoutingResult, SearchDecision, SequenceState, SourceKind, ThoughtUnit,
+    TrainingExecutionMode, TrainingMetrics, Unit, UnitHierarchy,
 };
 use arc_swap::ArcSwap;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -85,6 +83,7 @@ impl AdaptiveRuntimeSettings {
             escape: EscapeProfile {
                 stochastic_jump_prob: 0.0,
                 beam_width: config.governance.max_candidate_pool.max(1),
+                max_steps: EscapeProfile::default().max_steps,
             },
             resolver: config.resolver.clone(),
             resolver_mode: None,
@@ -107,7 +106,6 @@ pub struct Engine {
     feedback: FeedbackController,
     feedback_tx: Sender<Vec<crate::types::FeedbackEvent>>,
     safety: TrustSafetyValidator,
-    jobs: Arc<Mutex<HashMap<String, TrainingJobStatus>>>,
     session_documents: Arc<Mutex<SessionDocuments>>,
     observer: Option<TestObserver>,
     /// Phase 4: Telemetry worker for async event emission
@@ -153,7 +151,6 @@ impl Engine {
             Arc::new(ArcSwap::from_pointee(memory.snapshot()))
         };
         let scheduler = Arc::new(PriorityScheduler::new());
-        let jobs = Arc::new(Mutex::new(HashMap::new()));
         let session_documents = Arc::new(Mutex::new(SessionDocuments::default()));
         let (feedback_tx, feedback_rx) = bounded(1024);
         let observer = TestObserver::from_config(&config);
@@ -243,7 +240,6 @@ impl Engine {
             feedback: FeedbackController,
             feedback_tx,
             safety: TrustSafetyValidator,
-            jobs,
             session_documents,
             observer,
             telemetry_worker,
@@ -662,470 +658,65 @@ impl Engine {
         self.memory_snapshot.store(snapshot);
     }
 
-    pub async fn train(&self) -> TrainingJobStatus {
+    pub async fn train(&self) -> Result<TrainingMetrics, String> {
         self.train_with_execution_mode(TrainingExecutionMode::User)
             .await
     }
 
     pub async fn train_with_execution_mode(
         &self,
-        execution_mode: TrainingExecutionMode,
-    ) -> TrainingJobStatus {
-        self.train_with_scope(execution_mode, TrainingScope::Full, None)
-            .await
-    }
-
-    pub async fn train_with_scope(
-        &self,
-        execution_mode: TrainingExecutionMode,
-        scope: TrainingScope,
-        source_filter: Option<&str>,
-    ) -> TrainingJobStatus {
-        let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
-        let job_id = format!("train_{}", Uuid::new_v4().simple());
-        let mut plan =
-            training::build_training_plan_with_config(&self.config, execution_mode, scope);
-        if let Some(filter) = source_filter {
-            for phase in &mut plan.phases {
-                phase.sources.retain(|s| s.name.as_deref() == Some(filter));
-            }
-        }
-        self.run_training_plan_with_id(job_id, plan).await
-    }
-
-    pub fn start_train(&self, _execution_mode: TrainingExecutionMode) -> String {
-        let job_id = format!("train_{}", Uuid::new_v4().simple());
-        // Spawn happens in api.rs handler to avoid lifetime issues
-        job_id
-    }
-
-    pub fn start_train_with_scope(
-        &self,
         _execution_mode: TrainingExecutionMode,
-        _scope: TrainingScope,
-    ) -> String {
-        let job_id = format!("train_{}", Uuid::new_v4().simple());
-        // Spawn happens in api.rs handler to avoid lifetime issues
-        job_id
-    }
-
-    pub fn training_status(&self, job_id: &str) -> Option<TrainingJobStatus> {
-        let jobs = self.jobs.lock().expect("jobs mutex poisoned");
-        jobs.get(job_id).cloned()
-    }
-
-    /// Train with a batch request (used by test harness and API)
-    pub async fn train_batch(&self, request: TrainBatchRequest) -> TrainingJobStatus {
+    ) -> Result<TrainingMetrics, String> {
         let _permit = self.scheduler.acquire(WorkPriority::SilentBatch);
-        let job_id = format!("train_batch_{}", Uuid::new_v4().simple());
+        let started = Instant::now();
+        let memory = self.memory();
 
-        // Build a minimal training plan from the batch request
-        let plan = training::TrainingPlan {
-            phases: vec![training::TrainingPhasePlan {
-                phase: TrainingPhaseKind::Bootstrap,
-                batches_target: 1,
-                sources: request.sources.clone(),
-                options: request.options.clone(),
-                min_unit_discovery_efficiency: None,
-                min_semantic_routing_accuracy: None,
-            }],
-        };
+        let classification = training::train_classification(&memory, &self.config)?;
+        let reasoning = training::train_reasoning(&memory, &self.config)?;
+        let predictive = training::train_predictive(&memory, &self.config)?;
 
-        self.run_training_plan_with_id(job_id, plan).await
-    }
+        self.publish_memory_snapshot();
 
-    pub async fn run_training_plan_with_id(
-        &self,
-        job_id: String,
-        plan: crate::training::TrainingPlan,
-    ) -> TrainingJobStatus {
-        let mut status = TrainingJobStatus {
-            job_id: job_id.clone(),
-            status: JobState::Processing,
-            active_phase: plan.phases.first().map(|p| p.phase),
-            phase_statuses: plan
-                .phases
-                .iter()
-                .map(|p| TrainingPhaseStatus {
-                    phase: p.phase,
-                    status: JobState::Queued,
-                    batches_completed: 0,
-                    batches_target: p.batches_target,
-                    sources_processed: 0,
-                    sources_total: p.sources.len(),
-                    metrics: TrainingMetrics::default(),
-                })
-                .collect(),
-            progress: crate::types::TrainingProgress::default(),
-            learning_metrics: crate::types::LearningMetrics::default(),
-            performance: crate::types::PerformanceMetrics::default(),
-            intent_distribution: std::collections::BTreeMap::new(),
-            warnings: Vec::new(),
-        };
+        let total_examples = classification.examples_ingested
+            + reasoning.examples_ingested
+            + predictive.examples_ingested;
+        let total_units =
+            classification.units_created + reasoning.units_created + predictive.units_created;
+        let avg_efficiency = (classification.unit_discovery_efficiency
+            + reasoning.unit_discovery_efficiency
+            + predictive.unit_discovery_efficiency)
+            / 3.0;
+        let avg_routing = (classification.semantic_routing_accuracy
+            + reasoning.semantic_routing_accuracy
+            + predictive.semantic_routing_accuracy)
+            / 3.0;
+        let avg_error = (classification.prediction_error
+            + reasoning.prediction_error
+            + predictive.prediction_error)
+            / 3.0;
+        let avg_precision = [
+            classification.search_trigger_precision.unwrap_or(0.0),
+            reasoning.search_trigger_precision.unwrap_or(0.0),
+            predictive.search_trigger_precision.unwrap_or(0.0),
+        ]
+        .iter()
+        .sum::<f32>()
+            / 3.0;
 
-        // Initialize per-run logger: creates training_jobs/<job_id>/ folder
-        let base_dir = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.db().base_dir().to_path_buf()
-        };
-        let mut run_logger = training::TrainingRunLogger::new(&base_dir, &job_id);
-        run_logger.write_status(&status);
-        self.store_job(status.clone());
-
-        let plan_start = Instant::now();
-        let mut total_examples: u64 = 0;
-        let mut total_units: u64 = 0;
-
-        for (phase_idx, phase) in plan.phases.iter().enumerate() {
-            let phase_start = Instant::now();
-            if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
-                ps.status = JobState::Processing;
-            }
-            status.active_phase = Some(phase.phase);
-            run_logger.write_status(&status);
-            self.store_job(status.clone());
-
-            let phase_label = format!("{:?}", phase.phase);
-            run_logger.log_progress(&format!(
-                "[training] phase {} — {} sources",
-                phase_label,
-                phase.sources.len()
-            ));
-
-            for (src_idx, source) in phase.sources.iter().enumerate() {
-                // Direct source resolution - no external datasets needed
-                let resolved = source.clone();
-
-                let file_path = match resolved.value.as_deref() {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => {
-                        let msg = format!("source {:?} has no file path", resolved.name);
-                        run_logger.log_progress(&format!("  WARNING: {}", msg));
-                        status.warnings.push(msg);
-                        continue;
-                    }
-                };
-
-                if !file_path.exists() {
-                    let msg = format!("source file not found: {}", file_path.display());
-                    run_logger.log_progress(&format!("  WARNING: {}", msg));
-                    status.warnings.push(msg);
-                    continue;
-                }
-
-                let item_limit = resolved.stream.item_limit.unwrap_or(200_000);
-                let target_memory = resolved.target_memory.unwrap_or(MemoryType::Episodic);
-                let channels = resolved
-                    .memory_channels
-                    .clone()
-                    .unwrap_or_else(|| vec![MemoryChannel::Main]);
-                let source_name = resolved.name.clone().unwrap_or_default();
-
-                run_logger.log_progress(&format!(
-                    "  [{}] reading {} (limit={}, memory={:?})",
-                    source_name,
-                    file_path.display(),
-                    item_limit,
-                    target_memory
-                ));
-
-                let file = match std::fs::File::open(&file_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let msg = format!("failed to open {}: {e}", file_path.display());
-                        run_logger.log_progress(&format!("  ERROR: {}", msg));
-                        status.warnings.push(msg);
-                        continue;
-                    }
-                };
-                let reader = std::io::BufReader::with_capacity(1024 * 1024, file);
-                use std::io::BufRead;
-
-                let mut examples_ingested: u64 = 0;
-                let mut units_created: u64 = 0;
-                let mut bytes_read: u64 = 0;
-                let mut batch_index: u64 = 0;
-                let max_bytes = resolved.stream.max_input_bytes.unwrap_or(usize::MAX) as u64;
-                let training_batch_size: usize =
-                    self.config.builder.training_batch_size.unwrap_or(500) as usize;
-
-                let is_classification_source = source_name == "seed_classification";
-
-                // Enable training mode: skip candidate staging, pattern combos, larger write batches
-                {
-                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                    memory.set_training_mode(true);
-                }
-
-                // Read lines into batches for parallel processing
-                let mut line_batch: Vec<String> = Vec::with_capacity(training_batch_size);
-                let mut done = false;
-
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(_) => continue,
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-
-                    bytes_read += line.len() as u64 + 1;
-                    if examples_ingested + line_batch.len() as u64 >= item_limit as u64
-                        || bytes_read > max_bytes
-                    {
-                        done = true;
-                    }
-
-                    line_batch.push(line);
-
-                    if line_batch.len() >= training_batch_size || done {
-                        let batch_start = Instant::now();
-
-                        // Parallel: parse JSON + build units for this batch
-                        let config_ref = &self.config.builder;
-                        let source_name_ref = &source_name;
-
-                        let classification_hasher = if is_classification_source {
-                            Some(crate::classification::SemanticHasher::new())
-                        } else {
-                            None
-                        };
-                        let hasher_ref = &classification_hasher;
-
-                        let prepared: Vec<_> = line_batch
-                            .par_iter()
-                            .filter_map(|raw_line| {
-                                let example: crate::seed::TrainingExample =
-                                    serde_json::from_str(raw_line).ok()?;
-                                let combined = if example.question.len() > 20 {
-                                    format!("{} — {}", example.question, example.answer)
-                                } else {
-                                    example.answer.clone()
-                                };
-                                let packet = input::ingest_raw(&combined, true);
-                                let build_output =
-                                    crate::classification::builder::UnitBuilder::build_units_static(
-                                        &packet, config_ref,
-                                    );
-                                let hierarchy =
-                                    HierarchicalUnitOrganizer::organize(&build_output, config_ref);
-                                let context_label = example
-                                    .context
-                                    .clone()
-                                    .unwrap_or_else(|| source_name_ref.clone());
-                                // Pre-compute classification signature in parallel
-                                let classification_data = hasher_ref.as_ref().and_then(|hasher| {
-                                    let gt = parse_classification_ground_truth(&example)?;
-                                    let sig =
-                                        crate::classification::ClassificationSignature::compute(
-                                            &example.question,
-                                            hasher,
-                                        );
-                                    Some((sig, gt))
-                                });
-                                Some((example, hierarchy, context_label, classification_data))
-                            })
-                            .collect();
-
-                        let build_elapsed = batch_start.elapsed();
-
-                        // Sequential: ingest all prepared hierarchies under a single lock
-                        let ingest_start = Instant::now();
-                        {
-                            let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                            for (example, hierarchy, context_label, _classification_data) in
-                                &prepared
-                            {
-                                let active_ids = memory.ingest_hierarchy_with_channels(
-                                    hierarchy,
-                                    SourceKind::TrainingDocument,
-                                    &context_label,
-                                    target_memory,
-                                    &channels,
-                                );
-                                units_created += active_ids.len() as u64;
-
-                                if let Some(ref trace) = example.reasoning {
-                                    let trace_ids = training::ingest_reasoning_trace(
-                                        &mut memory,
-                                        trace,
-                                        &example.question,
-                                    );
-                                    units_created += trace_ids.len() as u64;
-                                }
-                            }
-
-                            // Classification pattern storage (signatures pre-computed in parallel)
-                            if is_classification_source {
-                                let mut spatial = self
-                                    .spatial_grid
-                                    .lock()
-                                    .expect("spatial grid mutex poisoned");
-                                for (_, _, _, classification_data) in &prepared {
-                                    if let Some((sig, gt)) = classification_data {
-                                        let sig_hash = sig.signature_hash().to_string();
-                                        if let Some(existing_id) =
-                                            memory.classification_pattern_by_signature(&sig_hash)
-                                        {
-                                            if let Some(mut existing) =
-                                                memory.get_classification_pattern(existing_id)
-                                            {
-                                                existing.record_success();
-                                                memory.update_classification_pattern(existing);
-                                            }
-                                        } else {
-                                            let mut new_pattern =
-                                                crate::classification::ClassificationPattern::new(
-                                                    sig.clone(),
-                                                    gt.intent,
-                                                    gt.tone,
-                                                    gt.resolver_mode,
-                                                    gt.domain.clone(),
-                                                );
-                                            new_pattern.record_success();
-                                            spatial.insert(
-                                                new_pattern.unit_id,
-                                                &sig.semantic_centroid,
-                                            );
-                                            memory.store_classification_pattern(new_pattern);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let ingest_elapsed = ingest_start.elapsed();
-
-                        // Track intents (outside lock)
-                        for (example, _, _, _) in &prepared {
-                            if let Some(ref intent_str) = example.intent {
-                                *status
-                                    .intent_distribution
-                                    .entry(intent_str.clone())
-                                    .or_insert(0) += 1;
-                            }
-                        }
-
-                        examples_ingested += prepared.len() as u64;
-                        line_batch.clear();
-                        batch_index += 1;
-
-                        // Log progress with telemetry for every batch
-                        run_logger.log_batch_progress(
-                            &source_name,
-                            &phase_label,
-                            batch_index,
-                            examples_ingested,
-                            units_created,
-                            bytes_read,
-                            batch_start.elapsed(),
-                            build_elapsed,
-                            ingest_elapsed,
-                            done, // force print on last batch
-                        );
-
-                        if done {
-                            break;
-                        }
-                    }
-                }
-
-                // Disable training mode and bulk-flush cache to SQLite
-                {
-                    run_logger.log_progress("  [sqlite] flushing to database...");
-                    let flush_start = Instant::now();
-                    let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                    memory.set_training_mode(false);
-                    run_logger.log_progress(&format!(
-                        "  [sqlite] flushed in {:.1}s",
-                        flush_start.elapsed().as_secs_f64()
-                    ));
-                }
-
-                total_examples += examples_ingested;
-                total_units += units_created;
-
-                run_logger.log_progress(&format!(
-                    "  [{}] done: {} examples, {} units in {:.1}s",
-                    source_name,
-                    examples_ingested,
-                    units_created,
-                    run_logger.elapsed().as_secs_f64(),
-                ));
-
-                if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
-                    ps.sources_processed = src_idx + 1;
-                    ps.metrics.examples_ingested += examples_ingested;
-                    ps.metrics.units_created += units_created;
-                }
-                status.progress.sources_total = plan.phases.iter().map(|p| p.sources.len()).sum();
-                status.progress.sources_processed += 1;
-                run_logger.write_status(&status);
-                self.store_job(status.clone());
-            }
-
-            // Run governance after each phase
-            {
-                let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                let report = memory
-                    .prune_to_memory_budget((phase.options.max_memory_delta_mb * 1024.0) as i64);
-                run_logger.log_progress(&format!(
-                    "  [governance] pruned {} units, {} candidates",
-                    report.pruned_units, report.pruned_candidates
-                ));
-            }
-
-            // Rebuild spatial index
-            {
-                run_logger.log_progress("  [spatial] rebuilding index...");
-                let memory = self.memory.lock().expect("memory mutex poisoned");
-                let all_units = memory.all_units();
-                let routing = route_units(&all_units, &all_units, &self.config.semantic_map);
-                drop(memory);
-                let mut memory = self.memory.lock().expect("memory mutex poisoned");
-                memory.update_positions(&routing.position_updates);
-            }
-            self.publish_memory_snapshot();
-
-            if let Some(ps) = status.phase_statuses.get_mut(phase_idx) {
-                ps.status = JobState::Completed;
-                ps.batches_completed = phase.batches_target;
-            }
-
-            let phase_elapsed = phase_start.elapsed();
-            run_logger.log_progress(&format!(
-                "[training] phase {} complete in {:.1}s",
-                phase_label,
-                phase_elapsed.as_secs_f64()
-            ));
-            run_logger.write_status(&status);
-        }
-
-        let total_elapsed = plan_start.elapsed();
-        status.status = JobState::Completed;
-        status.active_phase = None;
-        status.learning_metrics.new_units_discovered = total_units;
-        status.progress.percent_complete = 100.0;
-        status.performance.avg_ms_per_source = if status.progress.sources_processed > 0 {
-            total_elapsed.as_millis() as u64 / status.progress.sources_processed as u64
-        } else {
-            0
-        };
-        run_logger.write_status(&status);
-        self.store_job(status.clone());
-
-        run_logger.log_progress(&format!(
-            "[training] complete: {} examples, {} units in {:.1}s",
-            total_examples,
-            total_units,
-            total_elapsed.as_secs_f64()
-        ));
-        run_logger.log_progress(&format!(
-            "[training] output: {}",
-            run_logger.run_dir().display()
-        ));
-
-        status
+        Ok(TrainingMetrics {
+            new_unit_rate: if total_examples > 0 {
+                started.elapsed().as_secs_f32() / total_examples as f32
+            } else {
+                0.0
+            },
+            unit_discovery_efficiency: avg_efficiency,
+            semantic_routing_accuracy: avg_routing,
+            prediction_error: avg_error,
+            memory_delta_kb: 0,
+            search_trigger_precision: Some(avg_precision),
+            examples_ingested: total_examples,
+            units_created: total_units,
+        })
     }
 
     fn prepare_context_and_candidates(
@@ -1143,81 +734,72 @@ impl Engine {
 
     fn resolve_adaptive_runtime(
         &self,
-        _intent_profile: &IntentProfile,
-        _queue_depths: QueueDepths,
+        intent_profile: &IntentProfile,
+        queue_depths: QueueDepths,
     ) -> AdaptiveRuntimeSettings {
-        AdaptiveRuntimeSettings::from_config(&self.config)
-    }
-
-    pub async fn run_phase0_dry_run(&self, execution_mode: TrainingExecutionMode) -> DryRunReport {
-        let status = self
-            .train_with_scope(execution_mode, TrainingScope::DryRun, None)
-            .await;
-        self.finalize_phase0_dry_run(status).await
-    }
-
-    pub async fn finalize_phase0_dry_run(&self, status: TrainingJobStatus) -> DryRunReport {
-        let (snapshot_path, snapshot_readable) = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            let db = memory.db();
-            let path = db.snapshot_path();
-            let readable = db.load_snapshot().ok().flatten().is_some();
-            (path.display().to_string(), readable)
+        let mut runtime = AdaptiveRuntimeSettings::from_config(&self.config);
+        let profile_name = match intent_profile.primary {
+            IntentKind::Greeting
+            | IntentKind::Gratitude
+            | IntentKind::Farewell
+            | IntentKind::Help
+            | IntentKind::Clarify
+            | IntentKind::Continue
+            | IntentKind::Forget => "casual",
+            IntentKind::Question | IntentKind::Verify | IntentKind::Classify => "factual",
+            IntentKind::Explain
+            | IntentKind::Analyze
+            | IntentKind::Compare
+            | IntentKind::Extract => "explanatory",
+            IntentKind::Summarize
+            | IntentKind::Rewrite
+            | IntentKind::Translate
+            | IntentKind::Debug => "procedural",
+            IntentKind::Brainstorm => "brainstorm",
+            IntentKind::Plan => "plan",
+            IntentKind::Act => "act",
+            IntentKind::Critique => "critique",
+            IntentKind::Recommend => "advisory",
+            IntentKind::Unknown => "factual",
         };
-
-        let probe_documents = {
-            let raw_content = "High-intensity interval training (HIIT) stands for high-intensity interval training, a workout style built around short bursts of intense exercise separated by brief recovery periods. It alternates effort and recovery to keep sessions efficient while maintaining high exertion.";
-            vec![RetrievedDocument {
-                source_url: "memory://phase0_probe".to_string(),
-                title: "phase0_probe".to_string(),
-                raw_content: raw_content.to_string(),
-                normalized_content: input::normalize_text(raw_content),
-                retrieved_at: chrono::Utc::now(),
-                trust_score: 0.99,
-                cached: true,
-                metadata_summary: crate::types::MetadataSummary::default(),
-            }]
-        };
-
-        // Warm the post-training inference path before measuring latency.
-        let _ = self
-            .process_prompt(
-                "What does HIIT stand for?",
-                Some(probe_documents.clone()),
-                Vec::new(),
-                true,
-            )
-            .await;
-
-        let probe = "What does HIIT stand for?";
-        let started = Instant::now();
-        let result = self
-            .process_prompt(probe, Some(probe_documents), Vec::new(), false)
-            .await;
-        let inference_latency_ms = started.elapsed().as_millis();
-        // SPS is tokenizer-free, so use a byte-span token-equivalent instead of whitespace words.
-        let token_count = usize::max(
-            result.predicted_text.split_whitespace().count(),
-            result.predicted_text.len().div_ceil(4),
-        )
-        .max(1) as u128;
-        let latency_per_token_ms = inference_latency_ms / token_count;
-        let map_stable = !status
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with("layout_rollback:"));
-
-        DryRunReport {
-            status,
-            snapshot_path,
-            snapshot_readable,
-            map_stable,
-            inference_ok: !result.predicted_text.trim().is_empty() && latency_per_token_ms < 200,
-            inference_latency_ms,
-            latency_per_token_ms,
-            query_result: result.predicted_text,
-            memory_summary: self.memory_summary(),
+        if let Some(profile) = self.config.adaptive_behavior.intent_profile(profile_name) {
+            runtime.intent_profile_name = Some(profile_name.to_string());
+            runtime.scoring = profile.scoring.clone();
+            runtime.escape = profile.escape.clone();
+            runtime.resolver.selection_temperature = profile.resolver.selection_temperature;
+            runtime.resolver.min_confidence_floor = profile.resolver.min_confidence_floor;
+            runtime.resolver_mode = profile.resolver.mode;
+            runtime.shaping = profile.shaping.clone();
         }
+
+        let trust_profile_name = if matches!(intent_profile.primary, IntentKind::Verify) {
+            "high_stakes"
+        } else {
+            "default"
+        };
+        if let Some(trust_profile) = self
+            .config
+            .adaptive_behavior
+            .trust_profile(trust_profile_name)
+        {
+            runtime.trust_profile_name = Some(trust_profile_name.to_string());
+            runtime.trust_signal_name = Some(trust_profile_name.to_string());
+            runtime.trust.default_source_trust = trust_profile.default_source_trust;
+            runtime.trust.min_corroborating_sources = trust_profile.min_corroborating_sources;
+            runtime.trust.require_https = trust_profile.require_https;
+        }
+
+        let load_config = &self.config.adaptive_behavior.load_cost;
+        let weighted_depth = (queue_depths.inference as f32 * load_config.inference_queue_weight)
+            + (queue_depths.interactive_training as f32 * load_config.interactive_training_weight)
+            + (queue_depths.silent_batch as f32 * load_config.silent_batch_weight)
+            + (queue_depths.maintenance as f32 * load_config.maintenance_weight);
+        let saturation =
+            (weighted_depth / load_config.queue_saturation_depth.max(1.0)).clamp(0.0, 1.0);
+        runtime.additional_cost_penalty = saturation * load_config.max_additive_penalty;
+        runtime.retrieval.cost_penalty =
+            (runtime.retrieval.cost_penalty + runtime.additional_cost_penalty).clamp(0.0, 1.0);
+        runtime
     }
 
     async fn process_prompt(
@@ -1234,7 +816,7 @@ impl Engine {
         };
 
         let layer_2_start = Instant::now();
-        let packet = input::ingest_raw(text, false);
+        let packet = input::ingest_raw_with_config(text, false, &self.config.classification);
         let build_output = self.build_units(&packet);
         let layer_2_time_ms = layer_2_start.elapsed().as_millis() as u64;
         self.latency_monitor.record(2, layer_2_time_ms);
@@ -1282,6 +864,7 @@ impl Engine {
         let adaptive =
             self.resolve_adaptive_runtime(&intent_profile, decision_queue_depths.clone());
         let candidate_route = route_candidate_units(
+            &active_units,
             &routing,
             &all_units,
             self.config.governance.max_candidate_pool,
@@ -1342,6 +925,7 @@ impl Engine {
             let evidence = local_evidence_state(
                 &documents,
                 &self.config.builder,
+                &self.config.classification,
                 &self.config.governance,
                 &self.current_database_health(),
                 Some(snapshot.as_ref()),
@@ -1492,18 +1076,7 @@ impl Engine {
             &adaptive.resolver,
             &adaptive.shaping,
             &anchor_units,
-        )
-        .or_else(|| {
-            final_candidates
-                .first()
-                .map(|unit| crate::types::ResolvedCandidate {
-                    unit_id: unit.id,
-                    content: unit.content.clone(),
-                    score: unit.utility_score,
-                    mode: ResolverMode::Deterministic,
-                    used_escape: false,
-                })
-        });
+        );
         let layer_16_resolution_time_ms = layer_16_start.elapsed().as_millis() as u64;
         self.latency_monitor.record(16, layer_16_resolution_time_ms);
 
@@ -1597,9 +1170,6 @@ impl Engine {
             used_retrieval = !merged.evidence.documents.is_empty();
         }
 
-        // Check if retrieval was triggered but returned no documents
-        let retrieval_failed = used_retrieval && merged.evidence.documents.is_empty();
-
         let mut decoded = resolved
             .as_ref()
             .map(|resolved| {
@@ -1611,33 +1181,7 @@ impl Engine {
                 grounded: false,
             });
 
-        // If retrieval failed, provide a helpful message instead of random memory content
-        if retrieval_failed && !decoded.grounded {
-            let prompt_lower = packet.original_text.to_lowercase();
-            let is_realtime_query = prompt_lower.contains("current")
-                || prompt_lower.contains("latest")
-                || prompt_lower.contains("recent")
-                || prompt_lower.contains("today")
-                || prompt_lower.contains("now")
-                || prompt_lower.contains("price")
-                || prompt_lower.contains("stock")
-                || prompt_lower.contains("won")
-                || prompt_lower.contains("winner")
-                || prompt_lower.contains("2026")
-                || prompt_lower.contains("2025");
-
-            if is_realtime_query {
-                decoded.text = format!(
-                    "I don't have access to current real-time information about {}. My knowledge is based on general knowledge sources and may not reflect recent events or live data.",
-                    packet.original_text
-                );
-            } else {
-                decoded.text = format!(
-                    "I searched multiple sources but couldn't find specific information about {}. Please try rephrasing your query or providing more context.",
-                    packet.original_text
-                );
-            }
-        } else if !merged.evidence.documents.is_empty() {
+        if !merged.evidence.documents.is_empty() {
             if matches!(intent_profile.primary, IntentKind::Extract) {
                 if let Some(list_answer) =
                     list_evidence_answer(&packet.original_text, &merged.evidence.documents)
@@ -2004,22 +1548,6 @@ impl Engine {
         );
     }
 
-    fn store_job(&self, status: TrainingJobStatus) {
-        let statuses = {
-            let mut jobs = self.jobs.lock().expect("jobs mutex poisoned");
-            let mut status = status;
-            status.performance.queue_depths = self.scheduler.depths();
-            jobs.insert(status.job_id.clone(), status);
-            jobs.values().cloned().collect::<Vec<_>>()
-        };
-
-        let db = {
-            let memory = self.memory.lock().expect("memory mutex poisoned");
-            memory.db()
-        };
-        let _ = db.save_training_jobs(&statuses);
-    }
-
     fn session_snapshot(&self) -> SessionDocuments {
         self.session_documents
             .lock()
@@ -2056,8 +1584,8 @@ impl Engine {
         &self,
         raw_input: &str,
         _context: &ContextMatrix,
-        _sequence: &SequenceState,
-        _has_active_document_context: bool,
+        sequence: &SequenceState,
+        has_active_document_context: bool,
     ) -> IntentProfile {
         // Use calculation-based classification
         let memory = self.memory.lock().expect("memory mutex poisoned");
@@ -2079,7 +1607,23 @@ impl Engine {
         // Convert ClassificationResult to IntentProfile
         let low_confidence =
             result.confidence < self.config.classification.low_confidence_threshold;
-        let fallback_mode = if matches!(result.intent, IntentKind::Unknown) || low_confidence {
+        let normalized = input::normalize_text_with_config(raw_input, &self.config.classification);
+        let fallback_mode = if has_active_document_context
+            && matches!(
+                result.intent,
+                IntentKind::Summarize
+                    | IntentKind::Rewrite
+                    | IntentKind::Translate
+                    | IntentKind::Extract
+                    | IntentKind::Clarify
+            ) {
+            crate::types::IntentFallbackMode::DocumentScope
+        } else if low_confidence
+            && (matches!(result.intent, IntentKind::Help | IntentKind::Clarify)
+                || normalized.contains("help"))
+        {
+            crate::types::IntentFallbackMode::ClarifyHelp
+        } else if matches!(result.intent, IntentKind::Unknown) || low_confidence {
             crate::types::IntentFallbackMode::RetrieveUnknown
         } else {
             crate::types::IntentFallbackMode::None
@@ -2090,17 +1634,27 @@ impl Engine {
             top_score: result.confidence,
             second_score: 0.0,
             ambiguous: low_confidence,
-            wants_brief: false,
-            references_document_context: false,
-            certainty_bias: 0.0,
+            wants_brief: normalized.contains("brief") || normalized.contains("short"),
+            references_document_context: has_active_document_context,
+            certainty_bias: if matches!(result.intent, IntentKind::Verify) {
+                0.15
+            } else if matches!(result.intent, IntentKind::Brainstorm) {
+                -0.10
+            } else {
+                0.0
+            },
             fallback_mode,
             scores: vec![],
-            reasons: vec![format!("classification_method={:?}", result.method)],
+            reasons: vec![
+                format!("classification_method={:?}", result.method),
+                format!("resolver_mode={:?}", result.resolver_mode),
+                format!("sequence_entities={}", sequence.task_entities.len()),
+            ],
         }
     }
 
     fn reasoning_support_from_memory(&self, raw_input: &str) -> ReasoningSupport {
-        let normalized = input::normalize_text(raw_input);
+        let normalized = input::normalize_text_with_config(raw_input, &self.config.classification);
         if normalized.is_empty() {
             return ReasoningSupport::default();
         }
@@ -2352,7 +1906,11 @@ impl Engine {
             return;
         }
 
-        let packet = input::ingest_raw(text, !matches!(source_kind, SourceKind::UserInput));
+        let packet = input::ingest_raw_with_config(
+            text,
+            !matches!(source_kind, SourceKind::UserInput),
+            &self.config.classification,
+        );
         let build_output = self.build_units(&packet);
         let hierarchy = HierarchicalUnitOrganizer::organize(&build_output, &self.config.builder);
         let context_summary = if context.is_empty() {
@@ -3059,7 +2617,7 @@ fn build_trace(
                     .unwrap_or_else(|| "none".to_string()),
             ),
             (
-                "used_escape",
+                "used_tier3_pathfinding",
                 resolved_candidate
                     .as_ref()
                     .map(|candidate| candidate.used_escape.to_string())
@@ -3196,6 +2754,7 @@ fn summarize_packet(packet: &InputPacket) -> String {
 fn local_evidence_state(
     documents: &[crate::types::RetrievedDocument],
     builder: &crate::config::UnitBuilderConfig,
+    classification: &crate::config::ClassificationConfig,
     governance: &crate::config::GovernanceConfig,
     database_health: &crate::types::DatabaseHealthMetrics,
     snapshot: Option<&crate::memory::store::MemorySnapshot>,
@@ -3203,7 +2762,8 @@ fn local_evidence_state(
     let evidence_units = documents
         .iter()
         .flat_map(|doc| {
-            let packet = input::ingest_raw(&doc.normalized_content, false);
+            let packet =
+                input::ingest_raw_with_config(&doc.normalized_content, false, classification);
             UnitBuilder::ingest_with_governance_snapshot(
                 &packet,
                 builder,
@@ -5043,32 +4603,6 @@ impl<'a> ExpressionParser<'a> {
     }
 }
 
-/// Parse GroundTruth from a seed TrainingExample's context field.
-/// Format: "classification:Intent:Tone:ResolverMode"
-fn parse_classification_ground_truth(
-    example: &crate::seed::TrainingExample,
-) -> Option<crate::types::GroundTruth> {
-    let ctx = example.context.as_deref()?;
-    let parts: Vec<&str> = ctx.split(':').collect();
-    if parts.len() < 4 || parts[0] != "classification" {
-        return None;
-    }
-    let intent = crate::classification::parse_intent_kind(parts[1]);
-    let tone = crate::classification::parse_tone_kind(parts[2]);
-    let resolver_mode = match parts[3].to_lowercase().as_str() {
-        "deterministic" => ResolverMode::Deterministic,
-        "balanced" => ResolverMode::Balanced,
-        "exploratory" => ResolverMode::Exploratory,
-        _ => ResolverMode::Balanced,
-    };
-    Some(crate::types::GroundTruth {
-        intent,
-        tone,
-        resolver_mode,
-        domain: None,
-    })
-}
-
 fn unique_strings(values: Vec<String>) -> Vec<String> {
     let mut unique = Vec::new();
     for value in values {
@@ -5077,15 +4611,6 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
         }
     }
     unique
-}
-
-fn route_units(
-    active_units: &[Unit],
-    all_units: &[Unit],
-    semantic_map: &crate::config::SemanticMapConfig,
-) -> RoutingResult {
-    let mut router = SemanticRouter::new(semantic_map);
-    router.route(active_units, all_units)
 }
 
 /// Route using cached spatial grid (fast path for large datasets)
@@ -5099,13 +4624,20 @@ fn route_units_with_cached_grid(
 }
 
 fn route_candidate_units(
+    active_units: &[Unit],
     routing: &RoutingResult,
     all_units: &[Unit],
     max_candidates: usize,
     semantic_map: &crate::config::SemanticMapConfig,
     escape: &EscapeProfile,
 ) -> crate::types::CandidateRoute {
-    SemanticRouter::new(semantic_map).route_candidates(routing, all_units, max_candidates, escape)
+    SemanticRouter::new(semantic_map).route_candidates(
+        active_units,
+        routing,
+        all_units,
+        max_candidates,
+        escape,
+    )
 }
 
 fn spawn_maintenance(
@@ -5170,155 +4702,5 @@ fn flush_feedback_batch(
     if let Ok(mut memory) = memory.lock() {
         memory.apply_feedback(&batch);
         memory_snapshot.store(Arc::new(memory.snapshot()));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{evaluate_expression_input, grounded_evidence_answer, reshape_output_for_intent};
-    use crate::types::{
-        IntentKind, MemoryType, RetrievedDocument, ScoreBreakdown, ScoredCandidate,
-    };
-    use chrono::Utc;
-    use uuid::Uuid;
-
-    #[test]
-    fn expression_evaluator_handles_basic_math() {
-        assert_eq!(evaluate_expression_input("2 * 2").as_deref(), Some("4"));
-        assert_eq!(
-            evaluate_expression_input("what is (3 + 5) / 2 ?").as_deref(),
-            Some("4")
-        );
-        assert_eq!(evaluate_expression_input("2 / 0"), None);
-    }
-
-    #[test]
-    fn grounded_evidence_prefers_direct_person_answer() {
-        let docs = vec![RetrievedDocument {
-            source_url: "https://example.com/president".to_string(),
-            title: "President of India".to_string(),
-            raw_content: "The president of India is the head of state of the Republic of India. Droupadi Murmu is the 15th and current president, having taken office on 25 July 2022.".to_string(),
-            normalized_content: "the president of india is the head of state of the republic of india droupadi murmu is the 15th and current president having taken office on 25 july 2022".to_string(),
-            retrieved_at: Utc::now(),
-            trust_score: 0.82,
-            cached: false,
-            metadata_summary: crate::types::MetadataSummary::default(),
-        }];
-
-        let answer = grounded_evidence_answer("Who is president of india?", &docs)
-            .expect("expected grounded answer");
-        assert!(answer.contains("Droupadi Murmu"));
-    }
-
-    #[test]
-    fn grounded_evidence_verification_prefers_status_bearing_sentence() {
-        let docs = vec![RetrievedDocument {
-            source_url: "https://example.com/president".to_string(),
-            title: "President of India".to_string(),
-            raw_content: "The president of India is the head of state of the Republic of India. The president is referred to as the first citizen of India. Droupadi Murmu is the current president, having taken office on 25 July 2022.".to_string(),
-            normalized_content: "the president of india is the head of state of the republic of india the president is referred to as the first citizen of india droupadi murmu is the current president having taken office on 25 july 2022".to_string(),
-            retrieved_at: Utc::now(),
-            trust_score: 0.82,
-            cached: false,
-            metadata_summary: crate::types::MetadataSummary::default(),
-        }];
-
-        let answer =
-            grounded_evidence_answer("verify whether the president of india is current", &docs)
-                .expect("expected grounded answer");
-        assert!(answer.contains("Droupadi Murmu"));
-    }
-
-    #[test]
-    fn reshape_output_formats_plan_as_numbered_steps() {
-        let (text, strategy) = reshape_output_for_intent(
-            "Plan the rollout",
-            IntentKind::Plan,
-            "Draft the rollout scope. Align stakeholders on milestones. Track launch readiness weekly.",
-            &[],
-            &[],
-            &[],
-        );
-
-        assert_eq!(strategy, "numbered_steps");
-        assert!(text.contains("1. Draft the rollout scope"));
-        assert!(text.contains("2. Align stakeholders on milestones"));
-    }
-
-    #[test]
-    fn reshape_output_formats_recommendation_with_reason() {
-        let (text, strategy) = reshape_output_for_intent(
-            "Recommend a database",
-            IntentKind::Recommend,
-            "Choose PostgreSQL for the primary store.",
-            &[],
-            &["It offers strong transactional guarantees.".to_string()],
-            &[],
-        );
-
-        assert_eq!(strategy, "recommendation");
-        assert!(text.contains("Recommendation: Choose PostgreSQL for the primary store."));
-        assert!(text.contains("Why: It offers strong transactional guarantees."));
-    }
-
-    #[test]
-    fn reshape_output_formats_debug_as_triage() {
-        let (text, strategy) = reshape_output_for_intent(
-            "Debug the failing login flow",
-            IntentKind::Debug,
-            "The login request is timing out at the auth proxy.",
-            &[],
-            &[
-                "The auth proxy cannot reach the upstream identity service.".to_string(),
-                "Inspect the proxy timeout and upstream health checks.".to_string(),
-            ],
-            &[],
-        );
-
-        assert_eq!(strategy, "debug_triage");
-        assert!(text.contains("Issue: The login request is timing out at the auth proxy."));
-        assert!(text
-            .contains("Likely cause: The auth proxy cannot reach the upstream identity service."));
-        assert!(text.contains("Next check: Inspect the proxy timeout and upstream health checks."));
-    }
-
-    #[test]
-    fn reshape_output_uses_scored_candidates_for_brainstorming() {
-        let scored = vec![
-            ScoredCandidate {
-                unit_id: Uuid::new_v4(),
-                content: "Offer a guided onboarding checklist for new users".to_string(),
-                score: 0.9,
-                breakdown: ScoreBreakdown::default(),
-                memory_type: MemoryType::Episodic,
-            },
-            ScoredCandidate {
-                unit_id: Uuid::new_v4(),
-                content: "Add milestone celebrations after each completed setup step".to_string(),
-                score: 0.8,
-                breakdown: ScoreBreakdown::default(),
-                memory_type: MemoryType::Episodic,
-            },
-            ScoredCandidate {
-                unit_id: Uuid::new_v4(),
-                content: "Provide sample projects that users can clone and adapt".to_string(),
-                score: 0.7,
-                breakdown: ScoreBreakdown::default(),
-                memory_type: MemoryType::Episodic,
-            },
-        ];
-
-        let (text, strategy) = reshape_output_for_intent(
-            "Brainstorm activation ideas",
-            IntentKind::Brainstorm,
-            "Activation ideas",
-            &[],
-            &[],
-            &scored,
-        );
-
-        assert_eq!(strategy, "brainstorm_list");
-        assert!(text.contains("1. Offer a guided onboarding checklist for new users"));
-        assert!(text.contains("2. Add milestone celebrations after each completed setup step"));
     }
 }

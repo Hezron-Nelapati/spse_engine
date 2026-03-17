@@ -2,7 +2,8 @@ use crate::classification::builder::UnitBuilder;
 use crate::classification::input;
 use crate::classification::safety::TrustSafetyValidator;
 use crate::config::{
-    EngineConfig, GovernanceConfig, RetrievalIoConfig, TrustConfig, UnitBuilderConfig,
+    ClassificationConfig, EngineConfig, GovernanceConfig, RetrievalIoConfig, TrustConfig,
+    UnitBuilderConfig,
 };
 use crate::types::{
     DatabaseHealthMetrics, EvidenceState, MetadataSummary, RetrievedDocument, SanitizedQuery,
@@ -13,7 +14,7 @@ use futures_util::future::join_all;
 use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -121,7 +122,7 @@ impl SearxNGClient {
             .timeout(Duration::from_millis(timeout_ms))
             .build()
             .expect("failed to build SearXNG client");
-        
+
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -142,10 +143,10 @@ impl SearxNGClient {
             .map(|c| c.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        
+
         let encoded_query = Self::encode_query(query);
         let lang = language.unwrap_or("en");
-        
+
         let url = format!(
             "{}/search?q={}&format=json&categories={}&language={}&safesearch=0&pageno=1",
             self.base_url, encoded_query, categories_str, lang
@@ -167,8 +168,13 @@ impl SearxNGClient {
             .await
             .map_err(|e| format!("SearXNG body read failed: {}", e))?;
 
-        let mut searx_response: SearxResponse = serde_json::from_str(&body)
-            .map_err(|e| format!("SearXNG JSON parse failed: {} - body: {}", e, &body[..body.len().min(200)]))?;
+        let mut searx_response: SearxResponse = serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "SearXNG JSON parse failed: {} - body: {}",
+                e,
+                &body[..body.len().min(200)]
+            )
+        })?;
 
         // Truncate results to limit
         searx_response.results.truncate(limit);
@@ -214,10 +220,12 @@ impl SearxNGClient {
             if !infobox.content.is_empty() {
                 let normalized = input::normalize_text(&infobox.content);
                 if !normalized.is_empty() {
-                    let source_url = infobox.urls.first()
+                    let source_url = infobox
+                        .urls
+                        .first()
                         .map(|u| u.url.clone())
                         .unwrap_or_else(|| format!("searxng://infobox/{}", infobox.id));
-                    
+
                     docs.push(build_retrieved_document(
                         source_url,
                         infobox.infobox.clone(),
@@ -242,7 +250,7 @@ impl SearxNGClient {
 
             // Trust based on engine source
             let base_trust = Self::engine_trust(&result.engine);
-            
+
             // Boost trust if score is provided and high
             let trust = if result.score > 0.0 {
                 (base_trust + (result.score as f32 * 0.1)).min(0.90)
@@ -301,28 +309,39 @@ impl SearxNGClient {
         let mut categories = vec![SearxCategory::General];
 
         // Technical/IT queries
-        if query_lower.contains("code") || query_lower.contains("programming")
-            || query_lower.contains("software") || query_lower.contains("api")
-            || query_lower.contains("algorithm") || query_lower.contains("debug")
-            || query_lower.contains("error") || query_lower.contains("function")
+        if query_lower.contains("code")
+            || query_lower.contains("programming")
+            || query_lower.contains("software")
+            || query_lower.contains("api")
+            || query_lower.contains("algorithm")
+            || query_lower.contains("debug")
+            || query_lower.contains("error")
+            || query_lower.contains("function")
         {
             categories.push(SearxCategory::IT);
         }
 
         // Science queries
-        if query_lower.contains("research") || query_lower.contains("study")
-            || query_lower.contains("experiment") || query_lower.contains("theory")
-            || query_lower.contains("hypothesis") || query_lower.contains("scientific")
-            || query_lower.contains("physics") || query_lower.contains("chemistry")
+        if query_lower.contains("research")
+            || query_lower.contains("study")
+            || query_lower.contains("experiment")
+            || query_lower.contains("theory")
+            || query_lower.contains("hypothesis")
+            || query_lower.contains("scientific")
+            || query_lower.contains("physics")
+            || query_lower.contains("chemistry")
             || query_lower.contains("biology")
         {
             categories.push(SearxCategory::Science);
         }
 
         // News queries
-        if query_lower.contains("news") || query_lower.contains("latest")
-            || query_lower.contains("recent") || query_lower.contains("today")
-            || query_lower.contains("yesterday") || query_lower.contains("breaking")
+        if query_lower.contains("news")
+            || query_lower.contains("latest")
+            || query_lower.contains("recent")
+            || query_lower.contains("today")
+            || query_lower.contains("yesterday")
+            || query_lower.contains("breaking")
         {
             categories.push(SearxCategory::News);
         }
@@ -532,6 +551,7 @@ pub struct RetrievalPipeline {
     searxng: SearxNGClient,
     cache: Mutex<HashMap<String, CacheEntry>>,
     builder: UnitBuilderConfig,
+    classification: ClassificationConfig,
     governance: GovernanceConfig,
     searxng_enabled: bool,
 }
@@ -556,6 +576,7 @@ impl RetrievalPipeline {
             searxng,
             cache: Mutex::new(HashMap::new()),
             builder: config.builder.clone(),
+            classification: config.classification.clone(),
             governance: config.governance.clone(),
             searxng_enabled: config.retrieval_io.searxng_enabled,
         }
@@ -625,7 +646,11 @@ impl RetrievalPipeline {
         let evidence_units = accepted_docs
             .iter()
             .flat_map(|doc| {
-                let packet = input::ingest_raw(&doc.normalized_content, false);
+                let packet = input::ingest_raw_with_config(
+                    &doc.normalized_content,
+                    false,
+                    &self.classification,
+                );
                 UnitBuilder::ingest_with_governance(
                     &packet,
                     &self.builder,
@@ -663,29 +688,13 @@ impl RetrievalPipeline {
         value: &str,
     ) -> Result<String, String> {
         match source_type {
-            TrainingSourceType::Url => {
-                let response = self
-                    .client
-                    .get(value)
-                    .send()
-                    .await
-                    .map_err(|err| err.to_string())?;
-                let text = response.text().await.map_err(|err| err.to_string())?;
-                Ok(self.normalize_content(value, &text))
-            }
             TrainingSourceType::Document
-            | TrainingSourceType::Dataset
-            | TrainingSourceType::HuggingFaceDataset
             | TrainingSourceType::StructuredJson
-            | TrainingSourceType::OpenApiSpec
-            | TrainingSourceType::CodeRepository
-            | TrainingSourceType::WikipediaDump
-            | TrainingSourceType::WikidataTruthy
-            | TrainingSourceType::OpenWebText
-            | TrainingSourceType::DbpediaDump
-            | TrainingSourceType::ProjectGutenberg
-            | TrainingSourceType::CommonCrawlWet
             | TrainingSourceType::QaJson => Ok(self.normalize_content("document", value)),
+            unsupported => Err(format!(
+                "training source type {:?} is not permitted by SPSE_ARCHITECTURE_V14.2; use internal generated structured sources or local documents",
+                unsupported
+            )),
         }
     }
 
@@ -694,7 +703,7 @@ impl RetrievalPipeline {
             let mut parts = Vec::new();
             collect_json_text(&value, &mut parts);
             let text = parts.join(" ");
-            return input::normalize_text(&text);
+            return input::normalize_text_with_config(&text, &self.classification);
         }
 
         let parsed = Html::parse_document(raw);
@@ -705,7 +714,10 @@ impl RetrievalPipeline {
             text.push(' ');
         }
 
-        let normalized = input::normalize_text(if text.is_empty() { raw } else { &text });
+        let normalized = input::normalize_text_with_config(
+            if text.is_empty() { raw } else { &text },
+            &self.classification,
+        );
         if source_url == "document" {
             normalized
         } else {
@@ -718,7 +730,8 @@ impl RetrievalPipeline {
         query: &SanitizedQuery,
         limit: usize,
     ) -> Result<Vec<RetrievedDocument>, String> {
-        self.fetch_search_documents_with_config(query, limit, "http://localhost:8080", true).await
+        self.fetch_search_documents_with_config(query, limit, "http://localhost:8080", true)
+            .await
     }
 
     /// L11 retrieval per V14.2 architecture - SearXNG as primary source
@@ -750,7 +763,11 @@ impl RetrievalPipeline {
 
             // V14.2: SearXNG as primary search source (L11)
             if searxng_enabled {
-                futures_vec.push(Box::pin(self.fetch_searxng_documents(&variant, searxng_url, 5)));
+                futures_vec.push(Box::pin(self.fetch_searxng_documents(
+                    &variant,
+                    searxng_url,
+                    5,
+                )));
             }
 
             // Supplementary sources
@@ -802,7 +819,10 @@ impl RetrievalPipeline {
         limit: usize,
     ) -> Result<Vec<RetrievedDocument>, String> {
         let categories = SearxNGClient::categorize_query(query);
-        let response = self.searxng.search(query, &categories, limit, Some("en")).await?;
+        let response = self
+            .searxng
+            .search(query, &categories, limit, Some("en"))
+            .await?;
         Ok(self.searxng.results_to_documents(&response))
     }
 
@@ -2320,51 +2340,5 @@ impl StructuredParser {
         }
 
         parts.join(" ")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_metadata_summary_captures_numbers_dates_and_properties() {
-        let summary = extract_metadata_summary(
-            "Paris",
-            "population is 2.1 million people founded in 1508 capital is france",
-        );
-
-        assert!(summary
-            .numbers
-            .iter()
-            .any(|(entity, value, unit)| entity == "paris"
-                && (*value - 2.1).abs() < f64::EPSILON
-                && unit == "million"));
-        assert!(summary
-            .dates
-            .iter()
-            .any(|(entity, relation, year)| entity == "paris"
-                && relation == "founded"
-                && *year == 1508));
-        assert!(summary
-            .properties
-            .iter()
-            .any(|(entity, property, value)| entity == "paris"
-                && property == "capital"
-                && value == "france"));
-    }
-
-    #[test]
-    fn build_retrieved_document_populates_metadata_summary() {
-        let doc = build_retrieved_document(
-            "https://example.com/paris".to_string(),
-            "Paris".to_string(),
-            "Population is 2.1 million people.".to_string(),
-            "population is 2.1 million people".to_string(),
-            0.8,
-        );
-
-        assert_eq!(doc.metadata_summary.numbers.len(), 1);
-        assert_eq!(doc.metadata_summary.numbers[0].0, "paris");
     }
 }

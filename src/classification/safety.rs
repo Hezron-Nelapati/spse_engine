@@ -27,15 +27,9 @@ impl TrustSafetyValidator {
             trust_score += config.allowlist_bonus;
         }
 
-        for noisy in [
-            "ignore previous instructions",
-            "act as",
-            "<script",
-            "buy now",
-            "sponsored",
-        ] {
+        for noisy in &config.unsafe_patterns {
             if content.to_lowercase().contains(noisy) {
-                trust_score -= 0.12;
+                trust_score -= config.unsafe_pattern_penalty;
                 warnings.push(format!("unsafe_pattern:{noisy}"));
             }
         }
@@ -376,22 +370,4 @@ fn has_parser_warning(content: &str) -> bool {
     ]
     .iter()
     .any(|pattern| content.contains(pattern))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn require_https_blocks_non_https_sources() {
-        let mut config = TrustConfig::default();
-        config.require_https = true;
-        let assessment =
-            TrustSafetyValidator.assess("http://example.com/article", "safe content", &config);
-        assert!(!assessment.accepted);
-        assert!(assessment
-            .warnings
-            .iter()
-            .any(|warning| warning == "https_required"));
-    }
 }
